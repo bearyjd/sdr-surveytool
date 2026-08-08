@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import threading
 from collections import Counter
 
 from sqlalchemy.orm import sessionmaker
@@ -10,11 +12,30 @@ from ingest.queue_server import QueueServer
 from schema.records import UnifiedRecord
 from storage.repository import save_record
 
+logger = logging.getLogger(__name__)
+
+# NMEA GGA convention: fix quality 0 means "no fix" (invalid); 1+ means a real fix.
+_NO_FIX_QUALITY = 0
+
+# Capture-module placeholder for "I have no GPS of my own" (see capture/wifi and
+# capture/bluetooth normalizers, which emit this when no local fix is available).
+_PLACEHOLDER_LAT = 0.0
+_PLACEHOLDER_LON = 0.0
+
 
 class IngestService:
     """Consumes validated records from a QueueServer, attaches the nearest
-    GPS fix when the record didn't already carry one, tracks per-grid-cell
-    sample density, and persists via storage.repository.save_record."""
+    GPS fix when the record didn't already carry a usable one, tracks
+    per-grid-cell sample density, and persists via
+    storage.repository.save_record.
+
+    Thread-safety: process_one() itself may be called from any single
+    thread, but internal grid-density bookkeeping (_grid_counts) is
+    protected by a lock so that concurrent callers do not corrupt counts.
+    Persistence and GPS-provider calls are NOT synchronized beyond that;
+    callers wanting genuinely parallel ingestion should use one
+    IngestService per worker or add additional coordination.
+    """
 
     def __init__(
         self,
@@ -26,17 +47,80 @@ class IngestService:
         self._session_factory = session_factory
         self._gps_provider = gps_provider
         self._grid_counts: Counter[str] = Counter()
+        self._grid_lock = threading.Lock()
 
-    def process_one(self, timeout: float | None = None) -> UnifiedRecord:
+    def process_one(self, timeout: float = 1.0) -> UnifiedRecord:
+        """Pull one record off the queue, enrich it, and persist it.
+
+        Raises queue.Empty if no record arrives within `timeout` seconds.
+        This is a normal idle tick, not an error -- callers running a
+        polling loop should treat it that way, e.g.:
+
+            while running:
+                try:
+                    service.process_one(timeout=1.0)
+                except queue.Empty:
+                    continue
+
+        `timeout` defaults to a finite value (rather than None) because
+        QueueServer.get()'s contract requires a timeout for callers to be
+        able to unblock promptly when the server is stopped; a caller that
+        never passes a timeout and relies on the default must still be able
+        to wake up periodically to observe a shutdown signal.
+        """
         record = self._queue_server.get(timeout=timeout)
         record = self._attach_gps_if_missing(record)
-        record = self._attach_grid_density(record)
-        with self._session_factory() as session:
-            save_record(session, record)
+        record, grid_key = self._attach_grid_density(record)
+        try:
+            with self._session_factory() as session:
+                save_record(session, record)
+        except Exception:
+            # Persistence failed: the record was never stored, so the grid
+            # count we optimistically bumped must be rolled back to stay
+            # consistent with what's actually in the DB. Log loudly instead
+            # of dropping the record silently.
+            with self._grid_lock:
+                self._grid_counts[grid_key] -= 1
+            logger.error(
+                "Failed to persist record for grid cell %s; record dropped "
+                "and grid count reverted",
+                grid_key,
+                exc_info=True,
+            )
+            raise
         return record
 
+    def _has_usable_fix(self, record: UnifiedRecord) -> bool:
+        """True if the record already reports a real GPS fix.
+
+        Quality 0 (NMEA GGA "no fix") and None (no quality reported) both
+        count as "not usable" -- either way the record still needs
+        enrichment from this service's own GPS provider.
+        """
+        return (
+            record.gps_fix_quality is not None
+            and record.gps_fix_quality > _NO_FIX_QUALITY
+        )
+
+    def _has_placeholder_coords(self, record: UnifiedRecord) -> bool:
+        return record.lat == _PLACEHOLDER_LAT and record.lon == _PLACEHOLDER_LON
+
     def _attach_gps_if_missing(self, record: UnifiedRecord) -> UnifiedRecord:
-        if record.gps_fix_quality is not None:
+        if self._has_usable_fix(record):
+            return record
+        if not self._has_placeholder_coords(record):
+            # The record has no usable fix quality but already carries
+            # real-looking coordinates from its capture source. Overwriting
+            # them with this host's own GPS fix would silently discard a
+            # genuine position, so leave it alone and just warn.
+            logger.warning(
+                "Record has non-placeholder coordinates (lat=%s, lon=%s) but "
+                "no usable GPS fix quality (%s); leaving coordinates as-is "
+                "instead of overwriting with the ingest host's own fix",
+                record.lat,
+                record.lon,
+                record.gps_fix_quality,
+            )
             return record
         fix = self._gps_provider.current_fix()
         if fix is None:
@@ -50,10 +134,12 @@ class IngestService:
             }
         )
 
-    def _attach_grid_density(self, record: UnifiedRecord) -> UnifiedRecord:
+    def _attach_grid_density(self, record: UnifiedRecord) -> tuple[UnifiedRecord, str]:
         key = grid_cell_key(record.lat, record.lon)
-        self._grid_counts[key] += 1
+        with self._grid_lock:
+            self._grid_counts[key] += 1
+            count = self._grid_counts[key]
         updated_metadata = record.metadata.model_copy(
-            update={"sample_count_in_grid_cell": self._grid_counts[key]}
+            update={"sample_count_in_grid_cell": count}
         )
-        return record.model_copy(update={"metadata": updated_metadata})
+        return record.model_copy(update={"metadata": updated_metadata}), key
