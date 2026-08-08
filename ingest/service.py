@@ -43,7 +43,7 @@ class IngestService:
     def __init__(
         self,
         queue_server: QueueServer,
-        session_factory: sessionmaker,
+        session_factory: sessionmaker | None,
         gps_provider: GpsFixProvider,
     ) -> None:
         self._queue_server = queue_server
@@ -68,10 +68,16 @@ class IngestService:
         if session_factory is None:
             return Counter()
         with session_factory() as session:
+            # yield_per streams rows instead of materializing the whole
+            # result set at once, so a multi-day survey's restart doesn't
+            # spike memory pulling every persisted row before ingest can
+            # accept its first record. Doesn't address unbounded Counter
+            # growth (see KNOWN LIMITATION above) -- that's a separate,
+            # deliberately deferred concern.
             rows = session.execute(
                 select(SurveyRecord.lat, SurveyRecord.lon)
-            ).all()
-        return Counter(grid_cell_key(lat, lon) for lat, lon in rows)
+            ).yield_per(5000)
+            return Counter(grid_cell_key(lat, lon) for lat, lon in rows)
 
     def process_one(self, timeout: float = 1.0) -> UnifiedRecord:
         """Pull one record off the queue, enrich it, and persist it.

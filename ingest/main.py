@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 import queue
+import time
 
 from ingest.gps_fix import GpsFix, StaticGpsFixProvider
 from ingest.queue_server import QueueServer
@@ -39,8 +40,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gps-lat", type=float, default=0.0)
     parser.add_argument("--gps-lon", type=float, default=0.0)
     parser.add_argument("--gps-altitude", type=float, default=None)
-    parser.add_argument("--gps-fix-quality", type=int, default=1)
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--gps-fix-quality",
+        type=int,
+        default=None,
+        help="NMEA fix quality to stamp on every record. Required -- no real "
+        "GPS provider exists yet, so there is no safe default. A default of "
+        "1 (a valid fix) would silently mark every record as having a real "
+        "GPS fix at whatever --gps-lat/--gps-lon happen to be, which is "
+        "indistinguishable from genuine data once persisted. Pass 0 "
+        "explicitly to mark records as fix-less rather than fabricating one.",
+    )
+    args = parser.parse_args(argv)
+    if args.gps_fix_quality is None:
+        parser.error(
+            "--gps-fix-quality is required until a real GPS provider exists "
+            "(pass 0 to explicitly mark records as fix-less, not a real fix)"
+        )
+    return args
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -74,8 +91,12 @@ def main(argv: list[str] | None = None) -> None:
                 continue
             except Exception:
                 # A single bad record (e.g. a transient DB failure) must not
-                # take down a survey that may be hours into the field.
+                # take down a survey that may be hours into the field. The
+                # bounded sleep keeps a persistent failure (e.g. the DB is
+                # down) from becoming a tight retry loop that floods the log
+                # with tracebacks; it doesn't touch the queue.Empty happy path.
                 logger.exception("Failed to process record; continuing")
+                time.sleep(min(args.poll_timeout, 1.0))
     except KeyboardInterrupt:
         logger.info("Shutting down ingest")
     finally:
