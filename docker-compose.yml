@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: surveytool
+      POSTGRES_PASSWORD: surveytool
+      POSTGRES_DB: surveytool
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
