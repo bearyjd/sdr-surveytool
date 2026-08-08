@@ -55,6 +55,21 @@ def test_list_records_returns_seeded_record():
     assert body[0]["identifier"]["bssid"] == "AA:BB:CC:DD:EE:FF"
 
 
+def test_list_records_rejects_out_of_range_limit():
+    """An unbounded limit let a caller materialize the whole table, and a
+    negative one became `LIMIT -1` (unbounded) on SQLite. Query(ge=1, le=5000)
+    makes FastAPI reject both with 422 before the query is built."""
+    engine = _make_memory_engine()
+    init_db(engine)
+    session_factory = make_session_factory(engine)
+    client = TestClient(create_app(session_factory))
+
+    assert client.get("/api/records", params={"limit": 999999999}).status_code == 422
+    assert client.get("/api/records", params={"limit": -1}).status_code == 422
+    assert client.get("/api/records", params={"limit": 0}).status_code == 422
+    assert client.get("/api/records", params={"limit": 5000}).status_code == 200
+
+
 def test_list_records_filters_by_modality():
     engine = _make_memory_engine()
     init_db(engine)

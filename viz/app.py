@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
@@ -37,7 +37,13 @@ def create_app(session_factory: sessionmaker) -> FastAPI:
     app = FastAPI()
 
     @app.get("/api/records")
-    def list_records(modality: str | None = None, limit: int = 500) -> list[dict]:
+    def list_records(
+        modality: str | None = None,
+        # Bounded so a caller can neither materialize the whole table
+        # (?limit=999999999) nor pass a negative value, which SQLite treats as
+        # "no limit" at all. Out-of-range values are rejected by FastAPI with 422.
+        limit: int = Query(500, ge=1, le=5000),
+    ) -> list[dict]:
         with session_factory() as session:
             stmt = select(SurveyRecord).order_by(SurveyRecord.id.desc()).limit(limit)
             if modality:
