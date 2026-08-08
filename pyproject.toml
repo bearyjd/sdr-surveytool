@@ -11,6 +11,11 @@ dependencies = [
     "uvicorn>=0.29",
 ]
 
+[project.scripts]
+sdr-ingest = "ingest.main:main"
+sdr-capture-wifi = "capture.wifi.service:main"
+sdr-capture-bluetooth = "capture.bluetooth.service:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
