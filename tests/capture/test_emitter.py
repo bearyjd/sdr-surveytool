@@ -16,16 +16,20 @@ def test_emit_sends_record_as_ndjson_line(tmp_path):
     received = {}
 
     def accept_one():
-        conn, _ = server.accept()
-        data = b""
-        while not data.endswith(b"\n"):
-            chunk = conn.recv(4096)
-            if not chunk:
-                assert data.endswith(b"\n"), "Connection closed before newline received"
-                break
-            data += chunk
-        received["line"] = data.decode("utf-8")
-        conn.close()
+        try:
+            conn, _ = server.accept()
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = conn.recv(4096)
+                if not chunk:
+                    received["error"] = "Connection closed before newline received"
+                    break
+                data += chunk
+            if "error" not in received:
+                received["line"] = data.decode("utf-8")
+            conn.close()
+        except Exception as e:
+            received["error"] = str(e)
 
     thread = threading.Thread(target=accept_one, daemon=True)
     thread.start()
@@ -47,6 +51,9 @@ def test_emit_sends_record_as_ndjson_line(tmp_path):
     thread.join(timeout=2)
     server.close()
 
+    # Assert on results in main thread for proper test failure reporting
+    assert "error" not in received, f"Helper thread error: {received.get('error')}"
+    assert "line" in received, "No line received from socket"
     assert received["line"].endswith("\n")
     parsed = json.loads(received["line"])
     assert parsed["identifier"]["bssid"] == "AA:BB:CC:DD:EE:FF"

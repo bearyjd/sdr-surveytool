@@ -5,7 +5,7 @@ import os
 import socket
 import stat
 import threading
-from queue import Queue
+from queue import Queue, Full
 
 from pydantic import ValidationError
 
@@ -36,14 +36,9 @@ class QueueServer:
         self._handler_lock = threading.Lock()
         self._started = False
 
-    def start(self) -> None:
-        """Start the queue server. Raises RuntimeError if already started."""
-        if self._started:
-            raise RuntimeError("QueueServer.start() called while already started")
-        self._started = True
-        self._stop.clear()
-
-        # Validate and remove any existing socket file
+    def _remove_if_socket(self) -> None:
+        """Remove socket file only if it exists and is actually a socket.
+        Raises RuntimeError if path exists but is not a socket."""
         if os.path.exists(self._socket_path):
             try:
                 file_stat = os.stat(self._socket_path)
@@ -56,13 +51,33 @@ class QueueServer:
             except FileNotFoundError:
                 pass
 
-        self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._server_sock.bind(self._socket_path)
-        # Restrict permissions to owner only (0o600)
-        os.chmod(self._socket_path, 0o600)
-        self._server_sock.listen(8)
-        self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
-        self._accept_thread.start()
+    def start(self) -> None:
+        """Start the queue server. Raises RuntimeError if already started."""
+        if self._started:
+            raise RuntimeError("QueueServer.start() called while already started")
+        self._stop.clear()
+
+        try:
+            # Validate and remove any existing socket file
+            self._remove_if_socket()
+
+            self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._server_sock.bind(self._socket_path)
+            # Restrict permissions to owner only (0o600)
+            os.chmod(self._socket_path, 0o600)
+            self._server_sock.listen(8)
+            self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
+            self._accept_thread.start()
+
+            # Only set _started to True after everything succeeded
+            self._started = True
+        except Exception:
+            # If startup failed, reset state before re-raising
+            self._started = False
+            if self._server_sock is not None:
+                self._server_sock.close()
+                self._server_sock = None
+            raise
 
     def _accept_loop(self) -> None:
         assert self._server_sock is not None
@@ -110,7 +125,21 @@ class QueueServer:
                 f"Dropped malformed record: {line[:100].decode('utf-8', errors='replace')}"
             )
             return
-        self._queue.put(record)
+
+        # Put record with timeout to prevent indefinite blocking if queue fills.
+        # On sustained overflow, drop and log instead of hanging the handler thread.
+        while True:
+            try:
+                self._queue.put(record, timeout=0.5)
+                break
+            except Full:
+                if self._stop.is_set():
+                    logger.warning("Queue full and stop requested; dropping record")
+                    break
+                logger.warning(
+                    f"Queue full (size={self._queue.qsize()}); dropping oldest-type records"
+                )
+                # Continue retry loop
 
     def get(self, timeout: float | None = None) -> UnifiedRecord:
         """Get the next record from the queue.
@@ -137,18 +166,20 @@ class QueueServer:
         if self._accept_thread is not None:
             self._accept_thread.join(timeout=2.0)
 
-        # Join all handler threads with timeout
+        # Join all handler threads with timeout, only remove successfully joined ones.
+        # This prevents orphaned threads from being forgotten and re-activated on restart.
         with self._handler_lock:
+            still_alive = []
             for thread in self._handler_threads:
                 thread.join(timeout=0.5)
-            self._handler_threads.clear()
+                if thread.is_alive():
+                    still_alive.append(thread)
+            # Only clear the ones we successfully joined
+            self._handler_threads = still_alive
 
-        # Clean up socket file
-        if os.path.exists(self._socket_path):
-            try:
-                os.remove(self._socket_path)
-            except OSError:
-                pass
+        # Clean up socket file only if this instance actually bound it
+        if self._server_sock is not None:
+            self._remove_if_socket()
 
         # Reset state to allow restart
         self._started = False
