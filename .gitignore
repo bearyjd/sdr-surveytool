@@ -22,3 +22,6 @@ data/
 
 # OMC session/tool state (ephemeral, not project source)
 .omc/
+
+# Subagent-driven-development scratch workspace (ledgers, briefs, review packages)
+.superpowers/
