@@ -29,6 +29,17 @@ packages = [
     "viz",
 ]
 
+[tool.pytest.ini_options]
+# importlib mode avoids sys.path/module-name collisions between the
+# test tree's package-per-modality layout (tests/capture/wifi,
+# tests/capture/bluetooth, ...) and the identically-named source
+# packages (capture.wifi, capture.bluetooth, ...) that are already
+# importable via the editable install. Without it, pytest's default
+# "prepend" mode either merges tests/capture with the real top-level
+# capture package (masking normalizer.py) or collides same-named
+# test_normalizer.py files across modality subdirectories.
+addopts = "--import-mode=importlib"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
