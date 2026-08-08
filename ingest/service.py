@@ -17,10 +17,9 @@ logger = logging.getLogger(__name__)
 # NMEA GGA convention: fix quality 0 means "no fix" (invalid); 1+ means a real fix.
 _NO_FIX_QUALITY = 0
 
-# TODO: Placeholder convention for "no GPS of my own" -- ASSUMED as (0.0, 0.0)
-# pending Tasks 6/7's actual capture-module normalizers (capture/wifi and
-# capture/bluetooth normalizer.py do not exist yet in this worktree). Reconcile
-# this constant with their real convention once those land.
+# Placeholder convention for "no GPS of my own" records: (lat=0.0, lon=0.0, gps_fix_quality=None).
+# Confirmed by Task 6's WiFi normalizer (capture/wifi/normalizer.py) and
+# Task 7's Bluetooth normalizer (capture/bluetooth/normalizer.py).
 _PLACEHOLDER_LAT = 0.0
 _PLACEHOLDER_LON = 0.0
 
