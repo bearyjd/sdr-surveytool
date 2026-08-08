@@ -1,0 +1,219 @@
+{
+  "updatedAt": "2026-08-08T13:13:18.640Z",
+  "missions": [
+    {
+      "id": "session:375d5ffb-e361-4b2a-a5b4-9e6b619907c7:none",
+      "source": "session",
+      "name": "none",
+      "objective": "Session mission",
+      "createdAt": "2026-08-08T12:15:56.719Z",
+      "updatedAt": "2026-08-08T13:13:18.640Z",
+      "status": "done",
+      "workerCount": 4,
+      "taskCounts": {
+        "total": 4,
+        "pending": 0,
+        "blocked": 0,
+        "inProgress": 0,
+        "completed": 4,
+        "failed": 0
+      },
+      "agents": [
+        {
+          "name": "cellular-research:acellul",
+          "role": "cellular-research",
+          "ownership": "acellular-research-8558734f922b6f18",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-08-08T13:13:18.640Z"
+        },
+        {
+          "name": "wifi-bt-research:awifi-b",
+          "role": "wifi-bt-research",
+          "ownership": "awifi-bt-research-28bfe4484e752d73",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-08-08T12:25:53.866Z"
+        },
+        {
+          "name": "general-purpose:a61e0b3",
+          "role": "general-purpose",
+          "ownership": "a61e0b3c1821a2cf6",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-08-08T12:29:20.415Z"
+        },
+        {
+          "name": "general-purpose:a7f5675",
+          "role": "general-purpose",
+          "ownership": "a7f5675b7da9ba06f",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-08-08T12:28:09.209Z"
+        }
+      ],
+      "timeline": [
+        {
+          "id": "session-stop:acellular-research-8558734f922b6f18:2026-08-08T12:25:56.866Z",
+          "at": "2026-08-08T12:25:56.866Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:acellular-research-8558734f922b6f18"
+        },
+        {
+          "id": "session-start:a61e0b3c1821a2cf6:2026-08-08T12:26:17.381Z",
+          "at": "2026-08-08T12:26:17.381Z",
+          "kind": "update",
+          "agent": "general-purpose:a61e0b3",
+          "detail": "started general-purpose:a61e0b3",
+          "sourceKey": "session-start:a61e0b3c1821a2cf6"
+        },
+        {
+          "id": "session-start:a7f5675b7da9ba06f:2026-08-08T12:26:29.462Z",
+          "at": "2026-08-08T12:26:29.462Z",
+          "kind": "update",
+          "agent": "general-purpose:a7f5675",
+          "detail": "started general-purpose:a7f5675",
+          "sourceKey": "session-start:a7f5675b7da9ba06f"
+        },
+        {
+          "id": "session-stop:a7f5675b7da9ba06f:2026-08-08T12:28:09.209Z",
+          "at": "2026-08-08T12:28:09.209Z",
+          "kind": "completion",
+          "agent": "general-purpose:a7f5675",
+          "detail": "completed",
+          "sourceKey": "session-stop:a7f5675b7da9ba06f"
+        },
+        {
+          "id": "session-stop:a61e0b3c1821a2cf6:2026-08-08T12:29:20.415Z",
+          "at": "2026-08-08T12:29:20.415Z",
+          "kind": "completion",
+          "agent": "general-purpose:a61e0b3",
+          "detail": "completed",
+          "sourceKey": "session-stop:a61e0b3c1821a2cf6"
+        },
+        {
+          "id": "session-stop:a9647b441d3056357:2026-08-08T12:32:44.802Z",
+          "at": "2026-08-08T12:32:44.802Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:a9647b441d3056357"
+        },
+        {
+          "id": "session-stop:a477ca651c23bf278:2026-08-08T12:50:14.082Z",
+          "at": "2026-08-08T12:50:14.082Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:a477ca651c23bf278"
+        },
+        {
+          "id": "session-stop:af59396904e50678d:2026-08-08T12:51:36.446Z",
+          "at": "2026-08-08T12:51:36.446Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:af59396904e50678d"
+        },
+        {
+          "id": "session-stop:a32c8adc4e43a779e:2026-08-08T12:53:03.705Z",
+          "at": "2026-08-08T12:53:03.705Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:a32c8adc4e43a779e"
+        },
+        {
+          "id": "session-stop:a22c4a4301063cf2d:2026-08-08T12:53:33.776Z",
+          "at": "2026-08-08T12:53:33.776Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:a22c4a4301063cf2d"
+        },
+        {
+          "id": "session-stop:ab756698413306a75:2026-08-08T12:54:51.868Z",
+          "at": "2026-08-08T12:54:51.868Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:ab756698413306a75"
+        },
+        {
+          "id": "session-stop:a604138e1c9edbd8a:2026-08-08T12:56:23.423Z",
+          "at": "2026-08-08T12:56:23.423Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:a604138e1c9edbd8a"
+        },
+        {
+          "id": "session-stop:a3ccd775286afccf7:2026-08-08T12:58:35.431Z",
+          "at": "2026-08-08T12:58:35.431Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:a3ccd775286afccf7"
+        },
+        {
+          "id": "session-stop:acc64799de47b8dbb:2026-08-08T13:00:08.536Z",
+          "at": "2026-08-08T13:00:08.536Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:acc64799de47b8dbb"
+        },
+        {
+          "id": "session-stop:afd9bbee259834959:2026-08-08T13:03:14.939Z",
+          "at": "2026-08-08T13:03:14.939Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:afd9bbee259834959"
+        },
+        {
+          "id": "session-stop:ac1ef2991480013ab:2026-08-08T13:04:03.273Z",
+          "at": "2026-08-08T13:04:03.273Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:ac1ef2991480013ab"
+        },
+        {
+          "id": "session-stop:adcccdb909d37f822:2026-08-08T13:08:14.019Z",
+          "at": "2026-08-08T13:08:14.019Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:adcccdb909d37f822"
+        },
+        {
+          "id": "session-stop:a39f606f8f5f1b8dd:2026-08-08T13:11:45.968Z",
+          "at": "2026-08-08T13:11:45.968Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:a39f606f8f5f1b8dd"
+        },
+        {
+          "id": "session-stop:abe1b45cd2d2e2f0a:2026-08-08T13:13:18.640Z",
+          "at": "2026-08-08T13:13:18.640Z",
+          "kind": "completion",
+          "agent": "cellular-research:acellul",
+          "detail": "completed",
+          "sourceKey": "session-stop:abe1b45cd2d2e2f0a"
+        }
+      ]
+    }
+  ]
+}

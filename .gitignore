@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build artifacts
+build/
+*.o
+*.so
+*.bin
+
+# IQ snippets / large captures (never commit raw data)
+*.iq
+*.sigmf-data
+data/
+
+# Editor/OS
+.DS_Store
+.vscode/
+.idea/
