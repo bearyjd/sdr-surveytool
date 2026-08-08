@@ -1,6 +1,9 @@
 import threading
 import time
 from datetime import datetime, timezone
+from queue import Empty, Full, Queue
+
+import pytest
 
 from capture.common.emitter import RecordEmitter
 from ingest.queue_server import QueueServer
@@ -257,3 +260,97 @@ def test_handler_threads_dont_survive_restart(tmp_path):
     assert record3.identifier.bssid == "AA:BB:CC:DD:EE:33"
 
     server.stop()
+
+
+class _SlowWhenFullQueue(Queue):
+    """A real Queue that, once full, keeps a blocked producer parked past stop()'s join.
+
+    Behaviour is identical to Queue except that a put() which times out on a full queue
+    stays inside put() for an extra `_extra_block` seconds before raising Full. That is
+    exactly the state a handler thread is in when a stalled consumer has filled the queue,
+    and it makes "the handler outlives stop()" deterministic instead of a timing race.
+    """
+
+    _extra_block = 2.5
+
+    def put(self, item, block=True, timeout=None):  # type: ignore[override]
+        try:
+            return super().put(item, block=block, timeout=timeout)
+        except Full:
+            time.sleep(self._extra_block)
+            raise
+
+
+def test_orphaned_handler_cannot_enqueue_into_next_sessions_queue(tmp_path):
+    """Regression test for N3: an orphaned handler must not leak into a new session.
+
+    End-to-end scenario, driven entirely through the real accept loop and socket path:
+      1. Start a server and fill its session queue to maxsize with real emitted records,
+         so a handler thread is genuinely parked in the put-retry loop with a backlog of
+         unprocessed lines still buffered.
+      2. stop() the server. The handler is inside a put() that outlasts the join timeout,
+         so it survives as an orphan (asserted, not assumed).
+      3. start() a new session, which installs a brand-new queue.
+      4. The orphan then wakes up and runs at least one more retry iteration.
+
+    The new session's queue must stay empty. This fails if the ingest path resolves the
+    queue via `self._queue` at put() time instead of using the queue object captured when
+    the handler was spawned.
+    """
+    socket_path = str(tmp_path / "ingest.sock")
+    server = QueueServer(socket_path)
+    server.start()
+    emit_errors: list[BaseException] = []
+
+    try:
+        # Install a queue that parks a blocked producer past stop()'s join timeout.
+        # Done before any client connects, so the handler captures this object.
+        old_queue = _SlowWhenFullQueue(maxsize=1000)
+        server._queue = old_queue
+
+        def emit_many() -> None:
+            try:
+                with RecordEmitter(socket_path) as emitter:
+                    for i in range(1500):
+                        emitter.emit(_record(f"AA:BB:CC:DD:{i // 256:02X}:{i % 256:02X}"))
+            except BaseException as exc:  # noqa: BLE001 - producer dies when server stops
+                emit_errors.append(exc)
+
+        producer = threading.Thread(target=emit_many, daemon=True)
+        producer.start()
+
+        # Wait for the queue to actually reach maxsize (nothing is consuming it).
+        deadline = time.time() + 15
+        while time.time() < deadline and not old_queue.full():
+            time.sleep(0.05)
+        assert old_queue.full(), "queue never filled; cannot construct the orphan scenario"
+
+        # Let the handler enter the slow put() so it is genuinely parked.
+        time.sleep(0.6)
+
+        with server._handler_lock:
+            handler_threads = list(server._handler_threads)
+        assert handler_threads, "expected a handler thread for the emitter connection"
+        handler = handler_threads[0]
+        assert handler.is_alive(), "handler should be parked in the put-retry loop"
+
+        server.stop()
+
+        # The whole point: this handler outlived stop().
+        assert handler.is_alive(), (
+            "handler did not outlive stop(); the orphan scenario was not constructed"
+        )
+
+        server.start()
+        new_queue = server._queue
+        assert new_queue is not old_queue
+
+        # Give the orphan more than enough time to wake from its parked put() and run
+        # further retry iterations against whatever queue it resolves.
+        time.sleep(_SlowWhenFullQueue._extra_block + 1.5)
+
+        with pytest.raises(Empty):
+            server.get(timeout=1)
+        assert new_queue.qsize() == 0, "records from the previous session leaked into the new one"
+    finally:
+        server.stop()

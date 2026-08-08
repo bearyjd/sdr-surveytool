@@ -6,6 +6,7 @@ venv/
 
 # Build artifacts
 build/
+*.egg-info/
 *.o
 *.so
 *.bin

@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 # Buffer limit: 1MB per connection to prevent unbounded growth
 _MAX_BUFFER_SIZE = 1024 * 1024
 
+# Bounded queue: applies backpressure to capture processes instead of growing memory.
+_QUEUE_MAXSIZE = 1000
+
 
 class QueueServer:
     """Unix domain socket server. Capture processes connect and send
@@ -26,14 +29,20 @@ class QueueServer:
     get(timeout=None) blocks indefinitely. Callers MUST use a timeout to ensure
     they can be unblocked when stop() is called (stop() does not unblock blocked get() calls).
 
-    ARCHITECTURE NOTE: This server uses a per-generation token to ensure that handler
-    threads from a previous session cannot pollute a new session's queue after restart.
-    Each start() increments _generation; handler threads capture their generation at
-    spawn time and exit their loop if the generation changes (indicating a new session)."""
+    ARCHITECTURE NOTE: Session isolation is enforced structurally, not by timing. Each
+    start() installs a brand-new queue object and increments _generation. Handler threads
+    capture BOTH the generation and the queue object itself at spawn time and only ever
+    enqueue into their captured queue. A handler that outlives stop() therefore physically
+    cannot reach a later session's queue, no matter how long it stays alive or how many
+    times it retries a blocked put(). The generation check is a promptness optimisation on
+    top of that guarantee, not the guarantee itself.
+
+    RESTART SEMANTICS: start() installs a fresh queue, so any records the previous
+    session's consumer had not yet read (up to _QUEUE_MAXSIZE) are discarded."""
 
     def __init__(self, socket_path: str) -> None:
         self._socket_path = socket_path
-        self._queue: Queue[UnifiedRecord] = Queue(maxsize=1000)
+        self._queue: Queue[UnifiedRecord] = Queue(maxsize=_QUEUE_MAXSIZE)
         self._server_sock: socket.socket | None = None
         self._stop = threading.Event()
         self._accept_thread: threading.Thread | None = None
@@ -41,6 +50,9 @@ class QueueServer:
         self._handler_lock = threading.Lock()
         self._started = False
         self._generation = 0
+        # True only after this instance's own bind() succeeded; guards cleanup-time
+        # socket-file removal so we never warn about a file we never created.
+        self._owns_socket_file = False
 
     def _remove_if_socket(self) -> None:
         """Remove socket file only if it exists and is actually a socket.
@@ -58,14 +70,19 @@ class QueueServer:
                 pass
 
     def start(self) -> None:
-        """Start the queue server. Raises RuntimeError if already started."""
+        """Start the queue server. Raises RuntimeError if already started.
+
+        Restart discards data: a fresh queue is installed, so any records the previous
+        session's consumer had not yet read (up to _QUEUE_MAXSIZE) are dropped.
+        """
         if self._started:
             raise RuntimeError("QueueServer.start() called while already started")
         self._stop.clear()
         self._generation += 1
-        # Recreate queue for this generation so stale threads feed old queue
-        self._queue = Queue(maxsize=1000)
-        self._handler_threads.clear()
+        # Install a fresh queue for this generation. Handlers spawned by the previous
+        # generation captured the previous queue object and can never reach this one.
+        self._queue = Queue(maxsize=_QUEUE_MAXSIZE)
+        self._owns_socket_file = False
 
         try:
             # Validate and remove any existing socket file, with error handling (NEW-2)
@@ -77,6 +94,8 @@ class QueueServer:
 
             self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self._server_sock.bind(self._socket_path)
+            # From here on the socket file is ours, so cleanup may remove it.
+            self._owns_socket_file = True
             # Restrict permissions to owner only (0o600)
             os.chmod(self._socket_path, 0o600)
             self._server_sock.listen(8)
@@ -91,11 +110,14 @@ class QueueServer:
             if self._server_sock is not None:
                 self._server_sock.close()
                 self._server_sock = None
-            # Try to clean up socket file on failure
-            try:
-                self._remove_if_socket()
-            except (RuntimeError, OSError) as e:
-                logger.warning(f"Could not clean up socket file on startup failure: {e}")
+            # Only clean up the socket file if this instance actually bound it; otherwise
+            # the failure came from the pre-bind check and the file is not ours to touch.
+            if self._owns_socket_file:
+                try:
+                    self._remove_if_socket()
+                except (RuntimeError, OSError) as e:
+                    logger.warning(f"Could not clean up socket file on startup failure: {e}")
+                self._owns_socket_file = False
             raise
 
     def _accept_loop(self) -> None:
@@ -106,19 +128,25 @@ class QueueServer:
                 conn, _ = self._server_sock.accept()
             except (socket.timeout, OSError):
                 continue
-            # Capture generation at thread spawn time so stale threads exit on restart
+            # Capture BOTH the generation and the queue OBJECT at spawn time. The captured
+            # queue is what makes session isolation structural: this handler can only ever
+            # enqueue into the queue that was live when it was created.
             gen = self._generation
-            thread = threading.Thread(target=self._handle_client, args=(conn, gen), daemon=True)
+            queue = self._queue
+            thread = threading.Thread(
+                target=self._handle_client, args=(conn, gen, queue), daemon=True
+            )
             with self._handler_lock:
                 self._handler_threads.append(thread)
             thread.start()
 
-    def _handle_client(self, conn: socket.socket, gen: int) -> None:
+    def _handle_client(self, conn: socket.socket, gen: int, queue: Queue[UnifiedRecord]) -> None:
         """Handle a client connection for the given generation.
 
-        If the generation changes (indicating a new start()), this handler exits
-        even if the connection is still open, preventing data from a stale session
-        from polluting the new session's queue."""
+        `queue` is the queue object that was live when this handler was spawned. All
+        records read from this connection go into that object and nowhere else, so a
+        handler that outlives stop() cannot contaminate a later session's queue. The
+        generation checks additionally make such a handler wind down promptly."""
         buffer = b""
         try:
             conn.settimeout(0.5)
@@ -137,12 +165,21 @@ class QueueServer:
                     )
                     break
                 while b"\n" in buffer:
+                    # Re-check liveness per line so a stale handler with a large backlog
+                    # stops doing work promptly rather than draining the whole buffer.
+                    if self._stop.is_set() or gen != self._generation:
+                        return
                     line, buffer = buffer.split(b"\n", 1)
-                    self._ingest_line(line)
+                    self._ingest_line(line, gen, queue)
         finally:
             conn.close()
 
-    def _ingest_line(self, line: bytes) -> None:
+    def _ingest_line(self, line: bytes, gen: int, queue: Queue[UnifiedRecord]) -> None:
+        """Validate one line and enqueue it into `queue`.
+
+        `queue` is the caller's captured queue object. This must never read
+        `self._queue`: doing so would let a stale handler enqueue into a newer
+        session's queue the moment start() swapped the attribute."""
         if not line.strip():
             return
         try:
@@ -153,20 +190,24 @@ class QueueServer:
             )
             return
 
-        # Put record with timeout to prevent indefinite blocking if queue fills.
-        # Handler thread will retry with backpressure until queue has space.
+        # Put with a timeout so the handler stays responsive to stop()/restart instead of
+        # blocking forever on a full queue. Retrying applies backpressure to the producer.
+        warned = False
         while True:
             try:
-                self._queue.put(record, timeout=0.5)
-                break
+                queue.put(record, timeout=0.5)
+                return
             except Full:
-                if self._stop.is_set():
-                    logger.warning("Queue full and stop requested; dropping record")
-                    break
-                logger.debug(
-                    f"Queue full (size={self._queue.qsize()}); handler applying backpressure"
-                )
-                # Continue retry loop, blocking handler and applying backpressure to capture
+                if self._stop.is_set() or gen != self._generation:
+                    logger.warning("Queue full and session ended; dropping record")
+                    return
+                if not warned:
+                    # Rate-limited: warn once per record on first backpressure, not on
+                    # every 0.5s retry, so sustained backpressure is visible but not spam.
+                    warned = True
+                    logger.warning(
+                        f"Queue full (size={queue.qsize()}); handler applying backpressure"
+                    )
 
     def get(self, timeout: float | None = None) -> UnifiedRecord:
         """Get the next record from the queue.
@@ -186,10 +227,12 @@ class QueueServer:
     def stop(self) -> None:
         """Stop the queue server and clean up resources."""
         self._stop.set()
-        if self._server_sock is not None:
-            self._server_sock.close()
-
         try:
+            # Closing the listening socket lives inside the try so that a close()
+            # failure can never skip the state reset in the finally block.
+            if self._server_sock is not None:
+                self._server_sock.close()
+
             # Join accept thread with timeout
             if self._accept_thread is not None:
                 self._accept_thread.join(timeout=2.0)
@@ -205,8 +248,8 @@ class QueueServer:
                 # Only clear the ones we successfully joined
                 self._handler_threads = still_alive
 
-            # Clean up socket file only if this instance actually bound it (NEW-2)
-            if self._server_sock is not None:
+            # Clean up socket file only if this instance actually bound it.
+            if self._owns_socket_file:
                 try:
                     self._remove_if_socket()
                 except (RuntimeError, OSError) as e:
@@ -216,3 +259,4 @@ class QueueServer:
             self._started = False
             self._accept_thread = None
             self._server_sock = None
+            self._owns_socket_file = False
