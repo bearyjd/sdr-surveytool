@@ -1,8 +1,24 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 from schema.records import Identifier, Modality, Signal, UnifiedRecord
+
+_LEADING_INT = re.compile(r"\d+")
+
+
+def _parse_channel(raw: object) -> int | None:
+    """Kismet reports `kismet.device.base.channel` as a free-form string that
+    frequently carries an HT/VHT width suffix ("6HT40", "36HT80", "157VHT80")
+    and occasionally a non-numeric value entirely. Identifier.channel is a
+    plain Optional[int], so the vendor-format mess is untangled here rather
+    than by widening the schema: take the leading integer, or None if there
+    isn't one."""
+    if raw is None:
+        return None
+    match = _LEADING_INT.match(str(raw).strip())
+    return int(match.group()) if match else None
 
 
 def normalize_kismet_device(
@@ -46,7 +62,7 @@ def normalize_kismet_device(
         identifier=Identifier(
             bssid=device.get("kismet.device.base.macaddr"),
             ssid=ssid,
-            channel=device.get("kismet.device.base.channel"),
+            channel=_parse_channel(device.get("kismet.device.base.channel")),
         ),
         signal=Signal(rssi=float(signal_dbm)),
         metadata={"encryption_type_if_broadcast_visible": encryption} if encryption else {},
