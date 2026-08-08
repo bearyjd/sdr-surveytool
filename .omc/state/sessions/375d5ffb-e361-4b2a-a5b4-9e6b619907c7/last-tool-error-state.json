@@ -1,7 +1,0 @@
-{
-  "tool_name": "ScheduleWakeup",
-  "tool_input_preview": "{\"delaySeconds\":300,\"reason\":\"Waiting on background research agents (cellular and wifi/bt) to return their final reports\"}",
-  "error": "`prompt` is required when `stop` is not true.",
-  "timestamp": "2026-08-08T12:19:26.408Z",
-  "retry_count": 1
-}

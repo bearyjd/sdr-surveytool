@@ -19,3 +19,6 @@ data/
 .DS_Store
 .vscode/
 .idea/
+
+# OMC session/tool state (ephemeral, not project source)
+.omc/
