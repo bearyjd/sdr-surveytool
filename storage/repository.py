@@ -19,9 +19,15 @@ def save_record(session: Session, record: UnifiedRecord) -> SurveyRecord:
     Rolls back the session on any error to prevent poisoning for subsequent calls.
     """
     try:
-        # Normalize timestamp to UTC and strip tzinfo for consistent storage.
-        # All stored timestamps are interpreted as UTC by consumers.
-        normalized_ts = record.timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+        # Normalize timestamp to UTC-naive for consistent storage.
+        # Naive inputs are treated as already UTC (just strip the marker).
+        # Aware inputs are converted to UTC then stripped to naive.
+        ts = record.timestamp
+        normalized_ts = (
+            ts.replace(tzinfo=None)
+            if ts.tzinfo is None
+            else ts.astimezone(timezone.utc).replace(tzinfo=None)
+        )
 
         row = SurveyRecord(
             timestamp=normalized_ts,
