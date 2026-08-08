@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -76,30 +77,45 @@ def test_timestamp_normalization_with_tz_aware_input():
         assert saved.timestamp == datetime(2026, 8, 8, 7, 0, 0)
 
 
-def test_timestamp_normalization_with_naive_input():
-    """Verify naive timestamps are treated as UTC and stored unchanged."""
-    engine = make_engine("sqlite:///:memory:")
-    init_db(engine)
-    session_factory = make_session_factory(engine)
+def test_timestamp_normalization_with_naive_input(monkeypatch):
+    """Verify naive timestamps are treated as UTC and stored unchanged.
 
-    # Create naive timestamp: 2026-08-08T12:00:00 (no tzinfo)
-    # This should be treated as already UTC and stored unchanged
-    timestamp_naive = datetime(2026, 8, 8, 12, 0, 0)
-    record = UnifiedRecord(
-        timestamp=timestamp_naive,
-        lat=47.6,
-        lon=-122.3,
-        survey_id="s1",
-        operator_id="op1",
-        modality=Modality.WIFI,
-        identifier=Identifier(bssid="AA:BB:CC:DD:EE:FF"),
-        signal=Signal(rssi=-50.0),
-    )
+    Uses monkeypatch to pin timezone to America/Los_Angeles so the test
+    is deterministic and fails under the buggy (old) formula on any CI runner,
+    not just non-UTC ones.
+    """
+    # Pin the timezone to America/Los_Angeles for deterministic testing
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time.tzset()
+    try:
+        engine = make_engine("sqlite:///:memory:")
+        init_db(engine)
+        session_factory = make_session_factory(engine)
 
-    with session_factory() as session:
-        saved = save_record(session, record)
-        # Must remain exactly as provided (not converted assuming local time)
-        assert saved.timestamp == datetime(2026, 8, 8, 12, 0, 0)
+        # Create naive timestamp: 2026-08-08T12:00:00 (no tzinfo)
+        # Under the BUGGY formula, this would be treated as local time (Los Angeles)
+        # and converted to UTC, storing as 19:00 (7 hours later).
+        # Under the CORRECT formula, naive is treated as already UTC and stored unchanged.
+        timestamp_naive = datetime(2026, 8, 8, 12, 0, 0)
+        record = UnifiedRecord(
+            timestamp=timestamp_naive,
+            lat=47.6,
+            lon=-122.3,
+            survey_id="s1",
+            operator_id="op1",
+            modality=Modality.WIFI,
+            identifier=Identifier(bssid="AA:BB:CC:DD:EE:FF"),
+            signal=Signal(rssi=-50.0),
+        )
+
+        with session_factory() as session:
+            saved = save_record(session, record)
+            # Must remain exactly as provided (12:00, not 19:00)
+            assert saved.timestamp == datetime(2026, 8, 8, 12, 0, 0)
+    finally:
+        # Restore default timezone
+        monkeypatch.delenv("TZ", raising=False)
+        time.tzset()
 
 
 def test_json_fields_store_all_keys_with_explicit_nulls():
@@ -172,36 +188,48 @@ def test_save_record_persists_across_sessions():
 
 
 def test_save_record_rolls_back_and_session_stays_usable():
-    """Verify failed saves roll back and don't poison the session."""
+    """Verify save_record catches commit errors and rolls back without poisoning the session.
+
+    The except block in save_record must be executed to prevent PendingRollbackError
+    from poisoning the session for subsequent calls.
+    """
     engine = make_engine("sqlite:///:memory:")
     init_db(engine)
     session_factory = make_session_factory(engine)
 
-    # First, save a valid record
-    valid_record = UnifiedRecord(
-        timestamp=datetime.now(timezone.utc),
-        lat=47.6,
-        lon=-122.3,
-        survey_id="s1",
-        operator_id="op1",
-        modality=Modality.WIFI,
-        identifier=Identifier(bssid="AA:BB:CC:DD:EE:FF"),
-        signal=Signal(rssi=-50.0),
-    )
+    # Create a shared state to control when the mock raises
+    mock_state = {"should_fail": False}
+
+    class MockCommit:
+        def __init__(self, original_commit):
+            self.original_commit = original_commit
+
+        def __call__(self):
+            if mock_state["should_fail"]:
+                raise IntegrityError("Simulated constraint violation", "", "")
+            return self.original_commit()
 
     with session_factory() as session:
-        saved1 = save_record(session, valid_record)
+        # Patch commit from the start
+        original_commit = session.commit
+        session.commit = MockCommit(original_commit)
+
+        # Save first record successfully
+        record1 = UnifiedRecord(
+            timestamp=datetime.now(timezone.utc),
+            lat=47.6,
+            lon=-122.3,
+            survey_id="s1",
+            operator_id="op1",
+            modality=Modality.WIFI,
+            identifier=Identifier(bssid="AA:BB:CC:DD:EE:FF"),
+            signal=Signal(rssi=-50.0),
+        )
+        saved1 = save_record(session, record1)
         assert saved1.id is not None
 
-        # Attempt to save an invalid record (missing required survey_id would need a schema change,
-        # so instead we'll use a record that violates a constraint by other means).
-        # SQLite doesn't enforce NOT NULL strictly in all cases, so we'll just verify the
-        # normal case works after an error by simulating an error during the transaction.
-        # For this test, we'll create a scenario that triggers the rollback by modifying
-        # the session state to force a commit error.
-
-        # Save another valid record to verify session is still usable after first save
-        valid_record2 = UnifiedRecord(
+        # Now enable failure mode and try to save a second record
+        record2 = UnifiedRecord(
             timestamp=datetime.now(timezone.utc),
             lat=48.0,
             lon=-123.0,
@@ -211,11 +239,40 @@ def test_save_record_rolls_back_and_session_stays_usable():
             identifier=Identifier(ssid="Net2"),
             signal=Signal(rssi=-60.0),
         )
-        saved2 = save_record(session, valid_record2)
-        assert saved2.id is not None
-        assert saved2.survey_id == "s2"
+        mock_state["should_fail"] = True
 
-    # Verify both records persisted
+        # This should raise IntegrityError
+        try:
+            save_record(session, record2)
+            assert False, "Expected IntegrityError to be raised"
+        except IntegrityError:
+            # Expected: the except block in save_record should have rolled back
+            pass
+
+        # Disable failure mode
+        mock_state["should_fail"] = False
+
+        # Now verify the session is still usable by saving a different valid record
+        record3 = UnifiedRecord(
+            timestamp=datetime.now(timezone.utc),
+            lat=49.0,
+            lon=-124.0,
+            survey_id="s3",
+            operator_id="op3",
+            modality=Modality.WIFI,
+            identifier=Identifier(bssid="FF:EE:DD:CC:BB:AA"),
+            signal=Signal(rssi=-70.0),
+        )
+        saved3 = save_record(session, record3)
+        assert saved3.id is not None
+        assert saved3.survey_id == "s3"
+
+    # Verify persisted records (only successful ones should be in DB)
     with session_factory() as session2:
         all_records = session2.execute(select(SurveyRecord)).scalars().all()
+        # Should have 2 records: first save succeeded, second failed (rolled back), third succeeded
         assert len(all_records) == 2
+        survey_ids = {r.survey_id for r in all_records}
+        assert "s1" in survey_ids
+        assert "s3" in survey_ids
+        assert "s2" not in survey_ids
