@@ -276,6 +276,44 @@ def test_process_one_reverts_grid_count_on_persist_failure(tmp_path, monkeypatch
         server.stop()
 
 
+def test_grid_counts_seeded_from_existing_rows_on_construction(tmp_path):
+    """Regression test for the restart bug: _grid_counts used to start empty,
+    so an ingest restart mid-survey reset every cell to 1 even though the DB
+    already held records there, making sample_count_in_grid_cell non-monotonic
+    and useless for coverage-gap analysis.
+
+    Two rows are seeded into one cell before the service is constructed; the
+    next record processed into that same cell must be the 3rd sample, not the
+    1st -- this test fails against the un-seeded code."""
+    socket_path = str(tmp_path / "ingest.sock")
+    server = QueueServer(socket_path)
+    server.start()
+
+    engine = make_engine("sqlite:///:memory:")
+    init_db(engine)
+    session_factory = make_session_factory(engine)
+
+    # Pre-existing survey data, as if written before an ingest restart.
+    with session_factory() as session:
+        for _ in range(2):
+            real_save_record(session, _record(lat=47.6062, lon=-122.3321, gps_fix_quality=4))
+
+    gps_provider = StaticGpsFixProvider(
+        GpsFix(lat=47.6062, lon=-122.3321, altitude=15.0, fix_quality=4)
+    )
+    service = IngestService(server, session_factory, gps_provider)
+
+    try:
+        with RecordEmitter(socket_path) as emitter:
+            # Placeholder coords, so ingest enriches it into the same cell.
+            emitter.emit(_record(lat=0.0, lon=0.0, gps_fix_quality=None))
+
+        processed = service.process_one(timeout=2)
+        assert processed.metadata.sample_count_in_grid_cell == 3
+    finally:
+        server.stop()
+
+
 def test_attach_grid_density_keys_counts_per_cell():
     """Two records in distinct grid cells must be counted independently;
     a regression to a single global counter would make both come back as 1

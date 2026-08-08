@@ -4,12 +4,14 @@ import logging
 import threading
 from collections import Counter
 
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from ingest.gps_fix import GpsFixProvider
 from ingest.grid import grid_cell_key
 from ingest.queue_server import QueueServer
 from schema.records import UnifiedRecord
+from storage.models import SurveyRecord
 from storage.repository import save_record
 
 logger = logging.getLogger(__name__)
@@ -47,8 +49,29 @@ class IngestService:
         self._queue_server = queue_server
         self._session_factory = session_factory
         self._gps_provider = gps_provider
-        self._grid_counts: Counter[str] = Counter()
+        # Seeded from the DB so sample_count_in_grid_cell stays monotonic across
+        # ingest restarts mid-survey; without this every cell restarts at 1 and
+        # the persisted density values are useless for coverage-gap analysis.
+        # KNOWN LIMITATION: this Counter is never evicted, so a multi-day survey
+        # covering a very large area grows it without bound (one entry per ~11m
+        # cell visited). Acceptable for field-tool scale; revisit if it bites.
+        self._grid_counts: Counter[str] = self._load_grid_counts(session_factory)
         self._grid_lock = threading.Lock()
+
+    @staticmethod
+    def _load_grid_counts(session_factory: sessionmaker | None) -> Counter[str]:
+        """Rebuild per-cell sample counts from rows already in the database.
+
+        One query at startup. A None session_factory (used by unit tests that
+        exercise the in-memory bookkeeping only) yields an empty counter.
+        """
+        if session_factory is None:
+            return Counter()
+        with session_factory() as session:
+            rows = session.execute(
+                select(SurveyRecord.lat, SurveyRecord.lon)
+            ).all()
+        return Counter(grid_cell_key(lat, lon) for lat, lon in rows)
 
     def process_one(self, timeout: float = 1.0) -> UnifiedRecord:
         """Pull one record off the queue, enrich it, and persist it.
