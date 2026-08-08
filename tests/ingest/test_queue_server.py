@@ -285,6 +285,20 @@ class _SlowWhenFullQueue(Queue):
             raise
 
 
+class _NoReconnectEmitter(RecordEmitter):
+    """RecordEmitter with the production reconnect-on-broken-pipe path disabled.
+
+    The orphan test below needs its producer to DIE when the server stops, so
+    that anything subsequently landing in the new session's queue can only have
+    come from the orphaned handler. A reconnecting producer would open a fresh
+    connection to the new session and legitimately deliver new records, which
+    would mask exactly the leak this test exists to detect.
+    """
+
+    def _reconnect_locked(self) -> None:
+        raise OSError("reconnect disabled for orphan-isolation test")
+
+
 def test_orphaned_handler_cannot_enqueue_into_next_sessions_queue(tmp_path):
     """Regression test for N3: an orphaned handler must not leak into a new session.
 
@@ -314,7 +328,7 @@ def test_orphaned_handler_cannot_enqueue_into_next_sessions_queue(tmp_path):
 
         def emit_many() -> None:
             try:
-                with RecordEmitter(socket_path) as emitter:
+                with _NoReconnectEmitter(socket_path) as emitter:
                     for i in range(1500):
                         emitter.emit(_record(f"AA:BB:CC:DD:{i // 256:02X}:{i % 256:02X}"))
             except BaseException as exc:  # noqa: BLE001 - producer dies when server stops
