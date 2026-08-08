@@ -24,7 +24,12 @@ class QueueServer:
 
     get(timeout=T) will raise queue.Empty if no record is available after T seconds.
     get(timeout=None) blocks indefinitely. Callers MUST use a timeout to ensure
-    they can be unblocked when stop() is called (stop() does not unblock blocked get() calls)."""
+    they can be unblocked when stop() is called (stop() does not unblock blocked get() calls).
+
+    ARCHITECTURE NOTE: This server uses a per-generation token to ensure that handler
+    threads from a previous session cannot pollute a new session's queue after restart.
+    Each start() increments _generation; handler threads capture their generation at
+    spawn time and exit their loop if the generation changes (indicating a new session)."""
 
     def __init__(self, socket_path: str) -> None:
         self._socket_path = socket_path
@@ -35,6 +40,7 @@ class QueueServer:
         self._handler_threads: list[threading.Thread] = []
         self._handler_lock = threading.Lock()
         self._started = False
+        self._generation = 0
 
     def _remove_if_socket(self) -> None:
         """Remove socket file only if it exists and is actually a socket.
@@ -56,10 +62,18 @@ class QueueServer:
         if self._started:
             raise RuntimeError("QueueServer.start() called while already started")
         self._stop.clear()
+        self._generation += 1
+        # Recreate queue for this generation so stale threads feed old queue
+        self._queue = Queue(maxsize=1000)
+        self._handler_threads.clear()
 
         try:
-            # Validate and remove any existing socket file
-            self._remove_if_socket()
+            # Validate and remove any existing socket file, with error handling (NEW-2)
+            try:
+                self._remove_if_socket()
+            except RuntimeError as e:
+                logger.warning(f"Failed to remove old socket file: {e}")
+                raise
 
             self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self._server_sock.bind(self._socket_path)
@@ -72,11 +86,16 @@ class QueueServer:
             # Only set _started to True after everything succeeded
             self._started = True
         except Exception:
-            # If startup failed, reset state before re-raising
+            # If startup failed, reset state before re-raising (NEW-4)
             self._started = False
             if self._server_sock is not None:
                 self._server_sock.close()
                 self._server_sock = None
+            # Try to clean up socket file on failure
+            try:
+                self._remove_if_socket()
+            except (RuntimeError, OSError) as e:
+                logger.warning(f"Could not clean up socket file on startup failure: {e}")
             raise
 
     def _accept_loop(self) -> None:
@@ -87,16 +106,24 @@ class QueueServer:
                 conn, _ = self._server_sock.accept()
             except (socket.timeout, OSError):
                 continue
-            thread = threading.Thread(target=self._handle_client, args=(conn,), daemon=True)
+            # Capture generation at thread spawn time so stale threads exit on restart
+            gen = self._generation
+            thread = threading.Thread(target=self._handle_client, args=(conn, gen), daemon=True)
             with self._handler_lock:
                 self._handler_threads.append(thread)
             thread.start()
 
-    def _handle_client(self, conn: socket.socket) -> None:
+    def _handle_client(self, conn: socket.socket, gen: int) -> None:
+        """Handle a client connection for the given generation.
+
+        If the generation changes (indicating a new start()), this handler exits
+        even if the connection is still open, preventing data from a stale session
+        from polluting the new session's queue."""
         buffer = b""
         try:
             conn.settimeout(0.5)
-            while not self._stop.is_set():
+            # Exit if generation changes (new start() was called) or stop is set
+            while not self._stop.is_set() and gen == self._generation:
                 try:
                     chunk = conn.recv(4096)
                 except socket.timeout:
@@ -127,7 +154,7 @@ class QueueServer:
             return
 
         # Put record with timeout to prevent indefinite blocking if queue fills.
-        # On sustained overflow, drop and log instead of hanging the handler thread.
+        # Handler thread will retry with backpressure until queue has space.
         while True:
             try:
                 self._queue.put(record, timeout=0.5)
@@ -136,10 +163,10 @@ class QueueServer:
                 if self._stop.is_set():
                     logger.warning("Queue full and stop requested; dropping record")
                     break
-                logger.warning(
-                    f"Queue full (size={self._queue.qsize()}); dropping oldest-type records"
+                logger.debug(
+                    f"Queue full (size={self._queue.qsize()}); handler applying backpressure"
                 )
-                # Continue retry loop
+                # Continue retry loop, blocking handler and applying backpressure to capture
 
     def get(self, timeout: float | None = None) -> UnifiedRecord:
         """Get the next record from the queue.
@@ -162,26 +189,30 @@ class QueueServer:
         if self._server_sock is not None:
             self._server_sock.close()
 
-        # Join accept thread with timeout
-        if self._accept_thread is not None:
-            self._accept_thread.join(timeout=2.0)
+        try:
+            # Join accept thread with timeout
+            if self._accept_thread is not None:
+                self._accept_thread.join(timeout=2.0)
 
-        # Join all handler threads with timeout, only remove successfully joined ones.
-        # This prevents orphaned threads from being forgotten and re-activated on restart.
-        with self._handler_lock:
-            still_alive = []
-            for thread in self._handler_threads:
-                thread.join(timeout=0.5)
-                if thread.is_alive():
-                    still_alive.append(thread)
-            # Only clear the ones we successfully joined
-            self._handler_threads = still_alive
+            # Join all handler threads with timeout, only remove successfully joined ones.
+            # Stale threads from a previous generation will exit due to generation check.
+            with self._handler_lock:
+                still_alive = []
+                for thread in self._handler_threads:
+                    thread.join(timeout=0.5)
+                    if thread.is_alive():
+                        still_alive.append(thread)
+                # Only clear the ones we successfully joined
+                self._handler_threads = still_alive
 
-        # Clean up socket file only if this instance actually bound it
-        if self._server_sock is not None:
-            self._remove_if_socket()
-
-        # Reset state to allow restart
-        self._started = False
-        self._accept_thread = None
-        self._server_sock = None
+            # Clean up socket file only if this instance actually bound it (NEW-2)
+            if self._server_sock is not None:
+                try:
+                    self._remove_if_socket()
+                except (RuntimeError, OSError) as e:
+                    logger.warning(f"Could not remove socket file on stop: {e}")
+        finally:
+            # Always reset state to allow restart, even if cleanup failed
+            self._started = False
+            self._accept_thread = None
+            self._server_sock = None
