@@ -1,9 +1,13 @@
+import ast
+import inspect
 import threading
 import time
 from datetime import datetime, timezone
 from queue import Empty, Full, Queue
 
 import pytest
+
+import ingest.queue_server as queue_server_module
 
 from capture.common.emitter import RecordEmitter
 from ingest.queue_server import QueueServer
@@ -354,3 +358,87 @@ def test_orphaned_handler_cannot_enqueue_into_next_sessions_queue(tmp_path):
         assert new_queue.qsize() == 0, "records from the previous session leaked into the new one"
     finally:
         server.stop()
+
+
+def _queue_server_method_ast(name: str) -> ast.FunctionDef:
+    """Return the AST of QueueServer.<name> as written in the source file."""
+    source = inspect.getsource(queue_server_module)
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "QueueServer":
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and item.name == name:
+                    return item
+    raise AssertionError(f"QueueServer.{name} not found in source")
+
+
+def _reads_self_queue(node: ast.AST) -> bool:
+    """True if `self._queue` is read anywhere inside the given AST node."""
+    return any(
+        isinstance(sub, ast.Attribute)
+        and sub.attr == "_queue"
+        and isinstance(sub.value, ast.Name)
+        and sub.value.id == "self"
+        for sub in ast.walk(node)
+    )
+
+
+def test_handler_write_path_never_reads_self_queue():
+    """Structural regression guard for N3.
+
+    The handler write path must operate exclusively on the queue object captured when
+    the thread was spawned. Reading `self._queue` there — even inside a retry loop that
+    is guarded by a generation check — reintroduces the cross-session leak, because the
+    attribute can be swapped by start() between the guard and the put(). That race is too
+    narrow to catch reliably with a timing test, so the invariant is asserted structurally
+    instead: no `self._queue` access is permitted in these methods.
+
+    AST-based rather than text-based, so docstrings and comments mentioning `self._queue`
+    (there are some, deliberately) do not trip it.
+    """
+    for method in ("_handle_client", "_ingest_line"):
+        node = _queue_server_method_ast(method)
+        assert not _reads_self_queue(node), (
+            f"QueueServer.{method} reads self._queue; it must use the queue object "
+            f"captured at handler-spawn time and passed in as a parameter."
+        )
+
+
+def test_start_publishes_new_queue_before_incrementing_generation():
+    """Regression guard for the publish-order hazard.
+
+    start() must install the new queue BEFORE advertising the new generation. In the
+    reverse order the object briefly presents "new generation, old queue"; a handler
+    spawned in that window pairs a generation that passes every subsequent check with the
+    previous session's queue, silently dropping its records into a queue nobody reads.
+    """
+    node = _queue_server_method_ast("start")
+
+    def is_queue_assignment(stmt: ast.AST) -> bool:
+        return isinstance(stmt, ast.Assign) and _reads_self_queue(stmt)
+
+    def is_generation_bump(stmt: ast.AST) -> bool:
+        if not isinstance(stmt, ast.AugAssign):
+            return False
+        target = stmt.target
+        return (
+            isinstance(target, ast.Attribute)
+            and target.attr == "_generation"
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        )
+
+    # Compare source line numbers so the check is independent of nesting.
+    queue_assign_index = next(
+        (stmt.lineno for stmt in ast.walk(node) if is_queue_assignment(stmt)), None
+    )
+    generation_bump_index = next(
+        (stmt.lineno for stmt in ast.walk(node) if is_generation_bump(stmt)), None
+    )
+
+    assert queue_assign_index is not None, "start() must assign a new self._queue"
+    assert generation_bump_index is not None, "start() must increment self._generation"
+    assert queue_assign_index < generation_bump_index, (
+        "start() increments self._generation before installing the new queue; "
+        "swap the order so the queue is published first."
+    )

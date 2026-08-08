@@ -78,10 +78,13 @@ class QueueServer:
         if self._started:
             raise RuntimeError("QueueServer.start() called while already started")
         self._stop.clear()
-        self._generation += 1
-        # Install a fresh queue for this generation. Handlers spawned by the previous
-        # generation captured the previous queue object and can never reach this one.
+        # Publish ORDER MATTERS: install the new queue before advertising the new
+        # generation. The reverse order leaves a window in which the object says
+        # "new generation, old queue", so a handler spawned in that window would pair a
+        # generation that passes every future check with the previous session's queue and
+        # silently lose its records into a queue nobody reads.
         self._queue = Queue(maxsize=_QUEUE_MAXSIZE)
+        self._generation += 1
         self._owns_socket_file = False
 
         try:
@@ -137,6 +140,9 @@ class QueueServer:
                 target=self._handle_client, args=(conn, gen, queue), daemon=True
             )
             with self._handler_lock:
+                # Prune finished handlers as we go; otherwise the list grows without
+                # bound over a long-lived session (entries are only reaped in stop()).
+                self._handler_threads = [t for t in self._handler_threads if t.is_alive()]
                 self._handler_threads.append(thread)
             thread.start()
 
@@ -225,7 +231,13 @@ class QueueServer:
         return self._queue.get(timeout=timeout)
 
     def stop(self) -> None:
-        """Stop the queue server and clean up resources."""
+        """Stop the queue server and clean up resources.
+
+        Shutdown discards data: handler threads stop processing as soon as the stop flag
+        is observed, so complete lines already sitting unparsed in a handler's read buffer
+        are dropped along with anything still in flight on the socket. This mirrors the
+        RESTART SEMANTICS note on start(), which covers unconsumed records in the queue.
+        """
         self._stop.set()
         try:
             # Closing the listening socket lives inside the try so that a close()
