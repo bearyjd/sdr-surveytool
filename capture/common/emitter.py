@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import socket
+import threading
 
 from schema.records import UnifiedRecord
 
 
 class RecordEmitter:
     """Connects to the ingest queue's Unix domain socket and sends unified
-    records as newline-delimited JSON."""
+    records as newline-delimited JSON.
+
+    Thread-safe: concurrent calls to emit() are serialized via an internal lock,
+    ensuring that records are never interleaved on the wire."""
 
     def __init__(self, socket_path: str) -> None:
         self._socket_path = socket_path
         self._sock: socket.socket | None = None
+        self._lock = threading.Lock()
 
     def connect(self) -> None:
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -21,7 +26,8 @@ class RecordEmitter:
         if self._sock is None:
             raise RuntimeError("RecordEmitter.connect() must be called before emit()")
         line = record.model_dump_json() + "\n"
-        self._sock.sendall(line.encode("utf-8"))
+        with self._lock:
+            self._sock.sendall(line.encode("utf-8"))
 
     def close(self) -> None:
         if self._sock is not None:

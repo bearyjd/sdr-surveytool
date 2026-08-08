@@ -19,11 +19,15 @@ def test_emit_sends_record_as_ndjson_line(tmp_path):
         conn, _ = server.accept()
         data = b""
         while not data.endswith(b"\n"):
-            data += conn.recv(4096)
+            chunk = conn.recv(4096)
+            if not chunk:
+                assert data.endswith(b"\n"), "Connection closed before newline received"
+                break
+            data += chunk
         received["line"] = data.decode("utf-8")
         conn.close()
 
-    thread = threading.Thread(target=accept_one)
+    thread = threading.Thread(target=accept_one, daemon=True)
     thread.start()
 
     record = UnifiedRecord(
