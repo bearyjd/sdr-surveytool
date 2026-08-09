@@ -1,0 +1,50 @@
+[project]
+name = "sdr-surveytool"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.6",
+    "sqlalchemy>=2.0",
+    "requests>=2.31",
+    "bleak>=0.22",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+
+[project.scripts]
+sdr-ingest = "ingest.main:main"
+sdr-capture-wifi = "capture.wifi.service:main"
+sdr-capture-bluetooth = "capture.bluetooth.service:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+
+[tool.setuptools]
+packages = [
+    "schema",
+    "capture",
+    "capture.common",
+    "capture.wifi",
+    "capture.bluetooth",
+    "ingest",
+    "storage",
+    "viz",
+]
+
+[tool.pytest.ini_options]
+# importlib mode avoids sys.path/module-name collisions between the
+# test tree's package-per-modality layout (tests/capture/wifi,
+# tests/capture/bluetooth, ...) and the identically-named source
+# packages (capture.wifi, capture.bluetooth, ...) that are already
+# importable via the editable install. Without it, pytest's default
+# "prepend" mode either merges tests/capture with the real top-level
+# capture package (masking normalizer.py) or collides same-named
+# test_normalizer.py files across modality subdirectories.
+addopts = "--import-mode=importlib"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

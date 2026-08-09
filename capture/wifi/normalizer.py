@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+import re
+from datetime import datetime, timezone
+
+from schema.records import Identifier, Modality, Signal, UnifiedRecord
+
+_LEADING_INT = re.compile(r"\d+")
+
+
+def _parse_channel(raw: object) -> int | None:
+    """Kismet reports `kismet.device.base.channel` as a free-form string that
+    frequently carries an HT/VHT width suffix ("6HT40", "36HT80", "157VHT80")
+    and occasionally a non-numeric value entirely. Identifier.channel is a
+    plain Optional[int], so the vendor-format mess is untangled here rather
+    than by widening the schema: take the leading integer, or None if there
+    isn't one."""
+    if raw is None:
+        return None
+    match = _LEADING_INT.match(str(raw).strip())
+    return int(match.group()) if match else None
+
+
+def normalize_kismet_device(
+    device: dict, survey_id: str, operator_id: str
+) -> UnifiedRecord | None:
+    """Converts a single Kismet phy80211 device JSON object into a
+    UnifiedRecord. Returns None if the device has no signal reading yet
+    (Kismet reports devices before their first signal sample). lat/lon are
+    left at 0.0 with gps_fix_quality=None — ingest.service attaches the real
+    fix, since WiFi capture has no GPS access of its own."""
+    signal_block = device.get("kismet.device.base.signal", {})
+    signal_dbm = signal_block.get("kismet.common.signal.last_signal")
+    if signal_dbm is None:
+        return None
+
+    ssid_map = device.get("dot11.device", {}).get(
+        "dot11.device.advertised_ssid_map", {}
+    )
+    ssid = None
+    encryption = None
+    for entry in ssid_map.values():
+        ssid = entry.get("dot11.advertisedssid.ssid")
+        encryption = entry.get("dot11.advertisedssid.crypt_string")
+        break
+
+    last_seen = device.get("kismet.device.base.last_time")
+    timestamp = (
+        datetime.fromtimestamp(last_seen, tz=timezone.utc)
+        if last_seen
+        else datetime.now(timezone.utc)
+    )
+
+    return UnifiedRecord(
+        timestamp=timestamp,
+        lat=0.0,
+        lon=0.0,
+        gps_fix_quality=None,
+        survey_id=survey_id,
+        operator_id=operator_id,
+        modality=Modality.WIFI,
+        identifier=Identifier(
+            bssid=device.get("kismet.device.base.macaddr"),
+            ssid=ssid,
+            channel=_parse_channel(device.get("kismet.device.base.channel")),
+        ),
+        signal=Signal(rssi=float(signal_dbm)),
+        metadata={"encryption_type_if_broadcast_visible": encryption} if encryption else {},
+    )

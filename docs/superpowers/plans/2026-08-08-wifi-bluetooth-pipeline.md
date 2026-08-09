@@ -31,6 +31,14 @@ reads directly from storage for field verification.
   and BLE adapter integration is real, but Postgres/PostGIS is optional for unit tests
   (SQLite in-memory is used) and required only for the docker-compose integration path.
 
+> **Amendment (post-implementation):** BLE capture (Task 7) uses bleak's default *active*
+> scanning mode rather than passive, as a deliberate accepted exception to the passive-only
+> constraint above. Passive mode on BlueZ requires `or_patterns` filtering and loses
+> scan-response data (device names) that this survey tool wants to capture. See the comment
+> above the `BleakScanner.discover(...)` call in `capture/bluetooth/service.py` for the full
+> rationale. No other part of the passive-only constraint is relaxed: there is still no
+> association, deauth, injection, pairing, or payload capture.
+
 ---
 
 ### Task 1: Project scaffolding
