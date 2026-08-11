@@ -29,6 +29,7 @@ packages = [
     "capture.common",
     "capture.wifi",
     "capture.bluetooth",
+    "capture.cellular",
     "ingest",
     "storage",
     "viz",
