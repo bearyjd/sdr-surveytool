@@ -41,7 +41,7 @@ mkdir -p "$VENDOR_DIR/build"
 (
     cd "$VENDOR_DIR/build"
     cmake -DUSE_OPENCL=0 -DUSE_BLADERF=0 -DUSE_HACKRF=0 -DCMAKE_BUILD_TYPE=Release ..
-    make -j"$(nproc)"
+    make -j"$(nproc)" CellSearch
 )
 
 echo "== Done. Binary at $VENDOR_DIR/build/src/CellSearch =="

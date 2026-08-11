@@ -33,3 +33,10 @@ network-use disclosure clause still applies if this tool's output ever becomes p
 a network-facing service (e.g. the planned carrier-facing analytics product) — anyone
 wiring this in must offer that service's users the corresponding source, including any
 modifications. No modifications exist yet; flag this before shipping such a service.
+
+`testdata/cell301_1815.3mhz.bin` is a decimated derivative of
+`vendor/lte-cell-scanner/regression_test_signal_file/f1815.3_s19.2_bw20_0.08s_hackrf-1.bin`,
+LTE-Cell-Scanner's own bundled regression capture, produced by
+`testdata/generate_fixture.py`. As a derivative of AGPL-3.0-licensed data, this
+fixture file inherits AGPL-3.0 licensing — it is not covered by the MIT license
+at the repository root (`LICENSE`).

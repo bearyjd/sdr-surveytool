@@ -54,4 +54,10 @@ def run_cellsearch(
         timeout=timeout_seconds,
         env=env,
     )
-    return parse_cellsearch_output(result.stdout)
+    cells = parse_cellsearch_output(result.stdout)
+    if not cells and result.returncode != 0:
+        raise RuntimeError(
+            f"CellSearch exited with code {result.returncode} and no cells were "
+            f"parsed from its output; stderr:\n{result.stderr}"
+        )
+    return cells

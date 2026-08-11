@@ -1,4 +1,8 @@
-from capture.cellular.offline_scanner import parse_cellsearch_output
+import subprocess
+
+import pytest
+
+from capture.cellular.offline_scanner import parse_cellsearch_output, run_cellsearch
 
 # Verbatim stdout from an actual `CellSearch -s 1815300000 --loadbin ...` run
 # against the fixture generated in Task 2.
@@ -57,3 +61,26 @@ def test_parse_cellsearch_output_extracts_detected_cell():
 
 def test_parse_cellsearch_output_returns_empty_list_when_no_cell_found():
     assert parse_cellsearch_output(NO_CELL_STDOUT) == []
+
+
+def test_run_cellsearch_raises_when_process_fails_with_no_cells(monkeypatch):
+    """A non-zero exit combined with zero parsed cells indicates a real
+    failure (missing shared library, malformed IQ file, crash) rather than a
+    legitimate 'no peaks found' run, and should not be silently swallowed."""
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0] if args else kwargs.get("args"),
+            returncode=1,
+            stdout="",
+            stderr="error while loading shared libraries: libitpp.so.9",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="libitpp.so.9"):
+        run_cellsearch(
+            "/fake/CellSearch",
+            "/fake/iq.bin",
+            freq_start_hz=1815300000,
+        )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,10 @@ def test_offline_decode_detects_known_cell():
         str(_CELLSEARCH_BINARY),
         str(_FIXTURE),
         freq_start_hz=1815300000,
-        extra_env={"LD_LIBRARY_PATH": "/usr/local/lib"},
+        extra_env={
+            "LD_LIBRARY_PATH": "/usr/local/lib:"
+            + os.environ.get("LD_LIBRARY_PATH", "")
+        },
     )
 
     assert len(cells) == 1
