@@ -1,0 +1,8 @@
+{
+  "duplex": "FDD",
+  "freq_mhz": 1815.3,
+  "cell_id": 301,
+  "pss_id": 1,
+  "rx_power_db": -9.44976,
+  "freq_offset_hz": 14302.6
+}

@@ -16,6 +16,9 @@ build/
 *.sigmf-data
 data/
 
+# Exception: test fixtures are committed
+!capture/cellular/testdata/*.bin
+
 # Editor/OS
 .DS_Store
 .vscode/
