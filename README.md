@@ -21,6 +21,16 @@ for the full architecture design.
 - `viz/` — local field-verification dashboard (map + heatmap)
 - `fpga/` — future-phase bladeRF HDL work, deferred until profiling justifies it
 
+## Deployment notes
+
+- `ingest` and `capture/unknown` must run as **one dedicated uid**. The snippet
+  staging and store directories must be owned by it with mode `0700`, and both must
+  be on **one filesystem**. Snippets are hard-linked from staging into the store.
+  Both services check this at startup.
+- Unknown-signal capture flags such as `--min-free-bytes` (disk floor, default
+  2 GiB) and `--max-clock-drift-s` (re-anchor threshold, default 2 s) are documented
+  in [capture/unknown/README.md](capture/unknown/README.md).
+
 ## Hardware
 
 bladeRF 2.0 micro xA9, Jetson Orin Nano (field/vehicle-mounted host), u-blox M8N GPS,

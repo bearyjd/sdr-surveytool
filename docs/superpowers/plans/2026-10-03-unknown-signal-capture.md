@@ -88,6 +88,45 @@ pipeline, §7 storage).
      There is no adaptive floor estimation, and the trigger threshold is that floor plus
      `--threshold-db` (default 10).
 
+> **Amendment (post-review, 2026-10-03):** the code review and the security review
+> of the executed branch led to the follow-up commits after `cb64986`. Where the task
+> code blocks below differ, **the code on the branch is authoritative**. Changes:
+>
+> - **Bounded resources:**
+>   - `--min-free-bytes` floor (default 2 GiB) before writing a snippet;
+>   - snippet queue capped at 2 with `put_nowait` drop-and-count;
+>   - `cooldown_seconds > 0` and `post_trigger_samples >= 1` enforced, since a zero
+>     window hung `process()`;
+>   - staged pair deleted when an emit fails;
+>   - `occupied_bandwidth_hz` batched in float32, so peak memory no longer scales
+>     with the snippet (6 MiB for a 61 MiB input, down from 244 MiB).
+> - **Snippet handoff:**
+>   - atomic SigMF writes (temp names, data renamed first, meta last, files `0600`);
+>   - snippet dirs created `0700`, resolved to absolute paths and logged, and
+>     required at startup to be owned by the service uid
+>     (`storage.snippet_store.ensure_private_dir`);
+>   - `adopt()` rewritten to use `abspath`, lstat for single-link regular files,
+>     `os.link(follow_symlinks=False)` with dev/ino verification, link-both-then-unlink
+>     with rollback, and a same-filesystem check at construction;
+>   - rejections raise `SnippetRejected(reason)`, so ingest persists the record with
+>     `iq_snippet_path=None` and `quality_flags.snippet_rejected`;
+>   - untrusted names are formatted with `!r`.
+> - **Service:**
+>   - `_open_session` tested against the real scheduler;
+>   - `start()` moved inside try/finally;
+>   - `_drain` delivers queued snippets before raising, and also ends the session
+>     when sample time drifts more than `--max-clock-drift-s` (default 2 s) from
+>     wall time;
+>   - SDR source given 100 ms of `min_output_buffer` (GNU Radio accepted up to
+>     5.6M items);
+>   - SIGTERM shuts down like Ctrl-C;
+>   - processed snippets released before waiting for the next;
+>   - pyright narrowing and types added, and CLI parsing split.
+> - **Task 11 Step 3:** `cooldown_seconds=0.0` is now rejected by `CaptureSettings`.
+>   Use `1.0` to see `assert [0.5, 2.0, 4.0] == [0.5, 4.0]`.
+> - **Final counts:** the full suite gives `156 passed, 1 skipped`, and the `-W error`
+>   subset gives `90 passed`.
+
 ## Verified facts (build-and-run spike, 2026-10-03)
 
 Each fact below comes from running code in this environment. No facts are taken from

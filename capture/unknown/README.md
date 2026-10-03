@@ -35,8 +35,9 @@ The dBFS power stats and the occupied-bandwidth estimate live in the shared top-
   Records carry `quality_flags: {"power_units": "dBFS"}`.
 - `timestamp` is the trigger sample's time: the wall clock read once at stream start,
   plus sample_index / sample_rate. Cooldowns compare those same sample-derived times.
-  If the SDR overflows (drops samples), sample time falls behind wall time by the
-  dropped duration.
+  Dropped samples (SDR overflow) make sample time lag wall time, and an NTP/GPS step
+  moves wall time. Once they differ by more than `--max-clock-drift-s` (default 2 s),
+  the radio session is rebuilt, which re-anchors sample time.
 - `identifier.bandwidth_estimate` is the 99%-power occupied bandwidth of the burst
   (resolution sample_rate / 1024). It is within +-5% at >= 15 dB SNR and up to +24% at
   the 10 dB trigger margin. Bursts shorter than 1024 samples are overestimated.
@@ -45,11 +46,30 @@ The dBFS power stats and the occupied-bandwidth estimate live in the shared top-
 
 Capture writes `<stamp>_<freq>Hz_<id>.sigmf-data` + `.sigmf-meta` into `--staging-dir`
 and emits the record with `iq_snippet_path` set to the staged absolute `.sigmf-data` path.
-Ingest's `LocalSnippetStore` validates the path (it must be a `.sigmf-data` file directly
-inside ingest's `--snippet-staging-dir`, symlinks resolved), moves the pair into
-`--snippet-store-dir`, and persists the record with the final path. Run both services
-from the same working directory, or pass the same absolute staging path to both. Keep
-staging and store on one filesystem so the move is an atomic rename.
+Each file is written under a hidden temporary name and renamed into place, data first
+and meta last, so a `.sigmf-meta` never appears without its complete data. If the
+record cannot be emitted, the staged pair is deleted.
+
+Ingest's `LocalSnippetStore` treats the path as untrusted. It accepts only a
+`.sigmf-data` file directly inside ingest's `--snippet-staging-dir` (absolute path,
+symlinks not followed). Both files must be regular files with a single hard link. It
+hard-links both into `--snippet-store-dir` without replacing anything there, checks
+that the linked inodes are the ones it checked, and only then removes the staged
+names. A rejected snippet doesn't lose the detection: the record is still persisted,
+with `iq_snippet_path: null` and `quality_flags.snippet_rejected` set to the reason.
+
+**Deployment requirements** (checked at startup, which fails with an actionable
+message):
+
+- **One dedicated uid.** Capture and ingest must run as the same dedicated user. The
+  staging and store directories must be owned by that uid with no group/other access
+  (created `0700`; snippet files are `0600`).
+- **One filesystem.** Staging and store must be on the same filesystem, because
+  hard links cannot cross filesystems.
+- **Matching paths.** Both services resolve their directories to absolute paths and
+  log them, since relative defaults resolve against each process's working
+  directory. Run both from the same directory, or pass the same absolute staging
+  path to both.
 
 ## System dependencies (Fedora 43, verified)
 
@@ -84,6 +104,20 @@ sdr-capture-unknown --survey-id s1 --operator-id op1 \
 sustained only ~58 MS/s on a fast x86 desktop and has not been profiled on the Jetson.
 A 1 s snippet is 160 MB on disk at 20 MS/s (448 MB at 56 MS/s). In memory it is
 240 MB (672 MB), because a float32 power array rides along with the cf32 samples.
+
+Disk and memory stay bounded:
+
+- **Low disk:** a snippet that would leave less than `--min-free-bytes` (default
+  2 GiB) free on the staging disk is dropped with a warning. Staging, the store and
+  the database share that disk. A continuous emitter at the default 30 s cooldown
+  writes ~19 GB/h at 20 MS/s.
+- **Slow consumer:** at most two completed snippets wait between the radio thread and
+  the writer; further ones are dropped and counted rather than blocking the radio.
+- **Source buffering:** the SDR source gets 100 ms of output buffer, so a briefly
+  GIL-starved Python tap doesn't overflow it.
+
+The service restarts the radio session when the stream stalls for 5 s. SIGTERM shuts
+it down the same way Ctrl-C does.
 
 ## Licenses
 
