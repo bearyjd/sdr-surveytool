@@ -5,6 +5,7 @@ import argparse
 import logging
 import queue
 import time
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -30,6 +31,10 @@ _MAX_BACKOFF_SECONDS = 60.0
 # wedged driver, or its source returned WORK_DONE): rebuild the session.
 _STALL_SECONDS = 5.0
 _POLL_SECONDS = 0.5
+# Completed snippets cross from the GNU Radio scheduler thread to the service
+# thread through a queue this small: a stalled consumer (slow disk, wedged
+# ingest socket) must not pile up ~670 MB snippets in memory.
+_SNIPPET_QUEUE_MAXSIZE = 2
 
 
 @dataclass(frozen=True)
@@ -120,10 +125,11 @@ def run(
     """
     backoff = _INITIAL_BACKOFF_SECONDS
     last_trigger_at: Mapping[float, datetime] = {}
+    drops: Counter[str] = Counter()  # dropped snippets by cause, for the logs
     with RecordEmitter(socket_path) as emitter:
         while True:
             try:
-                with _open_session(settings, last_trigger_at) as snippets:
+                with _open_session(settings, last_trigger_at, drops) as snippets:
                     backoff = _INITIAL_BACKOFF_SECONDS  # the radio opened
                     for snippet in snippets:
                         last_trigger_at = record_trigger(last_trigger_at, snippet.trigger)
@@ -155,9 +161,33 @@ def _stage_and_emit(
         )
 
 
+def _offer_or_drop(
+    snippets: queue.Queue, drops: Counter[str]
+) -> Callable[[CapturedSnippet], None]:
+    """The tap's on_snippet callback. It runs on the GNU Radio scheduler
+    thread, which must never block (the SDR would overflow), so a full queue
+    drops the snippet and counts it instead of waiting."""
+
+    def offer(snippet: CapturedSnippet) -> None:
+        try:
+            snippets.put_nowait(snippet)
+        except queue.Full:
+            drops["queue_full"] += 1
+            logger.warning(
+                "Snippet queue full; dropping snippet triggered at sample %d "
+                "(%d dropped for a full queue so far)",
+                snippet.trigger.sample_index,
+                drops["queue_full"],
+            )
+
+    return offer
+
+
 @contextmanager
 def _open_session(
-    settings: CaptureSettings, last_trigger_at: Mapping[float, datetime]
+    settings: CaptureSettings,
+    last_trigger_at: Mapping[float, datetime],
+    drops: Counter[str],
 ) -> Iterator[Iterator[CapturedSnippet]]:
     """Open the SDR, start the flowgraph, and yield an iterator of completed
     snippets; always stops the flowgraph on exit. Needs GNU Radio and a real
@@ -182,14 +212,12 @@ def _open_session(
         post_trigger_samples=settings.samples(settings.post_trigger_seconds),
         last_trigger_at=last_trigger_at,
     )
-    # Unbounded: the cooldown caps snippets at one per cooldown window, and a
-    # bounded put() would block the scheduler thread and overflow the SDR.
-    snippets: queue.Queue[CapturedSnippet] = queue.Queue()
+    snippets: queue.Queue[CapturedSnippet] = queue.Queue(maxsize=_SNIPPET_QUEUE_MAXSIZE)
     flowgraph = build_flowgraph(
         source,
         settings.samples(settings.averaging_seconds),
         assembler,
-        snippets.put,
+        _offer_or_drop(snippets, drops),
     )
     flowgraph.top_block.start()
     try:

@@ -20,8 +20,8 @@ class SnippetTap(gr.sync_block):
     completed snippets to `on_snippet`.
 
     on_snippet runs on the GNU Radio scheduler thread: it must be quick and
-    non-blocking (the service passes an unbounded queue's put). Disk I/O
-    here would stall the stream and overflow the SDR.
+    never block (the service passes a bounded queue's put_nowait, dropping on
+    Full). Disk I/O here would stall the stream and overflow the SDR.
     """
 
     def __init__(

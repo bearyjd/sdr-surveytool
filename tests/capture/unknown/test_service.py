@@ -1,6 +1,7 @@
 # tests/capture/unknown/test_service.py
 import logging
 import queue
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -119,6 +120,18 @@ def test_drain_reraises_a_tap_failure():
     assert isinstance(excinfo.value.__cause__, ValueError)
 
 
+def test_full_snippet_queue_drops_and_counts_without_blocking():
+    """The tap calls this on the GNU Radio scheduler thread, which must never
+    block (the SDR would overflow): a full queue drops the snippet instead."""
+    snippets: queue.Queue = queue.Queue(maxsize=2)
+    drops: Counter = Counter()
+    offer = service._offer_or_drop(snippets, drops)
+    for _ in range(3):
+        offer(_snippet())
+    assert snippets.qsize() == 2
+    assert drops == Counter({"queue_full": 1})
+
+
 class _FakeEmitter:
     def __init__(self, socket_path: str) -> None:
         self.records = []
@@ -142,7 +155,7 @@ def test_run_survives_radio_failures_and_keeps_cooldown_across_rebuilds(tmp_path
     sessions = []
 
     @contextmanager
-    def fake_open_session(settings, last_trigger_at):
+    def fake_open_session(settings, last_trigger_at, drops):
         sessions.append(dict(last_trigger_at))
         if len(sessions) <= 2:
             raise RuntimeError("SoapySDR::Device::make() no match")
@@ -157,8 +170,14 @@ def test_run_survives_radio_failures_and_keeps_cooldown_across_rebuilds(tmp_path
 
     sleeps = []
     emitters = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) > 10:  # raised inside run()'s except block, so it escapes
+            raise AssertionError(f"run() kept retrying: {sleeps}")
+
     monkeypatch.setattr(service, "_open_session", fake_open_session)
-    monkeypatch.setattr(service.time, "sleep", sleeps.append)
+    monkeypatch.setattr(service.time, "sleep", fake_sleep)
     monkeypatch.setattr(
         service, "RecordEmitter", lambda path: emitters.append(_FakeEmitter(path)) or emitters[-1]
     )
