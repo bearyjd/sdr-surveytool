@@ -11,6 +11,7 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "numpy>=1.26",  # capture/unknown DSP; also capture/cellular/testdata/generate_fixture.py
+    "sigmf>=1.13",  # capture/unknown snippet files (LGPL-3.0-or-later)
 ]
 
 [project.scripts]
