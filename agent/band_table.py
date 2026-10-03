@@ -64,14 +64,20 @@ def load_band_table(path: Path = DEFAULT_BAND_TABLE) -> BandTable:
     return table
 
 
-def match_bands(entries: tuple[BandEntry, ...], center_hz: float, obw_hz: float) -> list[BandMatch]:
+def match_bands(
+    entries: tuple[BandEntry, ...], center_hz: float, obw_hz: float, tolerance_hz: float = 0.0
+) -> list[BandMatch]:
     """Every entry the signal's occupied span [center - obw/2, center + obw/2]
-    overlaps, marked grounded or not, lowest start first."""
+    overlaps, marked grounded or not, lowest start first. Grounded needs the
+    whole span inside the band (give or take `tolerance_hz` each side, for
+    the OBW's quantization) and a plausible OBW: a wide signal centered just
+    inside an edge has half its energy outside the band."""
     low, high = center_hz - obw_hz / 2, center_hz + obw_hz / 2
     return [
         BandMatch(
             entry=entry,
-            grounded=entry.start_hz <= center_hz <= entry.end_hz
+            grounded=entry.start_hz - tolerance_hz <= low
+            and high <= entry.end_hz + tolerance_hz
             and entry.expected_obw_hz[0] <= obw_hz <= entry.expected_obw_hz[1],
         )
         for entry in sorted(entries, key=lambda entry: entry.start_hz)

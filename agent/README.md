@@ -6,7 +6,8 @@ one (bandwidth, center, duty cycle, bursts, PAPR, flatness, symbol rate), matche
 against a small curated US band table with eCFR citations, and asks Claude for one
 forced `record_classification` tool call. Routing writes `auto_classified` only when the
 tag has the form `<band-id>:<signal>`, the confidence is >= 0.85, and the band id
-(`ism_902_928` in `ism_902_928:lora`) is a band-table entry the signal is grounded in;
+(`ism_902_928` in `ism_902_928:lora`) is a band-table entry the signal is grounded in
+(its whole occupied span inside the band, give or take one fine bin, at a plausible OBW);
 everything else goes to `needs_review`. In v1 only the band table grounds: a modulation
 classifier's label is shown to the model but never grounds a tag by itself.
 The noise reference is the snippet's pre-trigger, below the trigger threshold step 4

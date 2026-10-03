@@ -76,9 +76,28 @@ def test_grounded_needs_center_inside_and_plausible_obw():
 
 
 def test_band_edges_are_inclusive():
+    """The whole occupied span must lie in the band; touching an edge does."""
     bands = (_entry("b", 100e6, 101e6),)
-    assert match_bands(bands, 100e6, 20e3)[0].grounded
-    assert match_bands(bands, 101e6, 20e3)[0].grounded
+    assert match_bands(bands, 100e6 + 10e3, 20e3)[0].grounded
+    assert match_bands(bands, 101e6 - 10e3, 20e3)[0].grounded
+
+
+@pytest.mark.parametrize("center_hz", [2110e6 + 1.0, 2180e6 - 1.0])
+def test_a_signal_centered_just_inside_an_edge_but_spilling_out_does_not_ground(center_hz):
+    """The reviewer's case: a 20 MHz signal centered 1 Hz inside the band
+    edge has half its energy outside the band."""
+    bands = (_entry("downlink", 2110e6, 2180e6, (1e6, 20e6)),)
+    (match,) = match_bands(bands, center_hz, 20e6)
+    assert not match.grounded
+
+
+@pytest.mark.parametrize("edge", ["low", "high"])
+def test_the_span_may_overhang_an_edge_by_the_tolerance(edge):
+    """One fine bin each side absorbs the OBW's quantization."""
+    bands = (_entry("b", 100e6, 101e6),)
+    center = 100e6 + 10e3 - 150.0 if edge == "low" else 101e6 - 10e3 + 150.0
+    assert not match_bands(bands, center, 20e3)[0].grounded
+    assert match_bands(bands, center, 20e3, tolerance_hz=200.0)[0].grounded
 
 
 def test_signal_overlapping_an_edge_matches_ungrounded():

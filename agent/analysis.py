@@ -113,7 +113,7 @@ def analyse_snippet(
         # unreliable bandwidth makes the OBW plausibility check meaningless.
         matches = tuple(
             BandMatch(match.entry, match.grounded and not reasons)
-            for match in match_bands(bands, signal_center, primary.obw_hz)
+            for match in match_bands(bands, signal_center, primary.obw_hz, primary.fine_resolution_hz)
         )
     return SnippetAnalysis(
         tuned_center_hz=snippet.center_freq_hz,
