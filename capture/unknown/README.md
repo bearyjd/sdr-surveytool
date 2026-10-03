@@ -122,13 +122,17 @@ message):
 - **One filesystem and mount.** Staging and store must be on the same filesystem and
   mount, because hard links cannot cross either. Ingest proves this at startup with
   a real hard link.
+- **Opt-in on the ingest side.** Ingest only adopts snippets when given both
+  `--snippet-staging-dir` and `--snippet-store-dir`. Without them it starts exactly
+  as for WiFi/BT-only deployments: unknown-signal records are still persisted, but
+  without IQ (`iq_snippet_path: null`, `quality_flags.snippet_rejected:
+  "no_snippet_store"`).
 - **Absolute, matching paths.** Staging and store directories must be absolute
   paths; relative ones are rejected at startup, since capture and ingest would
-  resolve them against different working directories. The defaults are
-  `/var/lib/sdr-surveytool/snippet-staging` and `/var/lib/sdr-surveytool/snippets`.
-  Create the parent once for the service user, e.g.
-  `sudo install -d -o sdr -g sdr -m 700 /var/lib/sdr-surveytool`. Capture's
-  `--staging-dir` must equal ingest's `--snippet-staging-dir`.
+  resolve them against different working directories. Capture's `--staging-dir`
+  defaults to `/var/lib/sdr-surveytool/snippet-staging` and must equal ingest's
+  `--snippet-staging-dir`. Create the parent once for the service user, e.g.
+  `sudo install -d -o sdr -g sdr -m 700 /var/lib/sdr-surveytool`.
 
 ## System dependencies (Fedora 43, verified)
 
@@ -153,7 +157,9 @@ the service logs `SoapySDR::Device::make() no match` and retries with backoff.
 ## Running
 
 ```bash
-sdr-ingest --gps-fix-quality 0   # staging/store under /var/lib/sdr-surveytool by default
+sdr-ingest --gps-fix-quality 0 \
+    --snippet-staging-dir /var/lib/sdr-surveytool/snippet-staging \
+    --snippet-store-dir /var/lib/sdr-surveytool/snippets   # opt in to storing IQ
 sdr-capture-unknown --survey-id s1 --operator-id op1 \
     --center-freq 915e6 --noise-floor-dbfs -60
 ```

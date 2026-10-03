@@ -177,8 +177,9 @@ pipeline, §7 storage).
 >     snippets with no finite samples are dropped;
 >   - the normalizer refuses non-finite floats;
 >   - the tuned frequency is read back (`get_frequency(0)`);
->   - snippet dirs default to `/var/lib/sdr-surveytool/...` and must be absolute.
-> - **Final counts:** the full suite gives `287 passed, 1 skipped`, and the
+>   - snippet dirs must be absolute (capture defaults to `/var/lib/sdr-surveytool/...`);
+>   - ingest's snippet store is opt-in, enabled by passing both snippet dirs.
+> - **Final counts:** the full suite gives `290 passed, 1 skipped`, and the
 >   `-W error` subset (`tests/capture/unknown tests/dsp
 >   tests/storage/test_snippet_store.py`) gives `211 passed`.
 
