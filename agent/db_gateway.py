@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 import psycopg
 from sqlalchemy import Connection, Engine, create_engine, text
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from schema.records import ClassificationStatus
@@ -479,6 +480,31 @@ def verify_boundary(engine: Engine, agent_role: str) -> None:
         )
 
 
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+# verify-full is recommended: require and verify-ca encrypt, but only
+# verify-full also checks the server's name, so a host that can redirect the
+# connection cannot impersonate the database.
+_TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
+
+
+def require_tls_for_remote(url: URL) -> None:
+    """Raise ValueError unless a non-local database is reached over TLS. A
+    unix socket, localhost, 127.0.0.1 and ::1 are local. The URL's sslmode
+    counts, else PGSSLMODE, else libpq's default, prefer (which silently
+    falls back to clear text)."""
+    host = url.host or url.query.get("host")
+    if isinstance(host, tuple):
+        host = host[0] if host else None
+    if not host or host.startswith("/") or host in _LOCAL_HOSTS:
+        return
+    sslmode = url.query.get("sslmode") or os.environ.get("PGSSLMODE") or "prefer"
+    if sslmode not in _TLS_SSLMODES:
+        raise ValueError(
+            f"The database at {host} is not local: set sslmode=verify-full (recommended) or at "
+            f"least require in SURVEYTOOL_AGENT_DATABASE_URL, not {sslmode!r}"
+        )
+
+
 def connect_gateway(
     database_url: str,
     agent_role: str = DEFAULT_AGENT_ROLE,
@@ -488,6 +514,7 @@ def connect_gateway(
     url = make_url(database_url)
     if url.get_backend_name() != "postgresql":
         raise ValueError("The agent needs a PostgreSQL URL; its boundary only exists there")
+    require_tls_for_remote(url)
     engine = create_engine(
         url.set(drivername="postgresql+psycopg"),
         connect_args={"options": f"-c statement_timeout={round(statement_timeout_s * 1000)}"},

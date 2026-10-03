@@ -142,7 +142,13 @@ psql "$SURVEYTOOL_ADMIN_DATABASE_URL" \
     -c 'CREATE ROLE surveytool_agent_login LOGIN CONNECTION LIMIT 2 IN ROLE surveytool_agent'
 psql "$SURVEYTOOL_ADMIN_DATABASE_URL" -c '\password surveytool_agent_login'
 
+# A database that is not local (unix socket, localhost, 127.0.0.1, ::1) must be reached
+# over TLS: the agent refuses sslmode disable, allow and prefer (prefer silently falls
+# back to clear text). verify-full is recommended: require and verify-ca encrypt, but only
+# verify-full checks the server's name, so a host that can redirect the connection
+# cannot impersonate the database.
 export SURVEYTOOL_AGENT_DATABASE_URL=postgresql://surveytool_agent_login:...@localhost:5432/surveytool
+# remote: postgresql://surveytool_agent_login:...@db.example.net/surveytool?sslmode=verify-full
 export ANTHROPIC_API_KEY=...
 sdr-agent --snippet-store-dir /absolute/path/of/ingest/data/snippets
 ```

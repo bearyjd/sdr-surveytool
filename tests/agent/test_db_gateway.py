@@ -5,9 +5,17 @@ function are exercised for real in tests/storage/test_agent_boundary_pg.py)."""
 import pytest
 
 import psycopg
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
-from agent.db_gateway import AgentGateway, PendingRecord, SubmitUnwritable, connect_gateway, parse_pending_row
+from agent.db_gateway import (
+    AgentGateway,
+    PendingRecord,
+    SubmitUnwritable,
+    connect_gateway,
+    parse_pending_row,
+    require_tls_for_remote,
+)
 from schema.records import ClassificationStatus
 
 
@@ -77,3 +85,42 @@ def test_an_untranslatable_character_on_submit_is_about_the_record():
     gateway = AgentGateway(_Engine())  # type: ignore[arg-type]
     with pytest.raises(SubmitUnwritable, match="Record 7"):
         gateway.submit_classification(7, ClassificationStatus.NEEDS_REVIEW, None, 0.0, "x")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://agent@db.example.com/surveytool",
+        "postgresql://agent@10.0.0.5/surveytool?sslmode=disable",
+        "postgresql://agent@10.0.0.5/surveytool?sslmode=allow",
+        "postgresql://agent@10.0.0.5/surveytool?sslmode=prefer",
+    ],
+)
+def test_a_remote_database_requires_tls(url, monkeypatch):
+    """Codex M8: the agent's password and every record would cross the
+    network in clear; prefer silently falls back to it."""
+    monkeypatch.delenv("PGSSLMODE", raising=False)
+    with pytest.raises(ValueError, match="sslmode"):
+        connect_gateway(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://agent@db.example.com/surveytool?sslmode=verify-full",
+        "postgresql://agent@db.example.com/surveytool?sslmode=verify-ca",
+        "postgresql://agent@db.example.com/surveytool?sslmode=require",
+        "postgresql://agent@localhost/surveytool",
+        "postgresql://agent@127.0.0.1/surveytool?sslmode=disable",
+        "postgresql://agent@[::1]/surveytool",
+        "postgresql://agent@/surveytool?host=/var/run/postgresql",
+    ],
+)
+def test_tls_settings_that_are_accepted(url, monkeypatch):
+    monkeypatch.delenv("PGSSLMODE", raising=False)
+    require_tls_for_remote(make_url(url))
+
+
+def test_pgsslmode_counts_when_the_url_sets_none(monkeypatch):
+    monkeypatch.setenv("PGSSLMODE", "verify-full")
+    require_tls_for_remote(make_url("postgresql://agent@db.example.com/surveytool"))
