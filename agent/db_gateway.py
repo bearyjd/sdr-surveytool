@@ -1,0 +1,259 @@
+# agent/db_gateway.py
+"""The agent's only database access (design: "Structural boundary").
+
+SQL against the boundary objects installed by storage/sql/agent_boundary.sql
+and nothing else: the public.agent_pending_unknown view (read) and the
+public.classify_unknown function (write). `connect_gateway` refuses to
+return a gateway unless the connected role is confined by that boundary.
+The only module in agent/ allowed to import sqlalchemy or psycopg.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import psycopg
+from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import DBAPIError
+
+from schema.records import ClassificationStatus
+
+DEFAULT_AGENT_ROLE = "surveytool_agent"
+DEFAULT_STATEMENT_TIMEOUT_S = 30.0
+
+_NOT_PENDING = "P0002"  # classify_unknown's no_data_found
+_TIMED_OUT = {"57014", "55P03"}  # query_canceled (statement_timeout), lock_not_available
+_CLASSIFY = "public.classify_unknown(integer, text, text, double precision, text)"
+
+# The self-check is an allowlist. The connected role may be a member of
+# nothing but itself and the agent role; neither may carry a dangerous
+# attribute, any privilege on survey_records, or the right to create
+# objects anywhere; and the only SECURITY DEFINER function it may execute
+# (outside extensions) is classify_unknown. Each query returns one row per
+# problem, as text.
+_PROBLEMS = text(
+    """
+    SELECT 'member of ' || r.rolname
+      FROM pg_catalog.pg_roles AS r
+     WHERE pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER')
+       AND r.rolname NOT IN (current_user, :agent_role)
+    UNION ALL
+    SELECT r.rolname || ' has '
+           || concat_ws(', ',
+                        CASE WHEN r.rolsuper THEN 'SUPERUSER' END,
+                        CASE WHEN r.rolreplication THEN 'REPLICATION' END,
+                        CASE WHEN r.rolbypassrls THEN 'BYPASSRLS' END,
+                        CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END,
+                        CASE WHEN r.rolcreatedb THEN 'CREATEDB' END)
+      FROM pg_catalog.pg_roles AS r
+     WHERE r.rolname IN (current_user, :agent_role)
+       AND (r.rolsuper OR r.rolreplication OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb)
+    UNION ALL
+    SELECT r.rolname || ' has a privilege on survey_records'
+      FROM pg_catalog.pg_roles AS r
+     WHERE r.rolname IN (current_user, :agent_role)
+       AND (pg_catalog.has_table_privilege(
+                r.oid, pg_catalog.to_regclass('public.survey_records'),
+                'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+            OR pg_catalog.has_any_column_privilege(
+                r.oid, pg_catalog.to_regclass('public.survey_records'),
+                'SELECT, INSERT, UPDATE, REFERENCES'))
+    UNION ALL
+    SELECT r.rolname || ' can create objects in schema ' || n.nspname
+      FROM pg_catalog.pg_roles AS r, pg_catalog.pg_namespace AS n
+     WHERE r.rolname IN (current_user, :agent_role)
+       AND pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE')
+    UNION ALL
+    SELECT r.rolname || ' has CREATE or TEMPORARY on the database'
+      FROM pg_catalog.pg_roles AS r
+     WHERE r.rolname IN (current_user, :agent_role)
+       AND pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'CREATE, TEMPORARY')
+    UNION ALL
+    SELECT 'can execute SECURITY DEFINER function ' || p.oid::pg_catalog.regprocedure::text
+      FROM pg_catalog.pg_proc AS p
+     WHERE p.prosecdef
+       AND pg_catalog.has_function_privilege(current_user, p.oid, 'EXECUTE')
+       AND p.oid IS DISTINCT FROM pg_catalog.to_regprocedure(:classify)
+       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend AS d
+                        WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+                          AND d.objid = p.oid AND d.deptype = 'e')
+    """
+)
+# The boundary's two entry points must be usable without SET ROLE.
+_BOUNDARY_ACCESS = text(
+    """
+    SELECT pg_catalog.pg_has_role(current_user, r.oid, 'USAGE'),
+           coalesce(pg_catalog.has_table_privilege(
+               pg_catalog.to_regclass('public.agent_pending_unknown'), 'SELECT'), false),
+           coalesce(pg_catalog.has_function_privilege(
+               pg_catalog.to_regprocedure(:classify), 'EXECUTE'), false)
+      FROM pg_catalog.pg_roles AS r
+     WHERE r.rolname = :agent_role
+    """
+)
+_COLUMNS = """id, iq_snippet_path, sample_rate, center_freq, peak_power, snippet_duration_ms,
+           snippet_rejected, snippet_dropped"""
+_FETCH = text(
+    f"""
+    SELECT {_COLUMNS}
+      FROM public.agent_pending_unknown
+     WHERE id > :after_id
+     ORDER BY id
+     LIMIT :limit
+    """
+)
+_NEWEST_WITH_SNIPPET = text(
+    f"""
+    SELECT {_COLUMNS}
+      FROM public.agent_pending_unknown
+     WHERE id > :after_id AND iq_snippet_path IS NOT NULL
+     ORDER BY id DESC
+     LIMIT :limit
+    """
+)
+_SUBMIT = text(
+    """
+    SELECT public.classify_unknown(
+        CAST(:record_id AS integer),
+        CAST(:status AS text),
+        CAST(:tag AS text),
+        CAST(:confidence AS double precision),
+        CAST(:reasoning AS text))
+    """
+)
+
+
+class BoundaryViolation(RuntimeError):
+    """The connected role is not confined by the agent database boundary."""
+
+
+class RecordNotPending(RuntimeError):
+    """No pending unknown row has this id any more: for example, a human
+    tagged it while the LLM call was in flight. The human's tag stands."""
+
+
+class SubmitRejected(RuntimeError):
+    """The database refused the write's arguments (SQLSTATE class 22, such as
+    classify_unknown's 22023): a bug in the agent, not a record judgment."""
+
+
+class SubmitTimedOut(RuntimeError):
+    """The write hit statement_timeout or a lock timeout; the row stays pending."""
+
+
+@dataclass(frozen=True)
+class PendingRecord:
+    """One row of public.agent_pending_unknown. Every value is DB data and
+    therefore untrusted (the snippet path above all). iq_snippet_path is
+    None when ingest rejected the snippet or capture dropped it; the
+    matching quality flag, if any, is in snippet_rejected/snippet_dropped."""
+
+    id: int
+    iq_snippet_path: str | None
+    sample_rate: float | None
+    center_freq: float | None
+    peak_power: float | None
+    snippet_duration_ms: int | None
+    snippet_rejected: str | None = None
+    snippet_dropped: str | None = None
+
+
+class AgentGateway:
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def fetch_pending(self, after_id: int, limit: int) -> list[PendingRecord]:
+        """Pending unknown rows with id > after_id, lowest id first."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(_FETCH, {"after_id": after_id, "limit": limit}).all()
+        return [PendingRecord(*row) for row in rows]
+
+    def fetch_newest_with_snippet(self, after_id: int, limit: int) -> list[PendingRecord]:
+        """The newest pending rows that carry a snippet path, newest first:
+        the startup probe of the snippet-store mount."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(_NEWEST_WITH_SNIPPET, {"after_id": after_id, "limit": limit}).all()
+        return [PendingRecord(*row) for row in rows]
+
+    def submit_classification(
+        self,
+        record_id: int,
+        status: ClassificationStatus,
+        tag: str | None,
+        confidence: float,
+        reasoning: str,
+    ) -> None:
+        """Write the four classification keys through classify_unknown.
+
+        Raises RecordNotPending if the row stopped being pending,
+        SubmitTimedOut on a statement or lock timeout, and SubmitRejected
+        when the arguments are refused. NUL characters, which PostgreSQL
+        text cannot hold, are removed from the reasoning first.
+        """
+        params = {
+            "record_id": record_id,
+            "status": status.value,
+            "tag": tag,
+            "confidence": confidence,
+            "reasoning": reasoning.replace("\x00", ""),
+        }
+        try:
+            with self._engine.begin() as conn:
+                conn.execute(_SUBMIT, params)
+        except DBAPIError as exc:
+            driver_error = exc.orig if isinstance(exc.orig, psycopg.Error) else None
+            sqlstate = None if driver_error is None else driver_error.sqlstate
+            if sqlstate == _NOT_PENDING:
+                raise RecordNotPending(f"Record {record_id} is no longer pending") from exc
+            if sqlstate in _TIMED_OUT:
+                raise SubmitTimedOut(f"Writing record {record_id} timed out ({sqlstate})") from exc
+            if isinstance(driver_error, psycopg.DataError):
+                raise SubmitRejected(f"The database rejected the write for record {record_id}: {driver_error}") from exc
+            raise
+
+    def close(self) -> None:
+        self._engine.dispose()
+
+
+def verify_boundary(engine: Engine, agent_role: str) -> None:
+    """Raise BoundaryViolation unless the connected role is confined."""
+    params = {"agent_role": agent_role, "classify": _CLASSIFY}
+    with engine.connect() as conn:
+        problems = conn.execute(_PROBLEMS, params).scalars().all()
+        access = conn.execute(_BOUNDARY_ACCESS, params).first()
+    if problems:
+        raise BoundaryViolation(
+            "Refusing to run: the database role is not confined to the agent boundary: "
+            # Attributes and privileges first: they matter more than memberships.
+            + "; ".join(sorted(problems, key=lambda problem: (problem.startswith("member of "), problem))[:10])
+            + f". Connect as a login role that is only IN ROLE {agent_role}, and re-run "
+            "sdr-agent-boundary."
+        )
+    if access is None or not all(access):
+        raise BoundaryViolation(
+            f"Refusing to run: the database role does not inherit {agent_role}, or the "
+            "boundary (agent_pending_unknown, classify_unknown) is not installed. "
+            "Run sdr-agent-boundary as an administrator first."
+        )
+
+
+def connect_gateway(
+    database_url: str,
+    agent_role: str = DEFAULT_AGENT_ROLE,
+    statement_timeout_s: float = DEFAULT_STATEMENT_TIMEOUT_S,
+) -> AgentGateway:
+    """Connect, verify the boundary, and return the gateway. PostgreSQL only."""
+    url = make_url(database_url)
+    if url.get_backend_name() != "postgresql":
+        raise ValueError("The agent needs a PostgreSQL URL; its boundary only exists there")
+    engine = create_engine(
+        url.set(drivername="postgresql+psycopg"),
+        connect_args={"options": f"-c statement_timeout={round(statement_timeout_s * 1000)}"},
+    )
+    try:
+        verify_boundary(engine, agent_role)
+    except BaseException:
+        engine.dispose()
+        raise
+    return AgentGateway(engine)

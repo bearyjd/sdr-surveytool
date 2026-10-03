@@ -37,6 +37,7 @@ packages = [
     "capture.bluetooth",
     "capture.cellular",
     "capture.unknown",
+    "agent",
     "dsp",
     "ingest",
     "storage",

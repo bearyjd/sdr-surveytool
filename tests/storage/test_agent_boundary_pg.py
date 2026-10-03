@@ -1,0 +1,644 @@
+# tests/storage/test_agent_boundary_pg.py
+"""The agent's database boundary on real PostgreSQL (never SQLite).
+
+Skipped unless SURVEYTOOL_TEST_PG_URL is set to a superuser URL on a
+THROWAWAY cluster (never the compose dev volume). Each run creates its own
+database and uniquely suffixed roles -- roles are cluster-global -- and drops
+all of them afterwards.
+"""
+
+import json
+import os
+import secrets
+import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import pytest
+from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.pool import NullPool
+
+from agent.db_gateway import (
+    BoundaryViolation,
+    PendingRecord,
+    RecordNotPending,
+    SubmitRejected,
+    SubmitTimedOut,
+    connect_gateway,
+)
+from schema.records import (
+    ClassificationStatus,
+    Identifier,
+    Metadata,
+    Modality,
+    Signal,
+    UnifiedRecord,
+)
+from storage.agent_boundary import install_agent_boundary
+from storage.db import init_db, make_session_factory
+from storage.repository import save_record
+
+ADMIN_URL = os.environ.get("SURVEYTOOL_TEST_PG_URL")
+pytestmark = pytest.mark.skipif(
+    not ADMIN_URL, reason="SURVEYTOOL_TEST_PG_URL (throwaway PostgreSQL admin URL) not set"
+)
+
+INSUFFICIENT_PRIVILEGE = "42501"
+INVALID_PARAMETER = "22023"
+
+
+@dataclass(frozen=True)
+class Boundary:
+    root_url: URL  # superuser, maintenance database
+    admin_url: URL  # superuser, this run's database
+    database: str
+    agent_url: URL  # a login role IN ROLE agent_role, nothing else
+    agent_role: str
+    owner_role: str
+    suffix: str
+    password: str
+
+
+def _engine(url: URL, **kwargs) -> Engine:
+    return create_engine(url, poolclass=NullPool, **kwargs)
+
+
+def _url(url: URL) -> str:
+    return url.render_as_string(hide_password=False)
+
+
+@pytest.fixture(scope="module")
+def boundary():
+    suffix = secrets.token_hex(4)
+    database = f"sdr_agent_test_{suffix}"
+    agent_role, owner_role = f"sdr_agent_{suffix}", f"sdr_owner_{suffix}"
+    login = f"sdr_login_{suffix}"
+    password = secrets.token_hex(16)
+    root_url = make_url(ADMIN_URL).set(drivername="postgresql+psycopg")
+    admin_url = root_url.set(database=database)
+    root = _engine(root_url, isolation_level="AUTOCOMMIT")
+    with root.connect() as conn:
+        conn.exec_driver_sql(f"CREATE DATABASE {database}")
+    try:
+        admin = _engine(admin_url)
+        init_db(admin)
+        install_agent_boundary(admin, agent_role, owner_role)
+        install_agent_boundary(admin, agent_role, owner_role)  # idempotent
+        admin.dispose()
+        with root.connect() as conn:
+            conn.exec_driver_sql(
+                f"CREATE ROLE {login} LOGIN PASSWORD '{password}' IN ROLE {agent_role}"
+            )
+        yield Boundary(
+            root_url=root_url,
+            admin_url=admin_url,
+            database=database,
+            agent_url=admin_url.set(username=login, password=password),
+            agent_role=agent_role,
+            owner_role=owner_role,
+            suffix=suffix,
+            password=password,
+        )
+    finally:
+        with root.connect() as conn:
+            conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {database} WITH (FORCE)")
+            leftovers = conn.execute(
+                text("SELECT rolname FROM pg_catalog.pg_roles WHERE rolname LIKE :pattern"),
+                {"pattern": f"sdr\\_%\\_{suffix}"},
+            ).scalars().all()
+            for role in sorted(leftovers, key=lambda name: name in (agent_role, owner_role)):
+                conn.exec_driver_sql(f"DROP ROLE {role}")
+            remaining = conn.execute(
+                text("SELECT count(*) FROM pg_catalog.pg_roles WHERE rolname LIKE :pattern"),
+                {"pattern": f"sdr\\_%\\_{suffix}"},
+            ).scalar_one()
+        root.dispose()
+        assert remaining == 0
+
+
+def _insert(
+    boundary: Boundary,
+    modality: Modality,
+    status: ClassificationStatus | None,
+    path: str | None = "/srv/snippets/a.sigmf-data",
+    sample_rate: float = 100_000.0,
+    flags: dict | None = None,
+) -> int:
+    record = UnifiedRecord(
+        timestamp=datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc),
+        lat=47.6062,
+        lon=-122.3321,
+        survey_id="survey-secret",
+        operator_id="operator-secret",
+        modality=modality,
+        identifier=Identifier(center_freq=915e6, bandwidth_estimate=20_000.0),
+        signal=Signal(rssi=-20.0, snr=20.0, peak_power=-17.5),
+        metadata=Metadata(
+            quality_flags={"power_units": "dBFS", **(flags or {})},
+            iq_snippet_path=path,
+            snippet_duration_ms=1000,
+            sample_rate=sample_rate,
+            classification_status=status,
+            tag="human-tag" if status is ClassificationStatus.MANUALLY_TAGGED else None,
+        ),
+    )
+    admin = _engine(boundary.admin_url)
+    try:
+        with make_session_factory(admin)() as session:
+            return save_record(session, record).id
+    finally:
+        admin.dispose()
+
+
+def _admin_scalar(boundary: Boundary, sql: str, **params):
+    admin = _engine(boundary.admin_url)
+    try:
+        with admin.begin() as conn:
+            return conn.execute(text(sql), params).scalar()
+    finally:
+        admin.dispose()
+
+
+def _metadata(boundary: Boundary, record_id: int) -> dict:
+    return json.loads(
+        _admin_scalar(
+            boundary, "SELECT metadata::text FROM survey_records WHERE id = :id", id=record_id
+        )
+    )
+
+
+def _watermark(boundary: Boundary) -> int:
+    return _admin_scalar(boundary, "SELECT coalesce(max(id), 0) FROM survey_records")
+
+
+def _sqlstate(excinfo) -> str | None:
+    return getattr(excinfo.value.orig, "sqlstate", None)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "SELECT * FROM public.survey_records",
+        "INSERT INTO public.survey_records (timestamp, lat, lon, survey_id, operator_id, "
+        "modality, identifier, signal, metadata) VALUES (now(), 0, 0, 's', 'o', 'unknown', "
+        "'{}', '{}', '{}')",
+        "UPDATE public.survey_records SET metadata = '{}'",
+        "DELETE FROM public.survey_records",
+        "TRUNCATE public.survey_records",
+    ],
+)
+def test_agent_role_has_no_direct_access_to_survey_records(boundary, statement):
+    agent = _engine(boundary.agent_url)
+    try:
+        with pytest.raises(DBAPIError) as excinfo, agent.begin() as conn:
+            conn.execute(text(statement))
+        assert _sqlstate(excinfo) == INSUFFICIENT_PRIVILEGE
+    finally:
+        agent.dispose()
+
+
+def test_view_shows_only_pending_unknown_rows(boundary):
+    watermark = _watermark(boundary)
+    pending = _insert(boundary, Modality.UNKNOWN, ClassificationStatus.UNCLASSIFIED)
+    no_status = _insert(boundary, Modality.UNKNOWN, None)
+    rejected = _insert(boundary, Modality.UNKNOWN, None, path=None, flags={"snippet_rejected": "bad_size"})
+    dropped = _insert(boundary, Modality.UNKNOWN, None, path=None, flags={"snippet_dropped": "low_disk"})
+    _insert(boundary, Modality.WIFI, None)
+    _insert(boundary, Modality.UNKNOWN, ClassificationStatus.MANUALLY_TAGGED)
+    _insert(boundary, Modality.UNKNOWN, ClassificationStatus.AUTO_CLASSIFIED)
+    _insert(boundary, Modality.UNKNOWN, ClassificationStatus.NEEDS_REVIEW)
+
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        rows = gateway.fetch_pending(after_id=watermark, limit=100)
+        assert [row.id for row in rows] == [pending, no_status, rejected, dropped]
+        assert rows[0] == PendingRecord(
+            id=pending,
+            iq_snippet_path="/srv/snippets/a.sigmf-data",
+            sample_rate=100_000.0,
+            center_freq=915e6,
+            peak_power=-17.5,
+            snippet_duration_ms=1000,
+        )
+        # Snippet-less rows stay visible, flagged, so the agent can close them out.
+        assert (rows[2].iq_snippet_path, rows[2].snippet_rejected, rows[2].snippet_dropped) == (None, "bad_size", None)
+        assert (rows[3].iq_snippet_path, rows[3].snippet_rejected, rows[3].snippet_dropped) == (None, None, "low_disk")
+        assert [row.id for row in gateway.fetch_pending(after_id=rejected, limit=100)] == [dropped]
+        assert [row.id for row in gateway.fetch_pending(after_id=watermark, limit=1)] == [pending]
+    finally:
+        gateway.close()
+
+
+def test_view_projects_only_the_agent_columns(boundary):
+    agent = _engine(boundary.agent_url)
+    try:
+        with agent.connect() as conn:
+            columns = list(conn.execute(text("SELECT * FROM public.agent_pending_unknown LIMIT 0")).keys())
+        assert columns == [
+            "id",
+            "iq_snippet_path",
+            "sample_rate",
+            "center_freq",
+            "peak_power",
+            "snippet_duration_ms",
+            "snippet_rejected",
+            "snippet_dropped",
+        ]
+    finally:
+        agent.dispose()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE FUNCTION public.probe(t text) RETURNS boolean LANGUAGE sql RETURN true",
+        "CREATE FUNCTION pg_temp.probe(t text) RETURNS boolean LANGUAGE sql RETURN true",
+        "CREATE TEMPORARY TABLE probe (x integer)",
+        "CREATE SCHEMA probe",
+    ],
+)
+def test_agent_cannot_create_objects_to_probe_the_view(boundary, statement):
+    agent = _engine(boundary.agent_url)
+    try:
+        with pytest.raises(DBAPIError) as excinfo, agent.begin() as conn:
+            conn.execute(text(statement))
+        assert _sqlstate(excinfo) == INSUFFICIENT_PRIVILEGE
+    finally:
+        agent.dispose()
+
+
+def test_leaky_function_sees_only_rows_the_view_shows(boundary):
+    """The agent cannot create a function (previous test), so an
+    administrator plants the classic leaky probe for it: near-zero cost, so
+    the planner would run it before the view's own filter, and it reports
+    every value it is passed. The manually tagged unknown row survives the
+    view's index condition (modality = 'unknown'), so without
+    security_barrier its path is leaked here; with it, it never is."""
+    watermark = _watermark(boundary)
+    visible = _insert(boundary, Modality.UNKNOWN, None, path="/srv/snippets/visible.sigmf-data")
+    _insert(boundary, Modality.UNKNOWN, ClassificationStatus.MANUALLY_TAGGED, path="HIDDEN-manual")
+    _insert(boundary, Modality.WIFI, None, path="HIDDEN-wifi")
+    leak = f"public.leak_{boundary.suffix}"
+    admin = _engine(boundary.admin_url)
+    agent = _engine(boundary.agent_url)
+    try:
+        with admin.begin() as conn:
+            conn.exec_driver_sql(
+                f"CREATE FUNCTION {leak}(t text) RETURNS boolean LANGUAGE plpgsql "
+                "COST 0.0000001 AS $$BEGIN RAISE NOTICE USING MESSAGE = 'saw ' || t; "
+                "RETURN true; END$$"
+            )
+            conn.exec_driver_sql(f"GRANT EXECUTE ON FUNCTION {leak}(text) TO {boundary.agent_role}")
+        notices: list[str] = []
+        with agent.connect() as conn:
+            conn.connection.driver_connection.add_notice_handler(
+                lambda diagnostic: notices.append(diagnostic.message_primary)
+            )
+            ids = conn.execute(
+                text(
+                    f"SELECT id FROM public.agent_pending_unknown "
+                    f"WHERE id > :watermark AND {leak}(iq_snippet_path)"
+                ),
+                {"watermark": watermark},
+            ).scalars().all()
+        assert ids == [visible]
+        assert notices == ["saw /srv/snippets/visible.sigmf-data"]
+    finally:
+        with admin.begin() as conn:
+            conn.exec_driver_sql(f"DROP FUNCTION IF EXISTS {leak}(text)")
+        admin.dispose()
+        agent.dispose()
+
+
+def test_classify_unknown_changes_only_the_four_classification_keys(boundary):
+    record_id = _insert(boundary, Modality.UNKNOWN, ClassificationStatus.UNCLASSIFIED)
+    before = _metadata(boundary, record_id)
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        gateway.submit_classification(
+            record_id, ClassificationStatus.AUTO_CLASSIFIED, "ism_902_928:lora", 0.9, "Because."
+        )
+    finally:
+        gateway.close()
+    # Compared as parsed JSON: the jsonb round trip reorders keys.
+    assert _metadata(boundary, record_id) == {
+        **before,
+        "classification_status": "auto_classified",
+        "tag": "ism_902_928:lora",
+        "confidence": 0.9,
+        "reasoning": "Because.",
+    }
+
+
+def test_needs_review_may_carry_a_null_tag(boundary):
+    record_id = _insert(boundary, Modality.UNKNOWN, None)
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        gateway.submit_classification(
+            record_id, ClassificationStatus.NEEDS_REVIEW, None, 0.0, "Model output failed validation."
+        )
+    finally:
+        gateway.close()
+    metadata = _metadata(boundary, record_id)
+    assert metadata["classification_status"] == "needs_review"
+    assert metadata["tag"] is None and metadata["confidence"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "modality, status",
+    [
+        (Modality.WIFI, None),
+        (Modality.UNKNOWN, ClassificationStatus.MANUALLY_TAGGED),
+        (Modality.UNKNOWN, ClassificationStatus.AUTO_CLASSIFIED),
+    ],
+)
+def test_classify_unknown_refuses_rows_that_are_not_pending_unknown(boundary, modality, status):
+    record_id = _insert(boundary, modality, status)
+    before = _metadata(boundary, record_id)
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        with pytest.raises(RecordNotPending):
+            gateway.submit_classification(
+                record_id, ClassificationStatus.AUTO_CLASSIFIED, "x", 0.9, "r"
+            )
+    finally:
+        gateway.close()
+    assert _metadata(boundary, record_id) == before
+
+
+@pytest.mark.parametrize(
+    "status, tag, confidence, reasoning",
+    [
+        ("manually_tagged", "x", 0.5, "r"),
+        ("unclassified", "x", 0.5, "r"),
+        ("bogus", "x", 0.5, "r"),
+        ("auto_classified", "x", 1.5, "r"),
+        ("auto_classified", "x", -0.1, "r"),
+        ("auto_classified", "x", float("nan"), "r"),
+        ("auto_classified", "x", None, "r"),
+        ("auto_classified", "Bad", 0.5, "r"),
+        ("auto_classified", "abc\n", 0.5, "r"),
+        ("auto_classified", "a" * 65, 0.5, "r"),
+        ("auto_classified", "-leading-dash", 0.5, "r"),
+        ("auto_classified", None, 0.5, "r"),
+        ("needs_review", None, 0.5, "x" * 4001),
+        ("needs_review", None, 0.5, None),
+    ],
+)
+def test_classify_unknown_rejects_bad_arguments(boundary, status, tag, confidence, reasoning):
+    """Called directly, bypassing the gateway's types: the function itself
+    is the boundary."""
+    record_id = _insert(boundary, Modality.UNKNOWN, None)
+    before = _metadata(boundary, record_id)
+    agent = _engine(boundary.agent_url)
+    try:
+        with pytest.raises(DBAPIError) as excinfo, agent.begin() as conn:
+            conn.execute(
+                text(
+                    "SELECT public.classify_unknown(CAST(:id AS integer), CAST(:status AS text), "
+                    "CAST(:tag AS text), CAST(:confidence AS double precision), "
+                    "CAST(:reasoning AS text))"
+                ),
+                {"id": record_id, "status": status, "tag": tag, "confidence": confidence, "reasoning": reasoning},
+            )
+        assert _sqlstate(excinfo) == INVALID_PARAMETER
+    finally:
+        agent.dispose()
+    assert _metadata(boundary, record_id) == before
+
+
+def test_human_tag_between_fetch_and_submit_wins(boundary):
+    watermark = _watermark(boundary)
+    record_id = _insert(boundary, Modality.UNKNOWN, ClassificationStatus.UNCLASSIFIED)
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        assert [row.id for row in gateway.fetch_pending(watermark, 10)] == [record_id]
+        _admin_scalar(
+            boundary,
+            "UPDATE survey_records SET metadata = (metadata::jsonb || "
+            "'{\"classification_status\": \"manually_tagged\", \"tag\": \"human\"}')::json "
+            "WHERE id = :id RETURNING id",
+            id=record_id,
+        )
+        with pytest.raises(RecordNotPending):
+            gateway.submit_classification(
+                record_id, ClassificationStatus.AUTO_CLASSIFIED, "agent", 0.95, "r"
+            )
+    finally:
+        gateway.close()
+    metadata = _metadata(boundary, record_id)
+    assert (metadata["classification_status"], metadata["tag"]) == ("manually_tagged", "human")
+
+
+def test_human_tag_committed_while_agent_waits_on_the_row_lock_wins(boundary):
+    """The real race: the human's UPDATE holds the row lock, the agent's
+    classify_unknown blocks on it, then the human commits. Under READ
+    COMMITTED PostgreSQL re-checks the agent's WHERE clause against the
+    committed row, so the pending predicate fails and nothing is overwritten."""
+    record_id = _insert(boundary, Modality.UNKNOWN, ClassificationStatus.UNCLASSIFIED)
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    admin = _engine(boundary.admin_url)
+    outcome: list[BaseException | None] = []
+
+    def submit() -> None:
+        try:
+            gateway.submit_classification(
+                record_id, ClassificationStatus.AUTO_CLASSIFIED, "agent", 0.95, "r"
+            )
+            outcome.append(None)
+        except BaseException as exc:  # handed to the main thread
+            outcome.append(exc)
+
+    try:
+        with admin.connect() as human:
+            human.execute(
+                text(
+                    "UPDATE survey_records SET metadata = (metadata::jsonb || "
+                    "'{\"classification_status\": \"manually_tagged\", \"tag\": \"human\"}')::json "
+                    "WHERE id = :id"
+                ),
+                {"id": record_id},
+            )
+            agent_thread = threading.Thread(target=submit, daemon=True)
+            agent_thread.start()
+            deadline = time.monotonic() + 10
+            while not _admin_scalar(
+                boundary,
+                "SELECT count(*) FROM pg_catalog.pg_stat_activity "
+                "WHERE datname = current_database() "
+                "AND cardinality(pg_catalog.pg_blocking_pids(pid)) > 0",
+            ):
+                assert time.monotonic() < deadline, "agent never blocked on the row lock"
+                time.sleep(0.01)
+            human.commit()
+        agent_thread.join(10)
+        assert not agent_thread.is_alive()
+    finally:
+        gateway.close()
+        admin.dispose()
+    assert len(outcome) == 1 and isinstance(outcome[0], RecordNotPending)
+    metadata = _metadata(boundary, record_id)
+    assert (metadata["classification_status"], metadata["tag"]) == ("manually_tagged", "human")
+
+
+def test_self_check_rejects_a_superuser_url(boundary):
+    with pytest.raises(BoundaryViolation, match="not confined.*has SUPERUSER"):
+        connect_gateway(_url(boundary.admin_url), boundary.agent_role)
+
+
+# (setup statements run as the administrator, extra cleanup, expected problem).
+# {login} is a fresh login role IN ROLE the agent role; every case must be refused.
+BYPASSES = {
+    "owner role without inherit": (["GRANT {owner_role} TO {login} WITH INHERIT FALSE"], [], "member of {owner_role}"),
+    "column privilege": (["GRANT UPDATE (metadata) ON public.survey_records TO {login}"], [], "privilege on survey_records"),
+    "table privilege": (["GRANT SELECT ON public.survey_records TO {login}"], [], "privilege on survey_records"),
+    "createrole": (["ALTER ROLE {login} CREATEROLE"], [], "has CREATEROLE"),
+    "bypassrls": (["ALTER ROLE {login} BYPASSRLS"], [], "has BYPASSRLS"),
+    "replication": (["ALTER ROLE {login} REPLICATION"], [], "has REPLICATION"),
+    "createdb": (["ALTER ROLE {login} CREATEDB"], [], "has CREATEDB"),
+    "agent role createdb": (["ALTER ROLE {agent_role} CREATEDB"], ["ALTER ROLE {agent_role} NOCREATEDB"], "{agent_role} has CREATEDB"),
+    "pg_write_all_data": (["GRANT pg_write_all_data TO {login}"], [], "member of pg_write_all_data"),
+    "pg_read_all_data": (["GRANT pg_read_all_data TO {login}"], [], "member of pg_read_all_data"),
+    "pg_execute_server_program": (["GRANT pg_execute_server_program TO {login}"], [], "member of pg_execute_server_program"),
+    "pg_write_server_files": (["GRANT pg_write_server_files TO {login}"], [], "member of pg_write_server_files"),
+    "pg_read_server_files": (["GRANT pg_read_server_files TO {login}"], [], "member of pg_read_server_files"),
+    "pg_signal_backend": (["GRANT pg_signal_backend TO {login}"], [], "member of pg_signal_backend"),
+    "pg_maintain": (["GRANT pg_maintain TO {login}"], [], "member of pg_maintain"),
+    "temporary through a helper without inherit": (
+        [
+            "CREATE ROLE sdr_helper_{suffix} NOLOGIN",
+            "GRANT TEMPORARY ON DATABASE {database} TO sdr_helper_{suffix}",
+            "GRANT sdr_helper_{suffix} TO {login} WITH INHERIT FALSE",
+        ],
+        ["DROP OWNED BY sdr_helper_{suffix}", "DROP ROLE IF EXISTS sdr_helper_{suffix}"],
+        "member of sdr_helper_{suffix}",
+    ),
+    "temporary": (["GRANT TEMPORARY ON DATABASE {database} TO {login}"], [], "CREATE or TEMPORARY on the database"),
+    "create on the database": (["GRANT CREATE ON DATABASE {database} TO {login}"], [], "CREATE or TEMPORARY on the database"),
+    "create on public": (["GRANT CREATE ON SCHEMA public TO {login}"], [], "can create objects in schema public"),
+    "create on another schema": (
+        ["CREATE SCHEMA sdr_extra_{suffix}", "GRANT CREATE ON SCHEMA sdr_extra_{suffix} TO {login}"],
+        ["DROP SCHEMA IF EXISTS sdr_extra_{suffix} CASCADE"],
+        "can create objects in schema sdr_extra_{suffix}",
+    ),
+    "security definer function": (
+        ["CREATE FUNCTION public.sdr_definer_{suffix}() RETURNS integer LANGUAGE sql SECURITY DEFINER RETURN 1"],
+        ["DROP FUNCTION IF EXISTS public.sdr_definer_{suffix}()"],
+        "can execute SECURITY DEFINER function sdr_definer_{suffix}()",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", BYPASSES)
+def test_self_check_refuses_a_login_that_is_not_confined(boundary, case):
+    setup, cleanup, problem = BYPASSES[case]
+    login = f"sdr_bypass_{boundary.suffix}"
+    names = {
+        "login": login,
+        "owner_role": boundary.owner_role,
+        "agent_role": boundary.agent_role,
+        "database": boundary.database,
+        "suffix": boundary.suffix,
+    }
+    root = _engine(boundary.root_url, isolation_level="AUTOCOMMIT")
+    admin = _engine(boundary.admin_url, isolation_level="AUTOCOMMIT")
+    try:
+        with root.connect() as conn:
+            if case == "pg_maintain" and not conn.execute(
+                text("SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'pg_maintain'")
+            ).first():
+                pytest.skip("pg_maintain exists from PostgreSQL 17")
+            conn.exec_driver_sql(
+                f"CREATE ROLE {login} LOGIN PASSWORD '{boundary.password}' IN ROLE {boundary.agent_role}"
+            )
+        with admin.connect() as conn:
+            for statement in setup:
+                conn.exec_driver_sql(statement.format(**names))
+        with pytest.raises(BoundaryViolation, match="not confined") as excinfo:
+            connect_gateway(
+                _url(boundary.admin_url.set(username=login, password=boundary.password)),
+                boundary.agent_role,
+            )
+        assert problem.format(**names) in str(excinfo.value)
+    finally:
+        with admin.connect() as conn:
+            for statement in cleanup:
+                conn.exec_driver_sql(statement.format(**names))
+            if conn.execute(text("SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = :r"), {"r": login}).first():
+                conn.exec_driver_sql(f"DROP OWNED BY {login}")
+        with root.connect() as conn:
+            conn.exec_driver_sql(f"DROP ROLE IF EXISTS {login}")
+        admin.dispose()
+        root.dispose()
+
+
+def test_self_check_rejects_a_login_outside_the_agent_role(boundary):
+    login = f"sdr_stranger_{boundary.suffix}"
+    root = _engine(boundary.root_url, isolation_level="AUTOCOMMIT")
+    try:
+        with root.connect() as conn:
+            conn.exec_driver_sql(f"CREATE ROLE {login} LOGIN PASSWORD '{boundary.password}'")
+        with pytest.raises(BoundaryViolation, match="does not inherit"):
+            connect_gateway(
+                _url(boundary.admin_url.set(username=login, password=boundary.password)),
+                boundary.agent_role,
+            )
+    finally:
+        with root.connect() as conn:
+            conn.exec_driver_sql(f"DROP ROLE IF EXISTS {login}")
+        root.dispose()
+
+
+def test_a_write_the_database_refuses_is_submit_rejected(boundary):
+    record_id = _insert(boundary, Modality.UNKNOWN, None)
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        with pytest.raises(SubmitRejected, match=f"record {record_id}"):
+            gateway.submit_classification(record_id, ClassificationStatus.AUTO_CLASSIFIED, "x", float("nan"), "r")
+    finally:
+        gateway.close()
+    assert _metadata(boundary, record_id)["classification_status"] is None
+
+
+def test_nul_characters_are_stripped_from_the_reasoning(boundary):
+    """PostgreSQL text cannot hold NUL; model output can."""
+    record_id = _insert(boundary, Modality.UNKNOWN, None)
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        gateway.submit_classification(record_id, ClassificationStatus.NEEDS_REVIEW, None, 0.0, "a\x00b")
+    finally:
+        gateway.close()
+    assert _metadata(boundary, record_id)["reasoning"] == "ab"
+
+
+def test_a_write_blocked_past_the_statement_timeout_is_submit_timed_out(boundary):
+    record_id = _insert(boundary, Modality.UNKNOWN, None)
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role, statement_timeout_s=0.5)
+    admin = _engine(boundary.admin_url)
+    try:
+        with admin.connect() as human:
+            human.execute(text("SELECT 1 FROM survey_records WHERE id = :id FOR UPDATE"), {"id": record_id})
+            with pytest.raises(SubmitTimedOut, match="57014"):
+                gateway.submit_classification(record_id, ClassificationStatus.NEEDS_REVIEW, None, 0.0, "r")
+            human.rollback()
+    finally:
+        gateway.close()
+        admin.dispose()
+    assert _metadata(boundary, record_id)["classification_status"] is None
+
+
+def test_newest_pending_snippets_for_the_startup_probe(boundary):
+    watermark = _watermark(boundary)
+    older = _insert(boundary, Modality.UNKNOWN, None, path="/srv/snippets/older.sigmf-data")
+    _insert(boundary, Modality.UNKNOWN, None, path=None, flags={"snippet_dropped": "low_disk"})
+    newer = _insert(boundary, Modality.UNKNOWN, None, path="/srv/snippets/newer.sigmf-data")
+    _insert(boundary, Modality.UNKNOWN, ClassificationStatus.MANUALLY_TAGGED, path="/srv/snippets/tagged.sigmf-data")
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        assert [r.id for r in gateway.fetch_newest_with_snippet(watermark, 5)] == [newer, older]
+        assert [r.id for r in gateway.fetch_newest_with_snippet(watermark, 1)] == [newer]
+    finally:
+        gateway.close()
