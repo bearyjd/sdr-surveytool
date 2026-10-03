@@ -5,7 +5,14 @@ from pathlib import Path
 import pytest
 
 from storage import snippet_store
-from storage.snippet_store import LocalSnippetStore, SnippetRejected, ensure_private_dir
+from storage.snippet_store import (
+    DEFAULT_MAX_SNIPPET_BYTES,
+    LocalSnippetStore,
+    SnippetRejected,
+    ensure_private_dir,
+)
+
+DATA = bytes(range(16))  # two complex64 samples: a plausible cf32 size
 
 # Names in capture.unknown.snippet_writer's scheme; adopt() rejects any other.
 STEM = "20261003T120000123456Z_915000000Hz_0123abcd"
@@ -16,7 +23,7 @@ def _stage(directory, stem: str = STEM) -> tuple:
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     data = directory / f"{stem}.sigmf-data"
     meta = directory / f"{stem}.sigmf-meta"
-    data.write_bytes(b"\x00\x01\x02\x03")
+    data.write_bytes(DATA)
     meta.write_text('{"global": {}}')
     return data, meta
 
@@ -40,9 +47,31 @@ def test_adopt_moves_both_files_and_returns_final_data_path(dirs):
     final = LocalSnippetStore(staging, root).adopt(str(data))
 
     assert final == str((root / f"{STEM}.sigmf-data").resolve())
-    assert (root / f"{STEM}.sigmf-data").read_bytes() == b"\x00\x01\x02\x03"
+    assert (root / f"{STEM}.sigmf-data").read_bytes() == DATA
     assert (root / f"{STEM}.sigmf-meta").read_text() == '{"global": {}}'
     assert not data.exists() and not meta.exists()
+
+
+@pytest.mark.parametrize("size", [0, 12, 40])
+def test_adopt_rejects_implausible_data_sizes(dirs, size):
+    """Empty, not a whole number of 8-byte complex64 samples, or larger than
+    any capture configuration can write: not a cf32 snippet."""
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root, max_snippet_bytes=32)
+    data, meta = _stage(staging)
+    data.write_bytes(b"\x00" * size)
+    _rejected(store, data, "bad_size")
+    assert data.exists() and meta.exists() and list(root.iterdir()) == []
+
+
+def test_adopt_accepts_a_snippet_exactly_at_the_size_bound(dirs):
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root, max_snippet_bytes=32)
+    data, _ = _stage(staging)
+    data.write_bytes(b"\x00" * 32)
+    assert store.adopt(str(data)).endswith(".sigmf-data")
+    assert store.max_snippet_bytes == 32
+    assert LocalSnippetStore(staging, root).max_snippet_bytes == DEFAULT_MAX_SNIPPET_BYTES
 
 
 def test_adopt_rejects_a_path_outside_staging(dirs, tmp_path):

@@ -12,7 +12,7 @@ from ingest.gps_fix import GpsFix, StaticGpsFixProvider
 from ingest.queue_server import QueueServer
 from ingest.service import IngestService
 from storage.db import init_db, make_engine, make_session_factory
-from storage.snippet_store import LocalSnippetStore
+from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES, LocalSnippetStore
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="data/snippets",
         help="Directory ingest moves adopted SigMF snippets into.",
     )
+    parser.add_argument(
+        "--max-snippet-bytes",
+        type=int,
+        default=DEFAULT_MAX_SNIPPET_BYTES,
+        help="Reject staged snippets larger than this (default: the largest "
+        "snippet any capture configuration can write).",
+    )
     # STAND-IN: the real u-blox GPS reader service (gps/) does not exist yet per
     # the plan, so ingest is wired to a fixed fix supplied on the command line.
     # Swap StaticGpsFixProvider for the real provider once gps/ lands.
@@ -76,7 +83,9 @@ def _open_snippet_store(args: argparse.Namespace) -> LocalSnippetStore:
     """Resolve, create and permission-check the snippet dirs, failing fast on
     a misconfiguration before ingest accepts any record. The relative defaults
     resolve against this process's working directory, so log the result."""
-    store = LocalSnippetStore(args.snippet_staging_dir, args.snippet_store_dir)
+    store = LocalSnippetStore(
+        args.snippet_staging_dir, args.snippet_store_dir, max_snippet_bytes=args.max_snippet_bytes
+    )
     logger.info("Adopting snippets from %s into %s", store.staging_dir, store.root_dir)
     return store
 

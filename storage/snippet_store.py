@@ -19,6 +19,10 @@ _PRIVATE_DIR_MODE = 0o700
 STAGED_DATA_NAME = re.compile(
     r"\d{8}T\d{12}Z_\d{1,12}Hz_[0-9a-f]{8}\.sigmf-data", re.ASCII
 )
+# The largest snippet capture can be configured to write: 61.44 MS/s (the
+# AD9361 maximum) x (5 s pre + 5 s post, the window caps) x 8 bytes (cf32).
+DEFAULT_MAX_SNIPPET_BYTES = 4_915_200_000
+_CF32_BYTES = 8
 
 
 def ensure_private_dir(path: Path | str) -> Path:
@@ -90,10 +94,20 @@ class LocalSnippetStore:
     and store must share one; the constructor proves it with a real link.
     """
 
-    def __init__(self, staging_dir: Path | str, root_dir: Path | str) -> None:
+    def __init__(
+        self,
+        staging_dir: Path | str,
+        root_dir: Path | str,
+        max_snippet_bytes: int = DEFAULT_MAX_SNIPPET_BYTES,
+    ) -> None:
         self._staging_dir = ensure_private_dir(staging_dir)
         self._root_dir = ensure_private_dir(root_dir)
+        self._max_snippet_bytes = max_snippet_bytes
         _probe_hard_link(self._staging_dir, self._root_dir)
+
+    @property
+    def max_snippet_bytes(self) -> int:
+        return self._max_snippet_bytes
 
     @property
     def staging_dir(self) -> Path:
@@ -129,7 +143,9 @@ class LocalSnippetStore:
 
     def _link_pair(self, data: Path) -> str:
         meta = data.with_suffix(_META_SUFFIX)
-        sources = [(data, _single_regular_file(data)), (meta, _single_regular_file(meta))]
+        data_stat = _single_regular_file(data)
+        _check_plausible_size(data, data_stat.st_size, self._max_snippet_bytes)
+        sources = [(data, data_stat), (meta, _single_regular_file(meta))]
         linked: list[Path] = []
         try:
             for source, checked in sources:
@@ -197,6 +213,16 @@ def _single_regular_file(path: Path) -> os.stat_result:
             f"Staged snippet file {path.name!r} has {info.st_nlink} hard links",
         )
     return info
+
+
+def _check_plausible_size(data: Path, size: int, max_bytes: int) -> None:
+    """A cheap cf32 sanity check (ingest never parses SigMF): non-empty, a
+    whole number of 8-byte complex64 samples, no larger than any capture."""
+    if size == 0 or size % _CF32_BYTES or size > max_bytes:
+        raise SnippetRejected(
+            "bad_size",
+            f"Staged snippet file {data.name!r} has an implausible size ({size} bytes)",
+        )
 
 
 def _link_without_replacing(source: Path, final: Path) -> None:

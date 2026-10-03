@@ -3,6 +3,7 @@ import logging
 import pytest
 
 from ingest.main import _open_snippet_store, _parse_args
+from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES
 
 
 def test_gps_fix_quality_is_required():
@@ -50,3 +51,12 @@ def test_snippet_store_dirs_are_resolved_secured_and_logged_at_startup(tmp_path,
     assert store.root_dir == (tmp_path / "data" / "snippets").resolve()
     assert str(store.staging_dir) in caplog.text
     assert str(store.root_dir) in caplog.text
+
+
+def test_snippet_size_bound_defaults_to_the_largest_capture_and_passes_through(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert _open_snippet_store(_parse_args(["--gps-fix-quality", "0"])).max_snippet_bytes == (
+        DEFAULT_MAX_SNIPPET_BYTES
+    )
+    store = _open_snippet_store(_parse_args(["--gps-fix-quality", "0", "--max-snippet-bytes", "1024"]))
+    assert store.max_snippet_bytes == 1024

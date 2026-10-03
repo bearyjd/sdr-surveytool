@@ -20,6 +20,7 @@ from capture.unknown.sample_clock import SampleClock
 from capture.unknown.service import CaptureSettings, process_snippet
 from capture.unknown.snippet_assembler import CapturedSnippet
 from schema.records import ClassificationStatus, Modality
+from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES
 
 FS = 100_000.0
 ANCHOR = datetime(2026, 10, 3, 12, 0, 0, tzinfo=timezone.utc)
@@ -115,6 +116,13 @@ def test_settings_cap_each_window_at_five_seconds(tmp_path, field):
     assert getattr(_settings(tmp_path, **{field: 5.0}), field) == 5.0
     with pytest.raises(ValueError, match=field):
         _settings(tmp_path, **{field: 5.01})
+
+
+def test_the_largest_configurable_snippet_fits_the_store_size_bound():
+    """Ingest rejects staged data larger than DEFAULT_MAX_SNIPPET_BYTES; the
+    biggest snippet capture's settings allow must stay within it."""
+    largest = service._MAX_SAMPLE_RATE * 2 * service._MAX_WINDOW_SECONDS * 8
+    assert largest <= DEFAULT_MAX_SNIPPET_BYTES
 
 
 def test_settings_reject_windows_shorter_than_one_sample(tmp_path):
