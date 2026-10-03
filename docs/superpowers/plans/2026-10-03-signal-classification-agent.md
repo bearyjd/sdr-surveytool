@@ -392,6 +392,43 @@ disagree with this list, this list wins.
     in between halt: a stale copy of the store (`f1b983b`).
   - Each deferred record waits 2, 4, 8, ... s (capped at 300 s) before its next attempt. A
     batch with nothing due returns 0, so the loop sleeps its poll (`9d44ef5`).
+- **Codex pass 2 and the security verification** (on top of `7db477f`).
+  - **Predicate overloads** (`98afdd5`). The install drops every overload of both
+    boundary functions by name. The view and `classify_unknown` call
+    `agent_is_pending_unknown(r.modality::text, r.metadata::json)`. The self-check
+    refuses another overload, or a view that depends on any non-`pg_catalog` function but
+    the predicate.
+  - **NUL characters.**
+    - `UnifiedRecord` rejects a NUL in any string, quality-flag key or value; the WiFi and
+      BLE normalizers strip NULs from radio strings (`592305d`).
+    - The view and `classify_unknown` skip rows whose raw json holds `\u0000`, so the
+      modality index still serves.
+    - A 22P05 on submit is `SubmitUnwritable`, a skipped record (`efbab44`).
+  - **The definer** (`c823491`). The owner role must belong to no role; the installer
+    sets it NOINHERIT. The self-check refuses a definer with a membership, anything on
+    `survey_records` beyond SELECT and UPDATE (metadata), or not owning the view and both
+    functions.
+  - **TEMPORARY** (`aadabfa`). It fails only on the survey database. Other databases log a
+    warning, and a default cluster starts.
+  - **The lock** (`1785bc5`).
+    - `AgentGateway.lock_held()` is checked before every batch; losing the lock halts.
+    - `close()` tolerates a dead session, and `serve_and_close` keeps a halt's exit status 3.
+    - The refusal names the `pg_locks` / `pg_stat_activity` query; lock-key squatting is
+      documented.
+  - **The reader** (`e0358d1`). It reads only regular files: lstat, open
+    `O_NOFOLLOW | O_NONBLOCK`, fstat, bounded reads. A FIFO, device or symlink is
+    `snippet_unreadable`, and sigmf gets the metadata only.
+  - **New reduced-confidence reason** `truncated` (`2c77724`).
+  - **Grounding** needs the whole occupied span inside the band, give or take one fine
+    bin (`5bb46e6`).
+  - **Stop requests** (`cf190e3`). The stop flag is checked after the budget pause and
+    before every LLM call.
+  - **Memory** (`78535cd`).
+    - The channelizer writes one preallocated output.
+    - The PAPR reads a subsample of at most 2^22 on-samples.
+    - The width judgment comes from segmentation.
+    - At the 2^25-sample read cap the worst case (a full-band region) peaks at 584 MB RSS
+      (it was 934 MB); a 1 MHz region at 454 MB.
 - **Import guard** (`fc053be`). It flags `.os` and `.subprocess` attribute chains, and its
   docstring now lists what it does not see. `errno` and `threading` joined the agent's
   stdlib allowlist.
