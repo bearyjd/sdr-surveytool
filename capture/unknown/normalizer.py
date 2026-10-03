@@ -23,7 +23,7 @@ class SnippetCaptureEvent:
     timestamp: datetime  # sample-derived UTC time of the trigger sample
     center_freq_hz: float
     sample_rate: float
-    bandwidth_estimate_hz: float
+    bandwidth_estimate_hz: float | None  # None when the IQ was dropped unmeasured
     peak_power_dbfs: float
     mean_power_dbfs: float
     noise_floor_dbfs: float

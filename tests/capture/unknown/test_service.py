@@ -5,7 +5,7 @@ import os
 import queue
 import signal
 import weakref
-from collections import Counter
+from collections import Counter, deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -167,10 +167,11 @@ class _FakeTap:
         self.error: Exception | None = None
 
 
-def _drain(snippets, tap, monotonic, wall_clock=lambda: ANCHOR):
+def _drain(snippets, tap, monotonic, wall_clock=lambda: ANCHOR, dropped=None):
     return service._drain(
         snippets,
         tap,
+        dropped=deque() if dropped is None else dropped,
         clock=SampleClock(anchor=ANCHOR, sample_rate=FS),
         stall_seconds=5.0,
         max_drift_seconds=2.0,
@@ -259,16 +260,38 @@ def test_missing_staging_dir_drops_only_the_snippet_not_the_session(tmp_path, ca
     assert "staging" in caplog.text
 
 
-def test_full_snippet_queue_drops_and_counts_without_blocking():
+def test_full_snippet_queue_drops_the_iq_but_keeps_a_summary_without_blocking():
     """The tap calls this on the GNU Radio scheduler thread, which must never
-    block (the SDR would overflow): a full queue drops the snippet instead."""
+    block (the SDR would overflow): a full queue drops the snippet's IQ but
+    keeps a cheap summary of the detection for the service thread."""
     snippets: queue.Queue = queue.Queue(maxsize=2)
+    dropped: deque = deque(maxlen=4)
     drops: Counter = Counter()
-    offer = service._offer_or_drop(snippets, drops)
+    offer = service._offer_or_drop(snippets, drops, dropped, threshold_dbfs=-30.0)
     for _ in range(3):
         offer(_snippet())
     assert snippets.qsize() == 2
     assert drops == Counter({"queue_full": 1})
+    (summary,) = dropped
+    assert summary.trigger == _snippet().trigger
+    assert summary.sample_rate == FS
+    assert summary.peak_power_dbfs == pytest.approx(-20.0, abs=0.01)
+    assert summary.mean_power_dbfs == pytest.approx(-20.0, abs=0.01)
+    assert summary.duration_ms == 1000
+
+
+def test_drain_hands_dropped_detections_to_the_service_thread():
+    dropped: deque = deque()
+    summary = service._DroppedDetection(
+        trigger=_snippet().trigger,
+        sample_rate=FS,
+        peak_power_dbfs=-20.0,
+        mean_power_dbfs=-21.0,
+        duration_ms=1000,
+    )
+    dropped.append(summary)
+    drained = _drain(queue.Queue(), _FakeTap(), monotonic=lambda: 0.0, dropped=dropped)
+    assert next(drained) is summary
 
 
 def test_drain_delivers_completed_snippets_before_reraising_a_tap_failure():
@@ -470,6 +493,41 @@ def test_a_long_healthy_session_clears_an_escalated_backoff(tmp_path, monkeypatc
     with pytest.raises(KeyboardInterrupt):
         service.run(_settings(tmp_path, min_free_bytes=0), "/unused.sock", "s1", "op1")
     assert sleeps == [1.0, 2.0, 1.0]
+
+
+def test_run_emits_a_queue_full_detection_and_keeps_its_cooldown(tmp_path, monkeypatch):
+    trigger = _snippet().trigger
+    summary = service._DroppedDetection(
+        trigger=trigger, sample_rate=FS, peak_power_dbfs=-18.0, mean_power_dbfs=-20.0, duration_ms=1000
+    )
+    sessions = []
+
+    @contextmanager
+    def fake_open_session(settings, last_trigger_at, drops):
+        sessions.append(dict(last_trigger_at))
+        if len(sessions) == 2:
+            raise KeyboardInterrupt
+
+        def one_dropped_detection():
+            yield summary
+            raise RuntimeError("SDR stream stalled")
+
+        yield one_dropped_detection()
+
+    emitters = []
+    monkeypatch.setattr(service, "_open_session", fake_open_session)
+    monkeypatch.setattr(service.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(service, "RecordEmitter", lambda path: emitters.append(_FakeEmitter(path)) or emitters[-1])
+    with pytest.raises(KeyboardInterrupt):
+        service.run(_settings(tmp_path, min_free_bytes=0), "/unused.sock", "s1", "op1")
+
+    (record,) = emitters[0].records
+    assert record.timestamp == trigger.time
+    assert record.metadata.iq_snippet_path is None
+    assert record.metadata.quality_flags["snippet_dropped"] == "queue_full"
+    assert record.identifier.bandwidth_estimate is None
+    assert (record.signal.peak_power, record.signal.rssi) == (-18.0, -20.0)
+    assert sessions[1] == {915e6: trigger.time}
 
 
 def test_run_resolves_secures_and_logs_staging_dir_at_startup(tmp_path, monkeypatch, caplog):

@@ -8,7 +8,7 @@ import queue
 import shutil
 import signal
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from capture.common.emitter import RecordEmitter
-from capture.unknown.energy_trigger import TriggerConfig, record_trigger
+from capture.unknown.energy_trigger import TriggerConfig, TriggerEvent, record_trigger
 from capture.unknown.normalizer import SnippetCaptureEvent, normalize_snippet_event
 from capture.unknown.sample_clock import SampleClock
 from capture.unknown.snippet_assembler import CapturedSnippet, SnippetAssembler
@@ -40,6 +40,8 @@ _POLL_SECONDS = 0.5
 # thread through a queue this small: a stalled consumer (slow disk, wedged
 # ingest socket) must not pile up ~670 MB snippets in memory.
 _SNIPPET_QUEUE_MAXSIZE = 2
+# Summaries of snippets dropped for a full queue (see _DroppedDetection).
+_DROPPED_DETECTIONS_MAXLEN = 64
 # The Python tap competes for the GIL, so give the SDR source ~100 ms of
 # output buffer: a briefly starved tap then catches up instead of the SDR
 # overflowing. Verified on GNU Radio 3.10.12 up to 5.6M items (100 ms at
@@ -138,6 +140,20 @@ class CaptureSettings:
         return round(seconds * self.sample_rate)
 
 
+@dataclass(frozen=True)
+class _DroppedDetection:
+    """What survives of a snippet whose IQ was dropped because the writer fell
+    behind: enough for a snippet-less record, computed on the GNU Radio
+    thread (measured ~13 ms per drop at 20 MS/s, ~46 ms at 56 MS/s, inside
+    the 100 ms source buffer). No bandwidth estimate: that needs the IQ."""
+
+    trigger: TriggerEvent
+    sample_rate: float
+    peak_power_dbfs: float
+    mean_power_dbfs: float
+    duration_ms: int
+
+
 def process_snippet(
     snippet: CapturedSnippet,
     settings: CaptureSettings,
@@ -222,11 +238,19 @@ def run(
                     opened_at = time.monotonic()
                     if not escalate:
                         backoff = _INITIAL_BACKOFF_SECONDS  # the radio opened
-                    for snippet in snippets:
-                        last_trigger_at = record_trigger(last_trigger_at, snippet.trigger)
-                        _stage_and_emit(snippet, settings, emitter, survey_id, operator_id, drops)
+                    for item in snippets:
+                        last_trigger_at = record_trigger(last_trigger_at, item.trigger)
+                        if isinstance(item, _DroppedDetection):
+                            _emit_without_snippet(
+                                _dropped_detection_record(item, settings, survey_id, operator_id),
+                                emitter,
+                                "queue_full",
+                                item.trigger.sample_index,
+                            )
+                        else:
+                            _stage_and_emit(item, settings, emitter, survey_id, operator_id, drops)
                         # Up to ~670 MB: don't hold it while waiting for the next.
-                        del snippet
+                        del item
             except Exception as failure:
                 lasted = None if opened_at is None else time.monotonic() - opened_at
                 if lasted is not None and lasted >= _QUICK_DRIFT_SECONDS:
@@ -338,6 +362,23 @@ def _emit_without_snippet(
         )
 
 
+def _dropped_detection_record(
+    item: _DroppedDetection, settings: CaptureSettings, survey_id: str, operator_id: str
+) -> UnifiedRecord:
+    event = SnippetCaptureEvent(
+        timestamp=item.trigger.time,
+        center_freq_hz=settings.center_freq_hz,
+        sample_rate=item.sample_rate,
+        bandwidth_estimate_hz=None,
+        peak_power_dbfs=item.peak_power_dbfs,
+        mean_power_dbfs=item.mean_power_dbfs,
+        noise_floor_dbfs=settings.noise_floor_dbfs,
+        snippet_path=None,
+        snippet_duration_ms=item.duration_ms,
+    )
+    return normalize_snippet_event(event, survey_id, operator_id)
+
+
 def _discard_staged(data_path: str | None) -> None:
     if data_path is None:
         return
@@ -369,17 +410,32 @@ def _clamp_to_anchor(
 
 
 def _offer_or_drop(
-    snippets: queue.Queue, drops: Counter[str]
+    snippets: queue.Queue,
+    drops: Counter[str],
+    dropped: deque[_DroppedDetection],
+    threshold_dbfs: float,
 ) -> Callable[[CapturedSnippet], None]:
     """The tap's on_snippet callback. It runs on the GNU Radio scheduler
     thread, which must never block (the SDR would overflow), so a full queue
-    drops the snippet and counts it instead of waiting."""
+    drops the snippet's IQ instead of waiting, keeping only a cheap summary
+    of the detection on `dropped` for the service thread to emit."""
 
     def offer(snippet: CapturedSnippet) -> None:
         try:
             snippets.put_nowait(snippet)
         except queue.Full:
             drops["queue_full"] += 1
+            if len(dropped) == dropped.maxlen:
+                drops["queue_full_summary_lost"] += 1
+            dropped.append(
+                _DroppedDetection(
+                    trigger=snippet.trigger,
+                    sample_rate=snippet.sample_rate,
+                    peak_power_dbfs=peak_power_dbfs(snippet.power),
+                    mean_power_dbfs=mean_burst_power_dbfs(snippet.power, threshold_dbfs),
+                    duration_ms=round(len(snippet.iq) * 1000 / snippet.sample_rate),
+                )
+            )
             logger.warning(
                 "Snippet queue full; dropping snippet triggered at sample %d "
                 "(%d dropped for a full queue so far)",
@@ -396,7 +452,7 @@ def _open_session(
     last_trigger_at: Mapping[float, datetime],
     drops: Counter[str],
     wall_clock: Callable[[], datetime] = _utc_now,
-) -> Iterator[Iterator[CapturedSnippet]]:
+) -> Iterator[Iterator[CapturedSnippet | _DroppedDetection]]:
     """Open the SDR, start the flowgraph, and yield an iterator of completed
     snippets; always stops the flowgraph on exit. Needs GNU Radio; its tests
     run it against the real scheduler with only _build_soapy_source replaced
@@ -433,11 +489,12 @@ def _open_session(
         last_trigger_at=last_trigger_at,
     )
     snippets: queue.Queue[CapturedSnippet] = queue.Queue(maxsize=_SNIPPET_QUEUE_MAXSIZE)
+    dropped: deque[_DroppedDetection] = deque(maxlen=_DROPPED_DETECTIONS_MAXLEN)
     flowgraph = build_flowgraph(
         source,
         settings.samples(settings.averaging_seconds),
         assembler,
-        _offer_or_drop(snippets, drops),
+        _offer_or_drop(snippets, drops, dropped, settings.threshold_dbfs),
     )
     try:
         # Inside the try: a start() that fails part-way still gets torn down.
@@ -445,6 +502,7 @@ def _open_session(
         yield _drain(
             snippets,
             flowgraph.tap,
+            dropped=dropped,
             clock=clock,
             stall_seconds=settings.stall_seconds,
             max_drift_seconds=settings.max_clock_drift_seconds,
@@ -469,14 +527,16 @@ class _TapHealth(Protocol):
 def _drain(
     snippets: queue.Queue,
     tap: _TapHealth,
+    dropped: deque[_DroppedDetection],
     clock: SampleClock,
     stall_seconds: float,
     max_drift_seconds: float,
     poll_seconds: float = _POLL_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
     wall_clock: Callable[[], datetime] = _utc_now,
-) -> Iterator[CapturedSnippet]:
-    """Yield snippets as the flowgraph completes them; raise once it dies.
+) -> Iterator[CapturedSnippet | _DroppedDetection]:
+    """Yield snippets as the flowgraph completes them, plus summaries of any
+    the tap had to drop (see _offer_or_drop); raise once the flowgraph dies.
 
     `tap` is the flowgraph's SnippetTap. A GNU Radio flowgraph fails silently from Python's point of
     view, so health is polled: a tap error is re-raised, samples_seen
@@ -496,6 +556,7 @@ def _drain(
             yield snippets.get(timeout=poll_seconds)
         except queue.Empty:
             pass
+        yield from _pop_all(dropped)
         failure = None
         drift_failure = None
         if tap.error is not None:
@@ -516,10 +577,20 @@ def _drain(
                 failure = f"SDR stream stalled: no samples for {stall_seconds:g}s"
         if failure is not None:
             yield from _take_all(snippets)
+            yield from _pop_all(dropped)
             raise RuntimeError(failure) from tap.error
         if drift_failure is not None:
             yield from _take_all(snippets)
+            yield from _pop_all(dropped)
             raise _ClockDrift(drift_failure)
+
+
+def _pop_all(dropped: deque[_DroppedDetection]) -> Iterator[_DroppedDetection]:
+    while True:
+        try:
+            yield dropped.popleft()
+        except IndexError:
+            return
 
 
 def _take_all(snippets: queue.Queue) -> Iterator[CapturedSnippet]:
