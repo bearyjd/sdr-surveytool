@@ -13,7 +13,7 @@ from ingest.queue_server import QueueServer
 from schema.records import UnifiedRecord
 from storage.models import SurveyRecord
 from storage.repository import save_record
-from storage.snippet_store import SnippetStore
+from storage.snippet_store import SnippetRejected, SnippetStore
 
 logger = logging.getLogger(__name__)
 
@@ -102,10 +102,10 @@ class IngestService:
         to wake up periodically to observe a shutdown signal.
         """
         record = self._queue_server.get(timeout=timeout)
-        # Adopt before the grid-density bump: a rejected snippet raises here
-        # with nothing to roll back. If save_record later fails, the adopted
-        # pair stays in the store unreferenced (an orphan, never a dangling
-        # path in the database).
+        # Adopt before the grid-density bump: an I/O error raises here with
+        # nothing to roll back (a rejected snippet doesn't raise; the record is
+        # kept without it). If save_record later fails, the adopted pair stays
+        # in the store unreferenced (an orphan, never a dangling database path).
         record = self._adopt_snippet_if_present(record)
         record = self._attach_gps_if_missing(record)
         record, grid_key = self._attach_grid_density(record)
@@ -136,12 +136,31 @@ class IngestService:
         if staged is None:
             return record
         if self._snippet_store is None:
-            raise RuntimeError(
-                f"Record carries iq_snippet_path {staged!r} but ingest has no "
-                "snippet store configured"
+            return self._without_snippet(
+                record, "no_snippet_store", "ingest has no snippet store configured"
             )
-        final = self._snippet_store.adopt(staged)
+        try:
+            final = self._snippet_store.adopt(staged)
+        except SnippetRejected as rejection:
+            return self._without_snippet(record, rejection.reason, str(rejection))
         updated_metadata = record.metadata.model_copy(update={"iq_snippet_path": final})
+        return record.model_copy(update={"metadata": updated_metadata})
+
+    def _without_snippet(self, record: UnifiedRecord, reason: str, detail: str) -> UnifiedRecord:
+        """A rejected snippet loses only the snippet: the detection is still
+        persisted, with iq_snippet_path cleared and the reason flagged."""
+        logger.warning(
+            "Rejected snippet %r (%s): %s; persisting the record without it",
+            record.metadata.iq_snippet_path,
+            reason,
+            detail,
+        )
+        updated_metadata = record.metadata.model_copy(
+            update={
+                "iq_snippet_path": None,
+                "quality_flags": {**record.metadata.quality_flags, "snippet_rejected": reason},
+            }
+        )
         return record.model_copy(update={"metadata": updated_metadata})
 
     def _has_usable_fix(self, record: UnifiedRecord) -> bool:

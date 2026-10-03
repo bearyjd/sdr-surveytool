@@ -405,7 +405,10 @@ def test_process_one_adopts_staged_snippet_and_persists_final_path(tmp_path):
         server.stop()
 
 
-def test_process_one_rejects_snippet_outside_staging_without_persisting(tmp_path):
+def test_process_one_persists_record_without_a_rejected_snippet(tmp_path, caplog):
+    """A rejected snippet loses only the snippet: the detection itself is
+    still persisted, flagged, and process_one returns normally (so the ingest
+    loop doesn't back off as it would on a real failure)."""
     staging = tmp_path / "staging"
     staging.mkdir(mode=0o700)
     outside = _stage_snippet(tmp_path / "elsewhere")
@@ -413,33 +416,42 @@ def test_process_one_rejects_snippet_outside_staging_without_persisting(tmp_path
         tmp_path, LocalSnippetStore(staging, tmp_path / "snippets")
     )
     try:
+        original = _snippet_record(outside)
         with RecordEmitter(socket_path) as emitter:
-            emitter.emit(_snippet_record(outside))
+            emitter.emit(original)
             emitter.emit(_record(lat=10.0, lon=20.0, gps_fix_quality=1))
 
-        with pytest.raises(ValueError, match="staging directory"):
-            service.process_one(timeout=2)
+        with caplog.at_level("WARNING"):
+            rejected = service.process_one(timeout=2)
+        second = service.process_one(timeout=2)
 
-        # The rejected record never bumped the density count for its cell.
-        assert service.process_one(timeout=2).metadata.sample_count_in_grid_cell == 1
+        assert rejected.metadata.iq_snippet_path is None
+        assert rejected.metadata.quality_flags["snippet_rejected"] == "outside_staging"
+        assert repr(outside) in caplog.text
+        assert original.metadata.iq_snippet_path == outside
         assert Path(outside).exists()
+        assert second.metadata.sample_count_in_grid_cell == 2
         with session_factory() as session:
-            assert session.query(SurveyRecord).count() == 1
+            rows = session.query(SurveyRecord).order_by(SurveyRecord.id).all()
+            assert len(rows) == 2
+            assert rows[0].metadata_["iq_snippet_path"] is None
+            assert rows[0].metadata_["quality_flags"]["snippet_rejected"] == "outside_staging"
     finally:
         server.stop()
 
 
-def test_process_one_rejects_snippet_record_when_no_store_configured(tmp_path):
+def test_process_one_flags_snippet_record_when_no_store_configured(tmp_path):
     staged = _stage_snippet(tmp_path / "staging")
     socket_path, server, session_factory, service = _snippet_pipeline(tmp_path, None)
     try:
         with RecordEmitter(socket_path) as emitter:
             emitter.emit(_snippet_record(staged))
 
-        with pytest.raises(RuntimeError, match="no snippet store"):
-            service.process_one(timeout=2)
+        processed = service.process_one(timeout=2)
 
+        assert processed.metadata.iq_snippet_path is None
+        assert processed.metadata.quality_flags["snippet_rejected"] == "no_snippet_store"
         with session_factory() as session:
-            assert session.query(SurveyRecord).count() == 0
+            assert session.query(SurveyRecord).count() == 1
     finally:
         server.stop()
