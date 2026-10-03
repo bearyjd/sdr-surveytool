@@ -310,6 +310,80 @@ serves the boundary tests.
       the band is still capped. Validating the zone on real bladeRF captures is a
       hardware follow-up, and the flag waits for it.
 
+### Amendments after review (2026-10-03, on top of `d0f76ec`)
+
+The code, security and Codex reviews changed these behaviors. Each landed as its own
+commit after Task 12, test first. The tasks above are left as executed; where they
+disagree with this list, this list wins.
+
+- **Band table** (`1f95f96`). `agent/data/band_table_us.json` is committed: `.gitignore`'s
+  `data/` hid it, so a clean checkout had none (`!agent/data/` re-includes it).
+  `marine_vhf` cites 47 CFR 80.373(f) and 80.393, not 80.5 (definitions), and runs to
+  162.0375 MHz, so AIS 2 (162.025 MHz, 25 kHz) is inside.
+- **Installer.**
+  - Every install drops and recreates the view and both functions, so no added grant
+    survives (`70a0cea`).
+  - It refuses an existing agent or owner role that can log in or owns anything but the
+    boundary objects (`c2795a9`).
+  - It revokes the large-object writers `lo_create`, `lo_creat`, `lo_from_bytea`,
+    `lo_import`, `lo_open` and `lo_put` from PUBLIC (`98f37fa`).
+  - `sdr-agent-boundary` reads its admin URL from `SURVEYTOOL_ADMIN_DATABASE_URL`, never
+    argv; `--database-url` is gone (`08168aa`).
+  - The README sets the login's password with psql's `\password`, adds `CONNECTION
+    LIMIT 2`, and accepts the row-count leak through `pg_stat` and `EXPLAIN`.
+- **The view returns its numbers as text** (`ad559e0`).
+  `db_gateway.parse_pending_row` parses and bound-checks them; a row that fails sets
+  `PendingRecord.malformed` and is closed as `needs_review` (`malformed_record`).
+- **Self-check** (`0ac6ed4`, `98f37fa`).
+  - It judges `session_user`, not `current_user`, and requires them to be equal.
+  - It refuses any role setting on the login (`pg_db_role_setting`), TEMPORARY on any
+    database in the cluster, and an executable large-object writer.
+  - Operators revoke TEMPORARY and CONNECT from PUBLIC on the other databases; the
+    installer touches only the survey database.
+  - Problems are ordered by priority in SQL.
+- **Segmentation.**
+  - When reference mode finds no burst-time region (the reference held the emitter
+    itself, as with an always-on emitter hovering at the threshold), segmentation falls
+    back to the self floor (`f655b03`).
+  - Reference mode no longer masks DC±1: the reference carries the LO leakage, and a
+    carrier keyed up at the tuned frequency stands (`8a86a64`). The mask stays for the
+    self floor and the context search.
+- **Failure policy** (`4175638`), stated as a table in `agent/README.md`:
+  - **per-record judgment** (`needs_review` at once, NULL tag, a named reason, no LLM
+    call, never counted toward a halt): a malformed record, a snippet outside the store,
+    a snippet missing or corrupt while the store root is healthy, no region even against
+    the self floor, an analysis that fails twice;
+  - **transient** (a deferred set retried by id, with any decided verdict, up to
+    `max_attempts_per_record = 10`): transient read errno, write timeout, transient API
+    error;
+  - **systemic halt**: an unhealthy store root (missing, not a directory, unreadable, or
+    empty while records point into it), 5 failing batches, 5 invalid answers, a
+    non-retryable API error, a rejected write.
+
+  `max_consecutive_snippet_failures` is gone. The startup probe checks root health and
+  that the newest pending snippet paths lie under the root, without reading them. The
+  backoff exponent is clamped (`backoff_delay`).
+- **Process** (`f25ebc3`, `4ef8de4`).
+  - A halt exits with status 3 (`EXIT_HALTED`); the README's systemd unit sets
+    `RestartPreventExitStatus=3`.
+  - Sleeps wait on a `threading.Event` that SIGTERM sets (`install_stop_signal`,
+    `serve`).
+  - The client is pinned to `https://api.anthropic.com` (`make_client`).
+  - `connect_gateway` holds a session advisory lock, so a second agent raises
+    `AgentAlreadyRunning`; the pool is two sessions.
+- **Grounding.**
+  - New reduced-confidence reasons: `low_snr` (region SNR below 10 dB; `b5b6d86`) and
+    `obw_unresolved` (OBW within 4 fine bins of `RegionFeatures.fine_resolution_hz`, a
+    bare carrier; `e6abf76`).
+  - Routing requires `<band-id>:<signal>` and, in v1, grounds only through the band
+    table: `route(classification, grounded_band_ids, reduced_confidence=())`
+    (`5fd5eda`).
+  - The classifier receives the channelized primary region from
+    `dsp.features.channelize_region` (`95734b5`).
+- **Import guard** (`fc053be`). It flags `.os` and `.subprocess` attribute chains, and its
+  docstring now lists what it does not see. `errno` and `threading` joined the agent's
+  stdlib allowlist.
+
 ## Verified facts (build-and-run spike, 2026-10-03)
 
 Everything below was run in this environment, against a throwaway PostgreSQL on
