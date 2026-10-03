@@ -248,15 +248,26 @@ def test_a_source_vanishing_after_both_links_still_completes_the_adoption(dirs, 
     assert list(staging.iterdir()) == []
 
 
-def test_store_refuses_dirs_on_different_filesystems(dirs, monkeypatch):
-    """adopt() hard-links, which cannot cross filesystems: fail at startup,
-    not on the first snippet."""
+def test_store_refuses_dirs_it_cannot_hard_link_between(dirs, monkeypatch):
+    """adopt() hard-links, which fails across filesystems and also across two
+    mounts of one filesystem (same st_dev). Probe it for real at startup
+    instead of failing on the first snippet."""
     staging, root = dirs
-    monkeypatch.setattr(
-        snippet_store, "_device_of", lambda path: 1 if Path(path).name == "staging" else 2
-    )
-    with pytest.raises(ValueError, match="same filesystem"):
+
+    def cross_mount_link(src, dst, *, follow_symlinks=True):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(snippet_store.os, "link", cross_mount_link)
+    with pytest.raises(ValueError, match="same filesystem and mount"):
         LocalSnippetStore(staging, root)
+    monkeypatch.undo()
+    assert list(staging.iterdir()) == [] and list(root.iterdir()) == []
+
+
+def test_link_probe_leaves_nothing_behind(dirs):
+    staging, root = dirs
+    LocalSnippetStore(staging, root)
+    assert list(staging.iterdir()) == [] and list(root.iterdir()) == []
 
 
 def test_rejection_messages_quote_untrusted_names(dirs):

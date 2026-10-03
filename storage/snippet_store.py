@@ -5,6 +5,7 @@ import errno
 import os
 import re
 import stat
+import uuid
 from pathlib import Path
 from typing import Protocol
 
@@ -83,19 +84,14 @@ class LocalSnippetStore:
 
     Not guaranteed across a process crash between the two links (the store
     can then hold a data file without its meta) or between the two source
-    unlinks. Hard links cannot cross filesystems, so staging and store must
-    share one; the constructor checks this.
+    unlinks. Hard links cannot cross filesystems or mount points, so staging
+    and store must share one; the constructor proves it with a real link.
     """
 
     def __init__(self, staging_dir: Path | str, root_dir: Path | str) -> None:
         self._staging_dir = ensure_private_dir(staging_dir)
         self._root_dir = ensure_private_dir(root_dir)
-        if _device_of(self._staging_dir) != _device_of(self._root_dir):
-            raise ValueError(
-                f"Snippet staging dir {str(self._staging_dir)!r} and store "
-                f"{str(self._root_dir)!r} must be on the same filesystem: adopt() "
-                "hard-links snippets, which cannot cross filesystems"
-            )
+        _probe_hard_link(self._staging_dir, self._root_dir)
 
     @property
     def staging_dir(self) -> Path:
@@ -162,8 +158,24 @@ class LocalSnippetStore:
         return str(self._root_dir / data.name)
 
 
-def _device_of(path: Path) -> int:
-    return os.stat(path).st_dev
+def _probe_hard_link(staging_dir: Path, root_dir: Path) -> None:
+    """adopt() hard-links staging -> store. That fails across filesystems and
+    also across two mounts of one filesystem (same st_dev, still EXDEV), so
+    try one real link at startup and fail fast, leaving nothing behind."""
+    name = f".link-probe-{uuid.uuid4().hex}"
+    source, target = staging_dir / name, root_dir / name
+    try:
+        os.close(os.open(source, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        os.link(source, target, follow_symlinks=False)
+    except OSError as error:
+        code = errno.errorcode.get(error.errno or 0, str(error.errno))
+        raise ValueError(
+            f"Cannot hard-link from snippet staging dir {str(staging_dir)!r} into store "
+            f"{str(root_dir)!r} ({code}): both must be on the same filesystem and mount"
+        ) from error
+    finally:
+        source.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
 
 
 def _single_regular_file(path: Path) -> os.stat_result:
