@@ -95,3 +95,13 @@ def test_overlapping_entries_all_returned_lowest_start_first():
     assert [(m.entry.id, m.grounded) for m in matches] == [("wide", True), ("narrow", True)]
     matches = match_bands(bands, 915e6, 1e6)
     assert [(m.entry.id, m.grounded) for m in matches] == [("wide", True), ("narrow", False)]
+
+
+@pytest.mark.parametrize("center_hz", [156.775e6, 161.975e6, 162.025e6])
+def test_marine_vhf_covers_every_ais_channel(center_hz):
+    """47 CFR 80.393: AIS 3/4 at 156.775/156.825 MHz and AIS 1/2 at
+    161.975/162.025 MHz, each 25 kHz wide. AIS 2 lies above the 156-162 MHz
+    band of 80.373(f), so the entry runs to 162.0375 MHz."""
+    (match,) = match_bands(load_band_table().entries, center_hz, 14e3)
+    assert (match.entry.id, match.grounded) == ("marine_vhf", True)
+    assert match.entry.citation == "47 CFR 80.373(f); 80.393"

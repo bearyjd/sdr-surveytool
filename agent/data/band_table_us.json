@@ -1,0 +1,418 @@
+{
+  "region": "US",
+  "verified": "Band edges checked 2026-10-03 against the eCFR, Title 47 as of 2026-10-01 (https://www.ecfr.gov/api/versioner/v1/full/2026-10-01/title-47.xml?part=P&section=S). expected_obw_hz is an engineering estimate for the listed signals, not a regulatory value, except where a cited rule caps occupied bandwidth. Downlinks start at 1 MHz (an LTE carrier is never narrower); uplinks at 150 kHz (one UE's SC-FDMA allocation can be a single 180 kHz resource block); 2 m starts at 2 kHz, so a bare carrier or CW there is left ungrounded.",
+  "entries": [
+    {
+      "id": "fm_broadcast",
+      "start_hz": 88000000,
+      "end_hz": 108000000,
+      "service": "FM broadcast",
+      "typical_signals": [
+        "wideband FM (mono/stereo)",
+        "HD Radio hybrid sidebands"
+      ],
+      "expected_obw_hz": [
+        100000,
+        450000
+      ],
+      "citation": "47 CFR 73.201",
+      "source": "The FM broadcast band consists of that portion of the radio frequency spectrum between 88 MHz and 108 MHz."
+    },
+    {
+      "id": "airband_vhf",
+      "start_hz": 117975000,
+      "end_hz": 137000000,
+      "service": "Aeronautical mobile (R), VHF air-ground voice and data",
+      "typical_signals": [
+        "AM voice (25 kHz / 8.33 kHz channels)",
+        "VDL Mode 2 D8PSK",
+        "ACARS MSK"
+      ],
+      "expected_obw_hz": [
+        2000,
+        25000
+      ],
+      "citation": "47 CFR 2.106(b)(200) (footnote 5.200)",
+      "source": "5.200 In the band 117.975-137 MHz, the frequency 121.5 MHz is the aeronautical emergency frequency"
+    },
+    {
+      "id": "ham_2m",
+      "start_hz": 144000000,
+      "end_hz": 148000000,
+      "service": "Amateur radio 2 m band (ITU Region 2)",
+      "typical_signals": [
+        "narrowband FM voice",
+        "APRS 1200 baud AFSK on FM",
+        "digital voice"
+      ],
+      "expected_obw_hz": [
+        2000,
+        20000
+      ],
+      "citation": "47 CFR 97.301(a)",
+      "source": "2 m | 144-146 | 144-148 | 144-148 (ITU Region 1 | Region 2 | Region 3 columns)"
+    },
+    {
+      "id": "marine_vhf",
+      "start_hz": 156000000,
+      "end_hz": 162037500,
+      "service": "Maritime mobile VHF (the 156-162 MHz band, plus AIS 2 at 162.025 MHz with its 25 kHz bandwidth)",
+      "typical_signals": [
+        "FM voice (16K0F3E)",
+        "DSC",
+        "AIS GMSK (156.775, 156.825, 161.975 and 162.025 MHz)"
+      ],
+      "expected_obw_hz": [
+        5000,
+        25000
+      ],
+      "citation": "47 CFR 80.373(f); 80.393",
+      "source": "(f) Frequencies in the 156-162 MHz band. / The simplex channels at 156.775 MHz (AIS 3), 156.825 MHz (AIS 4), 161.975 MHz (AIS 1), and 162.025 MHz (AIS 2), each with a 25 kHz bandwidth, may be authorized only for AIS."
+    },
+    {
+      "id": "frs_gmrs_462",
+      "start_hz": 462540000,
+      "end_hz": 462735000,
+      "service": "FRS / GMRS 462 MHz channels (channel centers 462.5500-462.7250 MHz, widened by half the 20 kHz authorized bandwidth)",
+      "typical_signals": [
+        "narrowband FM voice",
+        "GMRS repeater outputs",
+        "FRS/GMRS digital data bursts"
+      ],
+      "expected_obw_hz": [
+        2000,
+        20000
+      ],
+      "citation": "47 CFR 95.1763(a),(b); 95.1773(a),(b); 95.563",
+      "source": "The channel center frequencies are: 462.5500, ... and 462.7250 MHz. / The authorized bandwidth is 20 kHz for GMRS transmitters operating on any of the 462 MHz main channels"
+    },
+    {
+      "id": "frs_gmrs_467",
+      "start_hz": 467540000,
+      "end_hz": 467735000,
+      "service": "FRS / GMRS 467 MHz channels (channel centers 467.5500-467.7250 MHz, widened by half the 20 kHz authorized bandwidth)",
+      "typical_signals": [
+        "narrowband FM voice",
+        "GMRS repeater inputs"
+      ],
+      "expected_obw_hz": [
+        2000,
+        20000
+      ],
+      "citation": "47 CFR 95.1763(c),(d); 95.1773(a),(b); 95.563",
+      "source": "The channel center frequencies are: 467.5500, ... and 467.7250 MHz. / The authorized bandwidth is 20 kHz for GMRS transmitters operating on any of ... the 467 MHz main channels"
+    },
+    {
+      "id": "uhf_tv",
+      "start_hz": 470000000,
+      "end_hz": 608000000,
+      "service": "UHF television broadcast (channels 14-36)",
+      "typical_signals": [
+        "ATSC 1.0 8-VSB",
+        "ATSC 3.0 OFDM"
+      ],
+      "expected_obw_hz": [
+        4000000,
+        6200000
+      ],
+      "citation": "47 CFR 73.603(a)",
+      "source": "14 | 470-476 ... 36 | 602-608"
+    },
+    {
+      "id": "lte_b71_600_downlink",
+      "start_hz": 617000000,
+      "end_hz": 652000000,
+      "service": "600 MHz band downlink (LTE band 71 / NR n71)",
+      "typical_signals": [
+        "LTE/NR FDD downlink"
+      ],
+      "expected_obw_hz": [
+        1000000,
+        20000000
+      ],
+      "citation": "47 CFR 27.11(k); 27.5(l)",
+      "source": "600 MHz downlink band (617-652 MHz)"
+    },
+    {
+      "id": "lte_b71_600_uplink",
+      "start_hz": 663000000,
+      "end_hz": 698000000,
+      "service": "600 MHz band uplink (LTE band 71 / NR n71)",
+      "typical_signals": [
+        "LTE/NR FDD uplink (SC-FDMA)"
+      ],
+      "expected_obw_hz": [
+        150000,
+        20000000
+      ],
+      "citation": "47 CFR 27.11(k); 27.5(l)",
+      "source": "600 MHz uplink band (663-698 MHz)"
+    },
+    {
+      "id": "lower700_uplink",
+      "start_hz": 698000000,
+      "end_hz": 716000000,
+      "service": "Lower 700 MHz blocks A-C uplink (LTE bands 12/17)",
+      "typical_signals": [
+        "LTE FDD uplink (SC-FDMA)"
+      ],
+      "expected_obw_hz": [
+        150000,
+        20000000
+      ],
+      "citation": "47 CFR 27.5(c)(1); 27.50(c)",
+      "source": "Block A: 698-704 MHz and 728-734 MHz; Block B: 704-710 MHz and 734-740 MHz; and Block C: 710-716 MHz and 740-746 MHz / uplink operations in the 698-716 MHz band"
+    },
+    {
+      "id": "lower700_downlink",
+      "start_hz": 728000000,
+      "end_hz": 746000000,
+      "service": "Lower 700 MHz blocks A-C downlink (LTE bands 12/17)",
+      "typical_signals": [
+        "LTE FDD downlink"
+      ],
+      "expected_obw_hz": [
+        1000000,
+        20000000
+      ],
+      "citation": "47 CFR 27.5(c)(1)",
+      "source": "Block A: 698-704 MHz and 728-734 MHz; Block B: 704-710 MHz and 734-740 MHz; and Block C: 710-716 MHz and 740-746 MHz"
+    },
+    {
+      "id": "upper700_c_downlink",
+      "start_hz": 746000000,
+      "end_hz": 757000000,
+      "service": "Upper 700 MHz C block, conventionally downlink (LTE band 13)",
+      "typical_signals": [
+        "LTE FDD downlink"
+      ],
+      "expected_obw_hz": [
+        1000000,
+        20000000
+      ],
+      "citation": "47 CFR 27.5(b)(3)",
+      "source": "Block C in the 746-757 MHz and 776-787 MHz bands"
+    },
+    {
+      "id": "upper700_c_uplink",
+      "start_hz": 776000000,
+      "end_hz": 787000000,
+      "service": "Upper 700 MHz C block, conventionally uplink (LTE band 13)",
+      "typical_signals": [
+        "LTE FDD uplink (SC-FDMA)"
+      ],
+      "expected_obw_hz": [
+        150000,
+        20000000
+      ],
+      "citation": "47 CFR 27.5(b)(3)",
+      "source": "Block C in the 746-757 MHz and 776-787 MHz bands"
+    },
+    {
+      "id": "cellular_850_uplink",
+      "start_hz": 824000000,
+      "end_hz": 849000000,
+      "service": "Cellular 850 MHz, conventionally uplink (LTE band 5)",
+      "typical_signals": [
+        "LTE FDD uplink (SC-FDMA)",
+        "NB-IoT / LTE-M uplink"
+      ],
+      "expected_obw_hz": [
+        150000,
+        20000000
+      ],
+      "citation": "47 CFR 22.905",
+      "source": "869-880 MHz paired with 824-835 MHz ... 891.5-894 MHz paired with 846.5-849 MHz"
+    },
+    {
+      "id": "cellular_850_downlink",
+      "start_hz": 869000000,
+      "end_hz": 894000000,
+      "service": "Cellular 850 MHz, conventionally downlink (LTE band 5)",
+      "typical_signals": [
+        "LTE FDD downlink",
+        "NB-IoT / LTE-M"
+      ],
+      "expected_obw_hz": [
+        1000000,
+        20000000
+      ],
+      "citation": "47 CFR 22.905",
+      "source": "869-880 MHz paired with 824-835 MHz ... 891.5-894 MHz paired with 846.5-849 MHz"
+    },
+    {
+      "id": "ism_902_928",
+      "start_hz": 902000000,
+      "end_hz": 928000000,
+      "service": "902-928 MHz unlicensed (Part 15) / ISM (Part 18)",
+      "typical_signals": [
+        "LoRa / LoRaWAN chirp spread spectrum",
+        "FHSS and FSK telemetry, smart meters",
+        "UHF RFID readers",
+        "802.15.4g"
+      ],
+      "expected_obw_hz": [
+        10000,
+        2200000
+      ],
+      "citation": "47 CFR 15.247; 18.301",
+      "source": "Operation within the bands 902-928 MHz, 2400-2483.5 MHz, and 5725-5850 MHz"
+    },
+    {
+      "id": "adsb_1090",
+      "start_hz": 1087700000,
+      "end_hz": 1092300000,
+      "service": "1090 MHz aeronautical (Mode S / ADS-B extended squitter)",
+      "typical_signals": [
+        "Mode S / ADS-B 1 Mbit/s pulse-position modulation",
+        "Mode A/C replies"
+      ],
+      "expected_obw_hz": [
+        500000,
+        10000000
+      ],
+      "citation": "47 CFR 2.106(b)(328)(ii) (footnote 5.328AA)",
+      "source": "The frequency band 1087.7-1092.3 MHz is also allocated to the aeronautical mobile-satellite (R) service (Earth-to-space) on a primary basis, limited to the space station reception of Automatic Dependent Surveillance-Broadcast (ADS-B) emissions from aircraft transmitters"
+    },
+    {
+      "id": "gnss_rnss_l1",
+      "start_hz": 1559000000,
+      "end_hz": 1610000000,
+      "service": "Radionavigation-satellite (GPS L1, Galileo E1, BeiDou B1, GLONASS L1)",
+      "typical_signals": [
+        "GNSS spread spectrum (normally below the noise floor of an untuned SDR)"
+      ],
+      "expected_obw_hz": [
+        1000000,
+        32000000
+      ],
+      "citation": "47 CFR 2.106(b)(328)(iii) (footnote 5.328B)",
+      "source": "The use of the bands 1164-1300 MHz, 1559-1610 MHz and 5010-5030 MHz by systems and networks in the radionavigation-satellite service"
+    },
+    {
+      "id": "aws_uplink",
+      "start_hz": 1695000000,
+      "end_hz": 1780000000,
+      "service": "AWS-1 and AWS-3 uplink (LTE bands 4/66, unpaired AWS-3 1695-1710 MHz)",
+      "typical_signals": [
+        "LTE FDD uplink (SC-FDMA)"
+      ],
+      "expected_obw_hz": [
+        150000,
+        20000000
+      ],
+      "citation": "47 CFR 27.5(h); 27.50(d)(4)",
+      "source": "1710-1755 MHz, 2110-2155 MHz, 1695-1710 MHz, 1755-1780 MHz, and 2155-2180 MHz bands"
+    },
+    {
+      "id": "pcs_uplink",
+      "start_hz": 1850000000,
+      "end_hz": 1910000000,
+      "service": "Broadband PCS, conventionally uplink (LTE band 2/25)",
+      "typical_signals": [
+        "LTE FDD uplink (SC-FDMA)"
+      ],
+      "expected_obw_hz": [
+        150000,
+        20000000
+      ],
+      "citation": "47 CFR 24.200; 24.229",
+      "source": "authorized in the 1850-1910 and 1930-1990 MHz bands"
+    },
+    {
+      "id": "pcs_downlink",
+      "start_hz": 1930000000,
+      "end_hz": 1990000000,
+      "service": "Broadband PCS, conventionally downlink (LTE band 2/25)",
+      "typical_signals": [
+        "LTE FDD downlink"
+      ],
+      "expected_obw_hz": [
+        1000000,
+        20000000
+      ],
+      "citation": "47 CFR 24.200; 24.229",
+      "source": "authorized in the 1850-1910 and 1930-1990 MHz bands"
+    },
+    {
+      "id": "aws_downlink",
+      "start_hz": 2110000000,
+      "end_hz": 2180000000,
+      "service": "AWS-1 and AWS-3 downlink (LTE bands 4/66)",
+      "typical_signals": [
+        "LTE FDD downlink"
+      ],
+      "expected_obw_hz": [
+        1000000,
+        20000000
+      ],
+      "citation": "47 CFR 27.5(h); 27.50(d)(1)-(2)",
+      "source": "1710-1755 MHz, 2110-2155 MHz, 1695-1710 MHz, 1755-1780 MHz, and 2155-2180 MHz bands"
+    },
+    {
+      "id": "ism_2400",
+      "start_hz": 2400000000,
+      "end_hz": 2483500000,
+      "service": "2.4 GHz unlicensed (Part 15)",
+      "typical_signals": [
+        "802.11b/g/n/ax Wi-Fi (20/40 MHz)",
+        "Bluetooth / BLE (1-2 MHz FHSS)",
+        "802.15.4 / Zigbee",
+        "microwave ovens"
+      ],
+      "expected_obw_hz": [
+        500000,
+        40000000
+      ],
+      "citation": "47 CFR 15.247",
+      "source": "Operation within the bands 902-928 MHz, 2400-2483.5 MHz, and 5725-5850 MHz"
+    },
+    {
+      "id": "cbrs",
+      "start_hz": 3550000000,
+      "end_hz": 3700000000,
+      "service": "Citizens Broadband Radio Service",
+      "typical_signals": [
+        "LTE/NR TDD (band 48 / n48)"
+      ],
+      "expected_obw_hz": [
+        4000000,
+        60000000
+      ],
+      "citation": "47 CFR 96.11(a)",
+      "source": "authorized in the 3550-3700 MHz frequency band"
+    },
+    {
+      "id": "unii_5150_5250",
+      "start_hz": 5150000000,
+      "end_hz": 5250000000,
+      "service": "U-NII-1 (Part 15 unlicensed national information infrastructure)",
+      "typical_signals": [
+        "802.11a/n/ac/ax Wi-Fi (20/40/80/160 MHz)"
+      ],
+      "expected_obw_hz": [
+        10000000,
+        160000000
+      ],
+      "citation": "47 CFR 15.407(a)(1)(i)",
+      "source": "operating in the band 5.15-5.25 GHz"
+    },
+    {
+      "id": "unii_5725_5850",
+      "start_hz": 5725000000,
+      "end_hz": 5850000000,
+      "service": "U-NII-3 / 5.8 GHz unlicensed",
+      "typical_signals": [
+        "802.11a/n/ac/ax Wi-Fi",
+        "5.8 GHz FPV video",
+        "point-to-point links"
+      ],
+      "expected_obw_hz": [
+        5000000,
+        160000000
+      ],
+      "citation": "47 CFR 15.407(a)(3)(i); 15.247",
+      "source": "For the band 5.725-5.850 GHz"
+    }
+  ]
+}
