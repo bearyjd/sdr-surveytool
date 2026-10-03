@@ -208,6 +208,7 @@ def _write_snippet(snippet: CapturedSnippet, settings: CaptureSettings) -> str:
         snippet.sample_rate,
         settings.center_freq_hz,
         snippet.start_time,
+        trigger_offset=snippet.trigger.sample_index - snippet.start_index,
     )
     return str(data_path)
 

@@ -131,3 +131,18 @@ def test_a_failed_final_directory_fsync_leaves_no_published_files(tmp_path, monk
     with pytest.raises(OSError, match="fsync failed"):
         write_sigmf_snippet(IQ, tmp_path, 2e6, 915e6, START)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_trigger_position_is_annotated_for_downstream_noise_reference(tmp_path):
+    """Part 4 needs the same per-bin noise reference capture used: the
+    pre-trigger segment and the burst are standard SigMF annotations."""
+    data_path = write_sigmf_snippet(IQ, tmp_path, 2e6, 915e6, START, trigger_offset=100)
+    annotations = sigmffile.fromfile(str(data_path)).get_annotations()
+    assert [
+        (a[sigmf.SAMPLE_START_KEY], a[sigmf.SAMPLE_COUNT_KEY], a[sigmf.LABEL_KEY]) for a in annotations
+    ] == [(0, 100, "pre_trigger"), (100, 900, "burst")]
+
+
+def test_no_trigger_offset_writes_no_annotations(tmp_path):
+    data_path = write_sigmf_snippet(IQ, tmp_path, 2e6, 915e6, START)
+    assert sigmffile.fromfile(str(data_path)).get_annotations() == []

@@ -20,6 +20,7 @@ def write_sigmf_snippet(
     sample_rate: float,
     center_freq_hz: float,
     capture_start: datetime,
+    trigger_offset: int | None = None,
 ) -> Path:
     """Write `iq` as a SigMF pair (`.sigmf-data` raw cf32_le + `.sigmf-meta`
     JSON) directly in `staging_dir` and return the absolute `.sigmf-data`
@@ -36,7 +37,10 @@ def write_sigmf_snippet(
     and a staging directory created here is 0o700.
 
     `capture_start` is the sample-derived UTC time of iq[0] and becomes the
-    SigMF capture's core:datetime. The basename carries a random suffix, so
+    SigMF capture's core:datetime. `trigger_offset` (the index of the trigger
+    sample in `iq`) is written as two standard annotations: "pre_trigger"
+    over [0, trigger_offset), the below-threshold noise reference that
+    dsp.spectral.noise_floor_psd expects, and "burst" from the trigger on. The basename carries a random suffix, so
     concurrent capture processes can never collide.
     """
     if capture_start.tzinfo is None:
@@ -76,6 +80,8 @@ def write_sigmf_snippet(
                 sigmf.DATETIME_KEY: start_utc.strftime(SIGMF_DATETIME_ISO8601_FMT),
             },
         )
+        if trigger_offset is not None:
+            _annotate_trigger(meta, trigger_offset, len(iq))
         meta.validate()
         with _create_private(tmp_meta, "w") as meta_file:
             meta.dump(meta_file, pretty=True)
@@ -89,6 +95,23 @@ def write_sigmf_snippet(
             leftover.unlink(missing_ok=True)
         raise
     return data_path
+
+
+def _annotate_trigger(meta: SigMFFile, trigger_offset: int, length: int) -> None:
+    if trigger_offset > 0:
+        meta.add_annotation(
+            0,
+            length=trigger_offset,
+            metadata={
+                sigmf.LABEL_KEY: "pre_trigger",
+                sigmf.COMMENT_KEY: "Below the trigger threshold: per-bin noise reference",
+            },
+        )
+    meta.add_annotation(
+        trigger_offset,
+        length=length - trigger_offset,
+        metadata={sigmf.LABEL_KEY: "burst", sigmf.COMMENT_KEY: "From the energy-trigger sample on"},
+    )
 
 
 def _create_private(path: Path, mode: str) -> IO:

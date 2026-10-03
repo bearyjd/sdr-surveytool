@@ -158,3 +158,5 @@ def test_synthetic_bursts_become_stored_unknown_records(tmp_path):
         samples = recording.read_samples()
         assert len(samples) == round(1.0 * FS)
         assert recording.get_captures()[0]["core:frequency"] == 915e6
+        burst = [a for a in recording.get_annotations() if a["core:label"] == "burst"]
+        assert [a["core:sample_start"] for a in burst] == [round(0.1 * FS)]  # pre-trigger length

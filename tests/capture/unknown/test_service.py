@@ -286,7 +286,7 @@ def test_a_write_failure_still_emits_the_measured_detection(tmp_path, monkeypatc
     staging = tmp_path / "staging"
     staging.mkdir(mode=0o700)
 
-    def broken_write(*args):
+    def broken_write(*args, **kwargs):
         raise OSError("injected write failure")
 
     monkeypatch.setattr(service, "write_sigmf_snippet", broken_write)
