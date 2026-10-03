@@ -429,6 +429,37 @@ disagree with this list, this list wins.
     - The width judgment comes from segmentation.
     - At the 2^25-sample read cap the worst case (a full-band region) peaks at 584 MB RSS
       (it was 934 MB); a 1 MHz region at 454 MB.
+- **Final round before the PR** (on top of `7c1b7b0`).
+  - **Object metadata** (`be86aba`). The pending predicate requires
+    `json_typeof(metadata) = 'object'`, so a scalar or array metadata is never pending and
+    `classify_unknown` refuses it.
+  - **Real NUL escapes only** (`3e85ea5`). A row is hidden only for a `\u0000` preceded by an
+    even number of backslashes; an escaped backslash followed by u0000 stays visible.
+  - **Band widths** (`571a3a1`). No entry's `expected_obw_hz` maximum may exceed its band.
+    Seven entries were fixed; their citations are unchanged.
+  - **Typical-signal grounding** (`a6a07f6`). `route(classification, grounded_bands,
+    reduced_confidence)`, where `grounded_bands` maps id to `typical_signals`. Every word of
+    the tag's signal must appear in one of the grounded entry's typical signals.
+  - **Budget reservation** (`02d1d1c`). Each call reserves its estimated input plus
+    `max_tokens` (`call_reservation`) and is reconciled after; a failed call keeps its
+    reservation.
+  - **CLI bounds** (`322b557`). `--poll-seconds > 0`, `--daily-token-budget > 0`, and
+    `--max-tokens` within `MAX_TOKENS_RANGE = (256, 8192)`.
+  - **TLS** (`0d23a45`). A non-local database needs sslmode require, verify-ca or
+    verify-full (verify-full recommended): `require_tls_for_remote`.
+  - **Open race** (`26e1957`). Snippets are opened from a store-root directory fd, one
+    component at a time with O_NOFOLLOW.
+  - **Installer preview** (`74f80a8`). `sdr-agent-boundary` previews by default: it lists
+    the PUBLIC revokes and the login roles relying on them. `--apply` installs. The README
+    gives the regrant path.
+  - **Re-ask guards** (`c24f9ae`). Each guard has a test that fails when it alone is
+    removed.
+  - **README** (`15b11c4`).
+    - A hardened systemd unit.
+    - Snippets above ~33.55 MS/s are always truncated.
+    - Five missing snippets in a row halt by design.
+    - How to find a lock squatter.
+    - The budget's per-process limits (`02d1d1c`).
 - **Import guard** (`fc053be`). It flags `.os` and `.subprocess` attribute chains, and its
   docstring now lists what it does not see. `errno` and `threading` joined the agent's
   stdlib allowlist.
