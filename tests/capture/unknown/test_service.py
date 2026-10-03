@@ -105,9 +105,10 @@ def test_settings_reject_non_finite_numbers(tmp_path, field, value):
 
 
 def test_settings_cap_the_sample_rate_at_the_ad9361_maximum(tmp_path):
-    assert _settings(tmp_path, sample_rate=61.44e6).sample_rate == 61.44e6
+    roomy = 16 * 1024**3
+    assert _settings(tmp_path, sample_rate=61.44e6, max_snippet_memory_bytes=roomy).sample_rate == 61.44e6
     with pytest.raises(ValueError, match="61.44e6"):
-        _settings(tmp_path, sample_rate=61.45e6)
+        _settings(tmp_path, sample_rate=61.45e6, max_snippet_memory_bytes=roomy)
 
 
 @pytest.mark.parametrize("field", ["averaging_seconds", "pre_trigger_seconds", "post_trigger_seconds"])
@@ -123,6 +124,21 @@ def test_the_largest_configurable_snippet_fits_the_store_size_bound():
     biggest snippet capture's settings allow must stay within it."""
     largest = service._MAX_SAMPLE_RATE * 2 * service._MAX_WINDOW_SECONDS * 8
     assert largest <= DEFAULT_MAX_SNIPPET_BYTES
+
+
+def test_peak_snippet_memory_estimate_follows_the_real_buffers(tmp_path):
+    """12 B/sample (cf32 iq + float32 power) for 2 queued + 1 processing + 1
+    assembling snippet, 2 x 12 B x pre for the history and its copy when a
+    capture begins, and 10 B/sample of measurement transients."""
+    settings = _settings(tmp_path, sample_rate=20e6)  # 0.1 s pre + 0.9 s post
+    assert settings.estimated_peak_memory_bytes == 12 * 20_000_000 * 4 + 24 * 2_000_000 + 10 * 20_000_000
+    assert settings.estimated_peak_memory_bytes <= 2 * 1024**3  # the defaults fit a Jetson
+
+
+def test_settings_fail_fast_when_snippets_would_not_fit_the_memory_budget(tmp_path):
+    with pytest.raises(ValueError, match="3,382,400,000"):
+        _settings(tmp_path, sample_rate=56e6)
+    assert _settings(tmp_path, sample_rate=56e6, max_snippet_memory_bytes=4 * 1024**3).sample_rate == 56e6
 
 
 def test_settings_reject_windows_shorter_than_one_sample(tmp_path):
@@ -610,6 +626,7 @@ def test_cli_requires_noise_floor_and_builds_settings():
     assert settings.staging_dir == Path("data/snippet-staging")
     assert settings.min_free_bytes == 2 * 1024**3
     assert settings.max_clock_drift_seconds == 2.0
+    assert settings.max_snippet_memory_bytes == 2 * 1024**3
     assert args.socket_path == "/tmp/sdr-ingest.sock"
 
 

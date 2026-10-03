@@ -92,6 +92,9 @@ class CaptureSettings:
     # make it lag wall time, and NTP/GPS steps move wall time; past this
     # divergence the session is rebuilt, which re-anchors it.
     max_clock_drift_seconds: float = 2.0
+    # Fail fast at startup if snippet buffers could outgrow this (see
+    # estimated_peak_memory_bytes); 2 GiB suits an 8 GB Jetson Orin Nano.
+    max_snippet_memory_bytes: int = 2 * 1024**3
 
     def __post_init__(self) -> None:
         # First: NaN passes every ordering check below (comparisons are False).
@@ -131,6 +134,25 @@ class CaptureSettings:
             raise ValueError(
                 "averaging_seconds and post_trigger_seconds must each span at least one sample"
             )
+        peak = self.estimated_peak_memory_bytes
+        if peak > self.max_snippet_memory_bytes:
+            raise ValueError(
+                f"Estimated peak snippet memory is {peak:,} bytes, over "
+                f"max_snippet_memory_bytes {self.max_snippet_memory_bytes:,}; lower the "
+                "sample rate or the pre/post windows, or raise --max-snippet-memory-bytes"
+            )
+
+    @property
+    def estimated_peak_memory_bytes(self) -> int:
+        """Worst-case snippet memory, from the actual buffers: 12 B/sample
+        (cf32 iq + float32 power) for each queued snippet, the one being
+        processed and the one being assembled; the pre-trigger history plus
+        its concatenated copy when a capture begins; and up to 10 B/sample of
+        measurement transients (a boolean mask and the above-threshold copy,
+        on the service thread and, for queue-full summaries, the GR thread)."""
+        pre = self.samples(self.pre_trigger_seconds)
+        snippet = pre + self.samples(self.post_trigger_seconds)
+        return 12 * snippet * (_SNIPPET_QUEUE_MAXSIZE + 2) + 2 * 12 * pre + 10 * snippet
 
     @property
     def threshold_dbfs(self) -> float:
@@ -686,6 +708,13 @@ def _add_safety_args(parser: argparse.ArgumentParser) -> None:
         "fall below this many free bytes (staging, store and database share it).",
     )
     parser.add_argument(
+        "--max-snippet-memory-bytes",
+        type=int,
+        default=2 * 1024**3,
+        help="Refuse to start if snippet buffers could need more memory than this "
+        "at the configured sample rate and windows.",
+    )
+    parser.add_argument(
         "--max-clock-drift-s",
         type=float,
         default=2.0,
@@ -710,6 +739,7 @@ def _settings_from_args(args: argparse.Namespace) -> CaptureSettings:
         device_args=args.device_args,
         min_free_bytes=args.min_free_bytes,
         max_clock_drift_seconds=args.max_clock_drift_s,
+        max_snippet_memory_bytes=args.max_snippet_memory_bytes,
     )
 
 
