@@ -467,6 +467,22 @@ disagree with this list, this list wins.
     NFM, PPM, 1090ES, NR, the 802.11 amendments) (`2b36f6b`).
   - The CLI refuses a `--daily-token-budget` below `minimum_daily_budget(max_tokens)`,
     one call's reservation (`a408506`).
+- **Secrets and the unit** (on top of `0b66169`).
+  - Ingest reads its database URL from `SURVEYTOOL_DATABASE_URL`, else
+    `$CREDENTIALS_DIRECTORY/database_url`, else `sqlite:///survey.db`. `--database-url`
+    still works and wins, but one carrying a password is logged as a warning
+    (`19a507c`).
+  - Ingest logs its URL through `storage.db.redacted_url`, which masks the password in
+    the userinfo and in the query. Tests pin that no password reaches the logs or the
+    exit at ingest startup, agent startup and in the installer (`b127da2`).
+  - `require_tls_for_remote` judges libpq's effective parameters: the URL as the
+    psycopg dialect translates it, then PGHOST, PGHOSTADDR and PGSSLMODE for what it
+    leaves out. Every host and hostaddr entry must be local, or sslmode must be require
+    or stronger. `service=` and PGSERVICE are refused (`f013fad`).
+  - The README's unit adds PrivatePIDs= (systemd 257+), ProtectProc=invisible,
+    ProcSubset=pid, SystemCallFilter=@system-service and ~@debug, and
+    InaccessiblePaths=-/run/credentials. It is no longer described as equivalent to the
+    container, which stays the recommended boundary (`6a77fd3`).
 - **Import guard** (`fc053be`). It flags `.os` and `.subprocess` attribute chains, and its
   docstring now lists what it does not see. `errno` and `threading` joined the agent's
   stdlib allowlist.
