@@ -156,6 +156,27 @@ def test_adopt_rejects_a_file_swapped_between_check_and_link(dirs, monkeypatch):
     assert data.exists() and meta.exists()
 
 
+def test_adopt_rejects_a_hard_link_added_between_check_and_link(dirs, tmp_path, monkeypatch):
+    """A hard link added after the lstat keeps the same inode, so the dev/ino
+    check passes; the link count right after linking must be exactly two
+    (the staged name and the stored one)."""
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    data, meta = _stage(staging)
+    alias = tmp_path / "alias"
+    real_link = os.link
+
+    def link_after_an_alias_appears(src, dst, *, follow_symlinks=True):
+        if str(src).endswith(".sigmf-data") and not alias.exists():
+            real_link(src, alias)
+        real_link(src, dst, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(snippet_store.os, "link", link_after_an_alias_appears)
+    _rejected(store, data, "multiple_links")
+    assert list(root.iterdir()) == []
+    assert data.exists() and meta.exists()
+
+
 def test_failed_meta_link_rolls_back_the_data_link(dirs, monkeypatch):
     staging, root = dirs
     store = LocalSnippetStore(staging, root)

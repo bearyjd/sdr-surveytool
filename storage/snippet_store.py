@@ -77,7 +77,7 @@ class LocalSnippetStore:
     - both are regular files with exactly one hard link;
     - each is hard-linked into the store without following symlinks, never
       replacing an existing store file, and the linked inode is verified to
-      be the one that was checked;
+      be the one that was checked, with no other links to it;
     - both are linked before either staged name is removed, and on failure
       everything this call linked is unlinked again.
 
@@ -143,6 +143,13 @@ class LocalSnippetStore:
                     raise SnippetRejected(
                         "changed_during_adopt",
                         f"Staged snippet file {source.name!r} was replaced while being adopted",
+                    )
+                # A link added after the lstat keeps the inode, so also require
+                # exactly the staged name plus the one just made.
+                if now.st_nlink != 2:
+                    raise SnippetRejected(
+                        "multiple_links",
+                        f"Staged snippet file {source.name!r} gained a hard link while being adopted",
                     )
         except BaseException:
             for final in linked:
