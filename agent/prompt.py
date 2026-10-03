@@ -17,7 +17,8 @@ frequency falls in. Call record_classification exactly once.
 
 - tag: the most likely identity, lower case, "<band-table id>:<signal>", e.g.
   "ism_902_928:lora" or "pcs_downlink:lte". Only a tag prefixed with the id of a grounded
-  entry can be accepted without human review. Use null if you cannot propose one.
+  entry, whose <signal> is made of words from one of that entry's typical_signals, can be
+  accepted without human review. Use null if you cannot propose one.
 - confidence: the probability your tag is right. Above 0.85 only when the features agree
   with a grounded band-table entry. Spectral features alone rarely justify high confidence.
   bandwidth_reliable false means the occupied bandwidth could not be measured (the signal

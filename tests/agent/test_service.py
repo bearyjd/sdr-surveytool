@@ -463,7 +463,7 @@ def test_an_always_on_emitter_is_classified_and_never_trips_a_halt(store, width,
     auto-classified, while one filling 90% of the band reaches the edge
     zone and still goes to review."""
     gateway = FakeGateway([_snippet_record(store, i, always_on=width) for i in range(1, 8)])
-    client = ScriptedClient([{**GOOD, "tag": "ism_902_928:lte", "confidence": 0.95}] * 7)
+    client = ScriptedClient([{**GOOD, "confidence": 0.95}] * 7)
     settings = {} if opt_in is None else {"allow_self_floor_grounding": opt_in}
     assert _agent(gateway, client, store, **settings).run_batch() == 7
     assert len(client.requests) == 7

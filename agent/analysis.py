@@ -84,6 +84,12 @@ class SnippetAnalysis:
         return frozenset(match.entry.id for match in self.band_matches if match.grounded)
 
     @property
+    def grounded_bands(self) -> dict[str, tuple[str, ...]]:
+        """Each grounded band-table id with its typical signals, which a tag's
+        signal must be among for routing to accept it."""
+        return {match.entry.id: match.entry.typical_signals for match in self.band_matches if match.grounded}
+
+    @property
     def modulation_label(self) -> str | None:
         return None if self.modulation is None else self.modulation.label
 
