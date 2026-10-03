@@ -135,7 +135,8 @@ to the cellular/WiFi/BT decode modules.
 # (visible to every local user); leave the password out and keep it in ~/.pgpass or a
 # libpq service file.
 export SURVEYTOOL_ADMIN_DATABASE_URL=postgresql://postgres@localhost:5432/surveytool
-sdr-agent-boundary
+sdr-agent-boundary          # preview: lists what it would revoke from PUBLIC, and who relies on it
+sdr-agent-boundary --apply  # install
 # Create the agent's login role yourself, then set its password interactively, so it
 # never appears in a command line, shell history or the server log:
 psql "$SURVEYTOOL_ADMIN_DATABASE_URL" \
@@ -152,6 +153,26 @@ export SURVEYTOOL_AGENT_DATABASE_URL=postgresql://surveytool_agent_login:...@loc
 export ANTHROPIC_API_KEY=...
 sdr-agent --snippet-store-dir /absolute/path/of/ingest/data/snippets
 ```
+
+### Regranting what the boundary revokes from PUBLIC
+
+`--apply` revokes from PUBLIC: every privilege on `survey_records`, CREATE on schema
+`public`, TEMPORARY on the survey database, and EXECUTE on the large-object writers. The
+preview names each login role that holds one of these only through PUBLIC. Grant each
+such role what it actually needs, explicitly, before or right after `--apply`; for
+example, for ingest (if it is not the table owner) and a migration role:
+
+```sql
+GRANT SELECT, INSERT, UPDATE ON public.survey_records TO surveytool_ingest;
+GRANT USAGE ON SEQUENCE public.survey_records_id_seq TO surveytool_ingest;
+GRANT TEMPORARY ON DATABASE surveytool TO surveytool_ingest;   -- only if it uses temp tables
+GRANT CREATE ON SCHEMA public TO surveytool_migrations;
+GRANT EXECUTE ON FUNCTION lo_create(oid), lo_open(oid, integer), lo_put(oid, bigint, bytea)
+    TO surveytool_blobs;                                        -- only if it uses large objects
+```
+
+Never grant any of these to `surveytool_agent` or to the agent login: the self-check
+refuses it.
 
 Each record's id is logged before its snippet is read. If a snippet crashes the agent,
 the last log line names the record; restart with `--start-after-id <id>` to skip it once

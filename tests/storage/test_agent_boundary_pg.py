@@ -46,6 +46,7 @@ from schema.records import (
     UnifiedRecord,
 )
 from storage.agent_boundary import install_agent_boundary
+from storage.agent_boundary import main as boundary_main
 from storage.db import init_db, make_session_factory
 from storage.repository import save_record
 from storage.snippet_store import LocalSnippetStore
@@ -703,6 +704,75 @@ def test_self_check_refuses_a_definer_with_more_than_it_needs(boundary, grant, r
         with admin.connect() as conn:
             conn.exec_driver_sql(revoke.format(**names))
         admin.dispose()
+
+
+_ACL_SNAPSHOT = """
+    SELECT (SELECT datacl::text FROM pg_database WHERE datname = current_database()),
+           (SELECT nspacl::text FROM pg_namespace WHERE nspname = 'public'),
+           (SELECT relacl::text FROM pg_class WHERE oid = to_regclass('public.survey_records')),
+           (SELECT string_agg(proname || coalesce(proacl::text, '-'), ',' ORDER BY oid)
+              FROM pg_proc WHERE starts_with(proname, 'lo_') OR starts_with(proname, 'agent_')
+                                 OR proname = 'classify_unknown'),
+           (SELECT string_agg(rolname, ',' ORDER BY rolname) FROM pg_roles),
+           (SELECT count(*) FROM pg_class WHERE relname = 'agent_pending_unknown')
+"""
+
+
+@pytest.fixture
+def fresh_database(boundary):
+    """A database the boundary was never installed in, with survey_records."""
+    name = f"sdr_preview_{boundary.suffix}"
+    root = _engine(boundary.root_url, isolation_level="AUTOCOMMIT")
+    with root.connect() as conn:
+        conn.exec_driver_sql(f"CREATE DATABASE {name}")
+    url = boundary.root_url.set(database=name)
+    admin = _engine(url)
+    init_db(admin)
+    admin.dispose()
+    try:
+        yield url
+    finally:
+        with root.connect() as conn:
+            conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+        root.dispose()
+
+
+def test_the_installer_previews_by_default_and_changes_nothing(boundary, fresh_database, monkeypatch, capsys):
+    """Codex H3: revoking PUBLIC's privileges can break other roles that
+    relied on them. By default the installer only lists what --apply would
+    revoke, and who relies on it, and the database is left as it was."""
+    relying = f"sdr_relies_{boundary.suffix}"
+    agent_role, owner_role = f"sdr_preview_agent_{boundary.suffix}", f"sdr_preview_owner_{boundary.suffix}"
+    root = _engine(boundary.root_url, isolation_level="AUTOCOMMIT")
+    admin = _engine(fresh_database, isolation_level="AUTOCOMMIT")
+    try:
+        with root.connect() as conn:
+            conn.exec_driver_sql(f"CREATE ROLE {relying} LOGIN")
+        with admin.connect() as conn:
+            conn.exec_driver_sql("GRANT SELECT ON public.survey_records TO PUBLIC")
+            before = conn.exec_driver_sql(_ACL_SNAPSHOT).one()
+        monkeypatch.setenv("SURVEYTOOL_ADMIN_DATABASE_URL", _url(fresh_database))
+        boundary_main(["--agent-role", agent_role, "--owner-role", owner_role])
+        preview = capsys.readouterr().out
+        with admin.connect() as conn:
+            assert conn.exec_driver_sql(_ACL_SNAPSHOT).one() == before
+        assert "Nothing was changed; re-run with --apply" in preview
+        assert f"REVOKE TEMPORARY ON DATABASE {fresh_database.database} FROM PUBLIC" in preview
+        assert "REVOKE EXECUTE ON FUNCTION lo_create(oid) FROM PUBLIC" in preview
+        (select_line,) = [line for line in preview.splitlines() if "REVOKE SELECT ON TABLE public.survey_records" in line]
+        assert "relying on PUBLIC for it:" in select_line and relying in select_line
+        boundary_main(["--agent-role", agent_role, "--owner-role", owner_role, "--apply"])
+        with admin.connect() as conn:
+            assert conn.exec_driver_sql(
+                "SELECT has_table_privilege('public', 'public.survey_records', 'SELECT')"
+            ).scalar_one() is False
+    finally:
+        admin.dispose()
+        with root.connect() as conn:
+            conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {fresh_database.database} WITH (FORCE)")
+            for role in (relying, agent_role, owner_role):
+                conn.exec_driver_sql(f"DROP ROLE IF EXISTS {role}")
+        root.dispose()
 
 
 def test_self_check_rejects_a_superuser_url(boundary):
