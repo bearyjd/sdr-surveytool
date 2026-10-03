@@ -65,6 +65,9 @@ to the cellular/WiFi/BT decode modules.
   the large-object writers (`lo_create`, `lo_creat`, `lo_from_bytea`, `lo_import`,
   `lo_open`, `lo_put`) from PUBLIC, the one write path that needs no table privilege, and
   the self-check refuses a login that can still execute one.
+- **Accepted leak: row counts.** The agent role can read `pg_stat_*` counters and run
+  `EXPLAIN` on the view, which reveal approximate row counts of `survey_records` (no
+  values). That is accepted.
 - **What PostgreSQL cannot prevent.** Any role may change its own password and its own
   session defaults (`ALTER ROLE <itself> ... SET`). The self-check refuses role settings
   at the next start, but cannot see a password change. Alert on changes to `pg_authid`
@@ -81,10 +84,16 @@ to the cellular/WiFi/BT decode modules.
 ## Running
 
 ```bash
-# Once, as a database administrator (superuser URL):
-sdr-agent-boundary --database-url postgresql://surveytool:...@localhost:5432/surveytool
-# Create the agent's login role yourself, password from your secret store:
-#   CREATE ROLE surveytool_agent_login LOGIN PASSWORD '...' IN ROLE surveytool_agent;
+# Once, as a database administrator. The URL comes from the environment, never argv
+# (visible to every local user); leave the password out and keep it in ~/.pgpass or a
+# libpq service file.
+export SURVEYTOOL_ADMIN_DATABASE_URL=postgresql://postgres@localhost:5432/surveytool
+sdr-agent-boundary
+# Create the agent's login role yourself, then set its password interactively, so it
+# never appears in a command line, shell history or the server log:
+psql "$SURVEYTOOL_ADMIN_DATABASE_URL" \
+    -c 'CREATE ROLE surveytool_agent_login LOGIN CONNECTION LIMIT 2 IN ROLE surveytool_agent'
+psql "$SURVEYTOOL_ADMIN_DATABASE_URL" -c '\password surveytool_agent_login'
 
 export SURVEYTOOL_AGENT_DATABASE_URL=postgresql://surveytool_agent_login:...@localhost:5432/surveytool
 export ANTHROPIC_API_KEY=...

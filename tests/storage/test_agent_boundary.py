@@ -51,6 +51,18 @@ def test_refuses_a_non_postgres_engine():
     engine.dispose()
 
 
-def test_cli_refuses_a_non_postgres_url():
+def test_cli_refuses_a_non_postgres_url(monkeypatch):
+    monkeypatch.setenv("SURVEYTOOL_ADMIN_DATABASE_URL", "sqlite:///survey.db")
     with pytest.raises(SystemExit, match="PostgreSQL"):
-        main(["--database-url", "sqlite:///survey.db"])
+        main([])
+
+
+def test_cli_takes_the_admin_url_from_the_environment_never_argv(monkeypatch, capsys):
+    """argv is visible to every local user (ps, /proc); the URL may carry a
+    password. libpq's ~/.pgpass or a service file keeps it out of the URL."""
+    monkeypatch.delenv("SURVEYTOOL_ADMIN_DATABASE_URL", raising=False)
+    with pytest.raises(SystemExit, match="SURVEYTOOL_ADMIN_DATABASE_URL"):
+        main([])
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--database-url", "postgresql://admin:secret@localhost/surveytool"])
+    assert excinfo.value.code == 2 and "unrecognized arguments" in capsys.readouterr().err

@@ -16,7 +16,8 @@
 
 SET LOCAL search_path = pg_catalog, pg_temp;
 
--- Roles. Operators create the login role themselves (agent/README.md). An
+-- Roles. Operators create the login role themselves and set its password
+-- with psql's \password (agent/README.md), never in SQL text. An
 -- existing role is reused only if it cannot log in and owns nothing but the
 -- boundary objects below: otherwise the boundary would inherit its powers.
 DO $existing$
