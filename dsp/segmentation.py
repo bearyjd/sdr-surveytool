@@ -241,7 +241,9 @@ def _quantile_fraction(frames: int, percentile: float) -> float:
 
 def _bridge_dc(psd: np.ndarray) -> np.ndarray:
     """The DC bin carries the receiver's LO leakage, not an emitter; with a
-    Hann window it spreads into DC +-1. Bridge those three bins from DC +-2."""
+    Hann window it spreads into DC +-1. Bridge those three bins from DC +-2.
+    Only where there is no reference to subtract the leakage instead: the
+    self floor, and the context search."""
     dc = len(psd) // 2
     bridged = psd.copy()
     bridged[dc - 1 : dc + 2] = 0.5 * (psd[dc - 2] + psd[dc + 2])
@@ -316,23 +318,28 @@ def segment_spectrum(
         raise ValueError(f"Need at least {NFFT} samples, got {len(iq)}")
     powers = frame_powers(iq, NFFT)
     active = active_frame_mask(powers)
-    psd = _bridge_dc(welch_psd(iq, NFFT, active))
+    psd = welch_psd(iq, NFFT, active)
     quiet = _quiet_reference(reference_iq, float(np.mean(powers[active])), threshold_dbfs)
     regions: tuple[SpectralRegion, ...] = ()
     before: tuple[SpectralRegion, ...] = ()
     if quiet is not None:
+        # Unmasked: the reference carries the LO leakage at DC, so the floor
+        # subtracts it, and a carrier keyed up at DC during the burst stands.
         quiet_frames = len(quiet) // NFFT
-        reference_psd = _bridge_dc(welch_psd(quiet, NFFT, np.ones(quiet_frames, dtype=bool)))
+        reference_psd = welch_psd(quiet, NFFT, np.ones(quiet_frames, dtype=bool))
         floor = np.maximum(np.fft.fftshift(noise_floor_psd(quiet, NFFT)) * psd_scale(NFFT), reference_psd)
         regions = _regions(psd, floor, sample_rate)
-        before = _regions(reference_psd, local_floor(reference_psd, quiet_frames), sample_rate)
+        # The LO leakage is not an emitter: masked for the context search.
+        context_psd = _bridge_dc(reference_psd)
+        before = _regions(context_psd, local_floor(context_psd, quiet_frames), sample_rate)
     # Nothing new above the reference: its quiet frames held the triggering
     # emitter itself (an always-on emitter hovering at the threshold dips
     # below it), so the reference floor subtracted it. Something triggered
     # capture, so measure against the self floor instead.
     reference_used = bool(regions)
     if not reference_used:
-        regions = _regions(psd, _self_floor(psd, int(active.sum())), sample_rate)
+        masked = _bridge_dc(psd)
+        regions = _regions(masked, _self_floor(masked, int(active.sum())), sample_rate)
         before = ()
     return Segmentation(
         regions=regions,

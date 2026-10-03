@@ -59,11 +59,30 @@ def test_two_emitters_primary_is_the_stronger_and_the_other_is_context():
     assert segmentation.active_frames < segmentation.total_frames / 2
 
 
-def test_dc_bin_is_not_a_region():
-    """The receiver's LO leakage sits in the DC bin; it is masked."""
+@pytest.mark.parametrize("threshold_dbfs", [None, -25.0])
+def test_dc_bin_is_not_a_region(threshold_dbfs):
+    """The receiver's LO leakage sits in the DC bin. Without a reference it
+    is masked; with one, the reference carries it and subtracts it. Either
+    way it is neither a region nor context."""
     rng = np.random.default_rng(5)
     iq = synthetic.tone(N, FS, 0.0, 1e-3) + synthetic.noise(rng, N, NOISE)
-    assert segment_spectrum(iq, FS).regions == ()
+    segmentation = segment_spectrum(iq, FS, iq[:PRE], threshold_dbfs) if threshold_dbfs else segment_spectrum(iq, FS)
+    assert segmentation.regions == () and segmentation.before_trigger == ()
+
+
+def test_a_carrier_keyed_up_at_dc_is_found_against_the_reference():
+    """A CW transmitter keyed up exactly at the tuned frequency (the
+    reviewer's DC-carrier probe): masking DC +-1 would erase it. In
+    reference mode nothing is masked -- the reference carries the LO
+    leakage, which the floor subtracts -- so the carrier is the primary."""
+    rng = np.random.default_rng(32)
+    burst = synthetic.tone(N, FS, 0.0, 1e-4)
+    burst[:PRE] = 0
+    iq = synthetic.noise(rng, N, NOISE) + synthetic.tone(N, FS, 0.0, 1e-6) + burst  # LO leakage throughout
+    segmentation = segment_spectrum(iq, FS, iq[:PRE], threshold_dbfs=-45.0)
+    assert segmentation.floor_source == "pre_trigger"
+    assert segmentation.primary.center_offset_hz == pytest.approx(0.0, abs=BIN_HZ)
+    assert segmentation.primary.obw_hz <= 3 * BIN_HZ
 
 
 def test_wide_emitter_centred_on_dc_is_still_one_region():
