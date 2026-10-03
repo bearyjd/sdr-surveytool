@@ -714,6 +714,34 @@ def test_spent_budget_pauses_until_utc_midnight(store):
     assert [s[0] for s in gateway.submitted] == [1, 2]
 
 
+def test_sigterm_during_the_budget_pause_spends_nothing_more(store):
+    """The reviewer's probe: the pause's wait returned early on SIGTERM, but
+    the agent went on to the LLM call. Now the stop flag is honored after
+    the pause and before every record's call."""
+    stop = threading.Event()
+    gateway = FakeGateway([_snippet_record(store, 1), _snippet_record(store, 2)])
+    client = ScriptedClient([GOOD, GOOD])
+    agent = ClassificationAgent(
+        gateway, client, AgentSettings(snippet_root=store, daily_token_budget=400), load_band_table().entries,
+        sleep=lambda seconds: stop.set(),  # SIGTERM arrives during the pause
+        now=lambda: START, stopping=stop.is_set,
+    )
+    agent.run_batch()
+    assert len(client.requests) == 1 and [s[0] for s in gateway.submitted] == [1]
+
+
+def test_a_stop_request_is_honored_before_each_records_llm_call(store):
+    stop = threading.Event()
+    stop.set()
+    gateway = FakeGateway([_snippet_record(store, 1)])
+    client = ScriptedClient([GOOD])
+    agent = ClassificationAgent(
+        gateway, client, AgentSettings(snippet_root=store), load_band_table().entries, stopping=stop.is_set
+    )
+    agent.run_batch()
+    assert client.requests == [] and gateway.submitted == []
+
+
 def test_budget_resets_when_the_day_rolls_over(store):
     gateway = FakeGateway([_snippet_record(store, 1), _snippet_record(store, 2)])
     sleeps: list[float] = []

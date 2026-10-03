@@ -96,6 +96,10 @@ class SystemicFault(RuntimeError):
     """Not about any one record: halt rather than mark the backlog."""
 
 
+class _Stopping(Exception):
+    """A stop was requested: leave the current record untouched."""
+
+
 class _Backoff(Exception):
     """A transient API error: the record is deferred; wait before the next batch."""
 
@@ -191,6 +195,7 @@ class ClassificationAgent:
         sleep: Callable[[float], object] = time.sleep,
         now: Callable[[], datetime] = _utc_now,
         start_after_id: int = 0,
+        stopping: Callable[[], bool] = lambda: False,
     ) -> None:
         self._gateway = gateway
         self._client = client
@@ -199,6 +204,7 @@ class ClassificationAgent:
         self._classifier = classifier or UnavailableClassifier()
         self._sleep = sleep
         self._now = now
+        self._stopping = stopping
         self._last_id = start_after_id
         self._deferred: dict[int, _Deferred] = {}
         self._given_up: set[int] = set()  # past the attempt cap: pending until the next run
@@ -276,6 +282,8 @@ class ClassificationAgent:
                 self._last_id = record.id
         except _Backoff as backoff:
             self._retry_in = backoff.delay
+        except _Stopping:
+            logger.info("Stop requested; leaving the current record pending")
         return looked_at
 
     def _retry_deferred(self) -> int:
@@ -433,6 +441,8 @@ class ClassificationAgent:
 
     def _ask(self, record_id: int, user_message: str) -> LlmResult:
         self._wait_for_budget()
+        if self._stopping():  # after the pause, and before every call: never spend on the way out
+            raise _Stopping()
         try:
             result = request_classification(
                 self._client, SYSTEM_PROMPT, user_message, self._settings.model, self._settings.max_tokens
@@ -630,6 +640,7 @@ def main(argv: list[str] | None = None) -> None:
         load_band_table(Path(args.band_table)).entries,
         sleep=stop.wait,
         start_after_id=args.start_after_id,
+        stopping=stop.is_set,
     )
     serve_and_close(agent, gateway, args.poll_seconds, stop)
 
