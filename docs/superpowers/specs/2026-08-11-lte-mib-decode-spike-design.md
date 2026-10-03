@@ -113,3 +113,52 @@ plan can be written without placeholders.
   removal of the existing ncurses display — minimizes the diff against upstream.
 - **No real xA9 hardware validation** — same constraint as the CellSearch spike,
   no physical SDR available in this environment.
+
+## Amendment (2026-10-03): MIB fields come from CellSearch; LTE-Tracker route rejected
+
+A build-and-run spike (Fedora 43, LTE-Cell-Scanner submodule @ e7f71cbd) changed this
+design's conclusions. The implementation follows
+`docs/superpowers/plans/2026-10-03-lte-mib-fields-cellsearch.md`.
+
+1. **CellSearch already decodes the MIB.**
+   - `src/CellSearch.cpp:1332` calls `decode_mib()` (`src/searcher.cpp:3840`), which
+     accepts a decode only when the CRC matches (`searcher.cpp:3940-3952`).
+   - Cells whose MIB fails are dropped (`CellSearch.cpp:1334-1338`).
+   - Its final summary table (`CellSearch.cpp:1454-1493`) prints antenna ports, CP
+     type, n_RB, PHICH duration and PHICH resource for every reported cell. The
+     committed 80 ms fixture already shows `FDD 301 2 1815.3M ... N 100 N one`.
+   - `decode_mib()` also computes the SFN (`searcher.cpp:3998-3999`), but CellSearch
+     never prints it.
+2. **MIB decode needs 40 ms of IQ, not 160 ms.** LTE-Tracker's `do_mib_decode()` buffers
+   only slot 1, symbols 0–3 of each frame (`tracker_thread.cpp:570`). So
+   `mib_fifo.size()==16` (`tracker_thread.cpp:581`) is 4 frames, one 40 ms PBCH TTI.
+   CellSearch decodes the MIB from the 80 ms fixture.
+3. **`f2585_s19.2_bw20_1s_hackrf.bin` is a TDD cell, and LTE-Tracker is FDD-only.**
+   - The file is from the big-file repo @ 0791cb339a8e88fc531494f2e447ff03bb48ff04,
+     SHA-256 ea453bba4fe4edb6c5fa458b3067e4eeb4ef77defbf6acfa3a426371b0850fba. It is a
+     plain git blob, not LFS.
+   - CellSearch decodes it as TDD cell 216 (2 ports, 100 RB, PHICH normal/one).
+   - `tracker_thread.cpp` has no duplex or TDD handling at all. In a 60 s run, a
+     patched tracker made about 25,000 MIB attempts on that cell and every one failed
+     CRC.
+   - Weak FDD captures also never decoded in the tracker: the two −27 dB cells in
+     `f1860_s19.2_bw20_1s_hackrf_home.bin`. CellSearch decodes both.
+4. **The LTE-Tracker patch route was built, verified, and rejected.**
+   - A 25-line additive patch did three things: print a plain-text MIB line, skip
+     curses when stdout is not a TTY, and call `_exit(0)` at the end of a `--loadbin`
+     pass. `--loadbin` always loops, because `repeat=true` at `LTE-Tracker.cpp:220`.
+   - It decoded cell 301's MIB in about 6 s and 650 MB per run.
+   - It was rejected for a zero-patch route. CellSearch's table already carries every
+     MIB field except SFN, and SFN has no coverage-mapping value. That is not worth
+     carrying an AGPL source patch, a slow and heavy binary, and a fixture that only
+     decodes because the tracker loops it.
+   - That plan is preserved in git history at commit fc13404
+     (`docs/superpowers/plans/2026-10-03-lte-mib-decode-spike.md`).
+5. **SFN and PLMN remain unavailable.** CellSearch computes the SFN but doesn't print
+   it. PLMN needs SIB1, which nothing in the vendored codebase decodes.
+
+This supersedes the "Fixture source", "Vendored source patch" and "Architecture"
+sections above. There is no source patch, no `generate_mib_fixture.py`, no
+`offline_mib_scanner.py` and no new fixture. `capture/cellular/offline_scanner.py`
+parses the MIB fields from CellSearch's summary table, verified against the existing
+`cell301_1815.3mhz.bin`.
