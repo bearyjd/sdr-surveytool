@@ -20,6 +20,11 @@ analytics service to carriers (coverage gaps) and potentially facility/venue cus
   reasoning only, written back to the record's own metadata. It is a dead end in the
   pipeline — it must never trigger, chain into, or hand data to the cellular/WiFi/BT
   decode modules, regardless of what it classifies a signal as.
+- **No module branches on a classification**: nothing may read `metadata.tag` or
+  `metadata.classification_status` to decide whether to start, retune or chain a
+  capture or decode. `tests/test_no_tag_branching.py` enforces this over `capture/`
+  and `ingest/` with an explicit allowlist (today: the unknown-signal normalizer's
+  single write of `unclassified`).
 
 ## 2. Hardware
 
@@ -112,7 +117,7 @@ field list (docs defer to a live field-explorer).
     "iq_snippet_path": "string?",
     "snippet_duration_ms": "int?",
     "sample_rate": "float?",
-    "classification_status": "unclassified | manually_tagged | auto_classified",
+    "classification_status": "unclassified | manually_tagged | auto_classified | needs_review",
     "tag": "string?",
     "confidence": "float?",
     "reasoning": "string?"
@@ -204,11 +209,24 @@ product dashboard.
 **Model**: Sonnet — bounded tool use with structured output, not open-ended reasoning.
 
 **Hard-boundary enforcement (structural, not just convention)**: the agent process
-authenticates to Postgres as a dedicated role with **UPDATE privilege limited to
-`metadata.classification_status`, `metadata.tag`, `metadata.confidence`,
-`metadata.reasoning` only** on `unknown`-modality records. It has no privilege to write
-anywhere else and no code path to invoke capture/decode modules — the boundary holds
-even under careless future extension, not just by developer discipline.
+authenticates to Postgres as a login role in `surveytool_agent`, which has **no privilege
+on `survey_records` at all** (column GRANTs cannot express "these keys of one JSON
+column"). It reads only the `security_barrier` view `agent_pending_unknown` (pending
+unknown rows: snippet path and flags, sample rate, frequency, peak power and duration; no
+location or survey/operator IDs) and writes only through
+`classify_unknown(...)`, a `SECURITY DEFINER` function owned by a NOLOGIN owner role. The
+function sets exactly `classification_status`, `tag`, `confidence` and `reasoning`, and
+only on a row that is still a pending unknown row in the same atomic `UPDATE`, so a human
+tag always wins a race. The agent refuses to start unless its role passes an allowlist:
+no membership beyond the agent role, no dangerous role attribute, no table or column
+privilege on `survey_records`, no CREATE or TEMPORARY anywhere, and no executable
+SECURITY DEFINER function but `classify_unknown`. Operationally, the agent's container is
+the outer boundary: it runs as the ingest uid with the snippet store mounted read-only,
+no ingest socket, and egress only to the database and the Anthropic API. AST tests over
+its code (an import allowlist, banned calls) are tripwires for regressions, not the wall.
+See
+`docs/superpowers/specs/2026-10-03-signal-classification-agent-design.md` and
+`storage/sql/agent_boundary.sql`.
 
 ## 10. Build Sequencing
 

@@ -16,7 +16,7 @@ for the full architecture design.
 - `dsp/` — shared numpy-only signal math (power, bandwidth, spectral segmentation, region features), no I/O; reused by `agent/`
 - `schema/` — unified record schema (versioned) + validators
 - `ingest/` — normalizer/geotagger — the only writer to storage
-- `agent/` — Part 4 agentic signal-characterization (tools, feature extraction, routing)
+- `agent/` — Part 4 classification agent (features, curated band table, one forced LLM tool call, routing); writes back only through its DB boundary
 - `storage/` — Postgres/PostGIS models + migrations, object-storage client
 - `viz/` — local field-verification dashboard (map + heatmap)
 - `fpga/` — future-phase bladeRF HDL work, deferred until profiling justifies it
