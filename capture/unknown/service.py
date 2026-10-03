@@ -5,6 +5,7 @@ import argparse
 import logging
 import queue
 import shutil
+import signal
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
@@ -447,13 +448,23 @@ def _parse_args(argv: list[str] | None = None) -> tuple[CaptureSettings, argpars
     return settings, args
 
 
+def _raise_keyboard_interrupt(signum: int, frame: object) -> None:
+    raise KeyboardInterrupt
+
+
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point (`sdr-capture-unknown`)."""
     settings, args = _parse_args(argv)
     logging.basicConfig(level=logging.INFO)
-    run(
-        settings=settings,
-        socket_path=args.socket_path,
-        survey_id=args.survey_id,
-        operator_id=args.operator_id,
-    )
+    # systemd and docker stop with SIGTERM: take the Ctrl-C path, which
+    # unwinds through the flowgraph's stop()/wait() and closes the emitter.
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+    try:
+        run(
+            settings=settings,
+            socket_path=args.socket_path,
+            survey_id=args.survey_id,
+            operator_id=args.operator_id,
+        )
+    except KeyboardInterrupt:
+        logger.info("Shutting down unknown-signal capture")

@@ -1,6 +1,8 @@
 # tests/capture/unknown/test_service.py
 import logging
+import os
 import queue
+import signal
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -334,3 +336,30 @@ def test_cli_rejects_invalid_settings_with_usage_error():
                 "--noise-floor-dbfs", "-5",
             ]
         )
+
+
+class _UnhandledSigterm(Exception):
+    pass
+
+
+def test_sigterm_shuts_down_cleanly_like_ctrl_c(monkeypatch, caplog):
+    """systemd/docker stop send SIGTERM; it must unwind like Ctrl-C (flowgraph
+    stop/wait, emitter close, a clean log line), not kill the process."""
+
+    def guard(signum, frame):  # stands in for the default action: killing pytest
+        raise _UnhandledSigterm
+
+    def run_until_sigterm(**kwargs):
+        os.kill(os.getpid(), signal.SIGTERM)
+        pytest.fail("SIGTERM did not interrupt run()")
+
+    original = signal.signal(signal.SIGTERM, guard)
+    monkeypatch.setattr(service, "run", run_until_sigterm)
+    try:
+        with caplog.at_level(logging.INFO):
+            service.main(
+                ["--survey-id", "s", "--operator-id", "o", "--center-freq", "915e6", "--noise-floor-dbfs", "-60"]
+            )
+    finally:
+        signal.signal(signal.SIGTERM, original)
+    assert "Shutting down" in caplog.text
