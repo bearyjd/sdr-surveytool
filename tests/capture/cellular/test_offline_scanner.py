@@ -192,6 +192,120 @@ def test_parse_cellsearch_output_leaves_mib_fields_none_without_summary_row():
     )
 
 
+# Synthetic variants of real output. Every real capture available decodes to
+# the same MIB ("2 N 100 N one"), so the value mappings and row-matching rules
+# below are pinned with stdout that CellSearch did NOT print: REAL_STDOUT's
+# cell-301 detection block and table header, with the summary row(s) replaced
+# by rows in CellSearch's exact column layout (its summary-table print loop in
+# CellSearch.cpp; test_synthetic_row_reproduces_real_layout checks the builder
+# against the real row).
+_REAL_BLOCK = REAL_STDOUT[
+    REAL_STDOUT.index("  Detected a FDD cell!") : REAL_STDOUT.index(
+        "try peak 0 tdd_flag 1"
+    )
+]
+_REAL_TABLE_HEADER = REAL_STDOUT[
+    REAL_STDOUT.index("Detected the following cells:") : REAL_STDOUT.index(
+        "FDD 301 2 1815.3M"
+    )
+]
+
+
+def _block_at(fc: str) -> str:
+    """REAL_STDOUT's cell-301 detection block, moved to another frequency."""
+    return _REAL_BLOCK.replace("At freqeuncy 1815.3MHz", f"At freqeuncy {fc}MHz")
+
+
+def _synthetic_row(
+    duplex: str = "FDD",
+    cell_id: int = 301,
+    n_ports: int = 2,
+    fc: str = "1815.3",
+    cp: str = "N",
+    n_rb: int = 100,
+    phich_duration: str = "N",
+    phich_resource: str = "one",
+) -> str:
+    """One summary-table row with CellSearch's field widths (setw(3) CID,
+    setw(2) A, setw(6) fc + "M", setw(13) freq-offset, setw(5) RXPWR,
+    setw(3) nRB). freq-offset, RXPWR and the correction factor are copied
+    from the real cell-301 row."""
+    return (
+        f"{duplex} {cell_id:>3}{n_ports:>2} {fc:>6}M {'14.3k':>13} {'-9.45':>5} "
+        f"{cp} {n_rb:>3} {phich_duration} {phich_resource} 1.0000078789572046656\n"
+    )
+
+
+def _synthetic_stdout(blocks: list[str], rows: list[str]) -> str:
+    return "".join(blocks) + _REAL_TABLE_HEADER + "".join(rows)
+
+
+def test_synthetic_row_reproduces_real_layout():
+    assert _synthetic_row() in REAL_STDOUT
+
+
+def test_parse_cellsearch_output_matches_same_cell_id_by_frequency():
+    """Same cell ID on two carriers 2 MHz apart with different MIB values:
+    each detection gets its own carrier's row, whatever the row order."""
+    stdout = _synthetic_stdout(
+        [_block_at("1815.3"), _block_at("1817.3")],
+        [_synthetic_row(fc="1817.3", n_rb=50), _synthetic_row(fc="1815.3")],
+    )
+    cells = parse_cellsearch_output(stdout)
+    assert [(cell["freq_mhz"], cell["n_rb_dl"]) for cell in cells] == [
+        (1815.3, 100),
+        (1817.3, 50),
+    ]
+
+
+def test_parse_cellsearch_output_ignores_row_one_mhz_or_more_away():
+    stdout = _synthetic_stdout([_block_at("1815.3")], [_synthetic_row(fc="1816.3")])
+    cells = parse_cellsearch_output(stdout)
+    assert {key: cells[0][key] for key in EXPECTED_MIB_FIELDS} == dict.fromkeys(
+        EXPECTED_MIB_FIELDS
+    )
+
+
+@pytest.mark.parametrize(
+    ("row_fields", "expected"),
+    [
+        (
+            {"n_ports": 4, "cp": "E", "phich_duration": "E", "phich_resource": "1/6"},
+            {
+                "n_ports": 4,
+                "cp_type": "extended",
+                "phich_duration": "extended",
+                "phich_resource": "1/6",
+            },
+        ),
+        (
+            {"n_ports": 1, "phich_resource": "1/2"},
+            {
+                "n_ports": 1,
+                "cp_type": "normal",
+                "phich_duration": "normal",
+                "phich_resource": "1/2",
+            },
+        ),
+        ({"phich_resource": "two"}, {"n_ports": 2, "phich_resource": "two"}),
+    ],
+)
+def test_parse_cellsearch_output_maps_mib_column_values(row_fields, expected):
+    stdout = _synthetic_stdout([_block_at("1815.3")], [_synthetic_row(**row_fields)])
+    cell = parse_cellsearch_output(stdout)[0]
+    assert {key: cell[key] for key in expected} == expected
+
+
+@pytest.mark.parametrize(
+    ("n_rb", "bandwidth_mhz"),
+    [(6, 1.4), (15, 3.0), (25, 5.0), (50, 10.0), (75, 15.0), (100, 20.0)],
+)
+def test_parse_cellsearch_output_maps_n_rb_to_bandwidth(n_rb, bandwidth_mhz):
+    stdout = _synthetic_stdout([_block_at("1815.3")], [_synthetic_row(n_rb=n_rb)])
+    cell = parse_cellsearch_output(stdout)[0]
+    assert (cell["n_rb_dl"], cell["bandwidth_mhz"]) == (n_rb, bandwidth_mhz)
+
+
 def test_run_cellsearch_raises_when_process_fails_with_no_cells(monkeypatch):
     """A non-zero exit combined with zero parsed cells indicates a real
     failure (missing shared library, malformed IQ file, crash) rather than a
