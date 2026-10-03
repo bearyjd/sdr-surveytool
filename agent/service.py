@@ -38,6 +38,7 @@ budget pauses until the UTC day rolls over.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import signal
@@ -69,6 +70,7 @@ from agent.db_gateway import (
 from agent.llm import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
+    RECORD_CLASSIFICATION_TOOL,
     LlmResult,
     MessagesClient,
     is_transient,
@@ -90,6 +92,9 @@ _API_BASE_URL = "https://api.anthropic.com"
 EXIT_HALTED = 3
 _STARTUP_PROBES = 5
 _MAX_BACKOFF_EXPONENT = 30  # 2 s * 2**30 is far past any cap; 2**2000 would overflow a float
+# A conservative input estimate for the budget reservation: English and JSON
+# run 3.5-4 characters per token; 3 overestimates on purpose.
+_CHARS_PER_TOKEN = 3
 
 
 class SystemicFault(RuntimeError):
@@ -113,6 +118,14 @@ class _Deferred:
     attempts: int  # transient failures so far
     verdict: Decision | None  # decided and awaiting a successful write; None: decide again
     due: datetime  # not retried before this
+
+
+def call_reservation(user_message: str, max_tokens: int) -> int:
+    """Tokens a call is charged against the daily budget before it is made:
+    its estimated input (system prompt, tool schema, message) plus every
+    output token it may use. Reconciled to the billed usage afterwards."""
+    characters = len(SYSTEM_PROMPT) + len(json.dumps(RECORD_CLASSIFICATION_TOOL)) + len(user_message)
+    return -(-characters // _CHARS_PER_TOKEN) + max_tokens
 
 
 def backoff_delay(streak: int, base_seconds: float, cap_seconds: float) -> float:
@@ -440,9 +453,13 @@ class ClassificationAgent:
             self._write(record_id, verdict)
 
     def _ask(self, record_id: int, user_message: str) -> LlmResult:
-        self._wait_for_budget()
+        reservation = call_reservation(user_message, self._settings.max_tokens)
+        self._wait_for_budget(reservation)
         if self._stopping():  # after the pause, and before every call: never spend on the way out
             raise _Stopping()
+        # Reserved before the call. A call that fails keeps its reservation:
+        # it may still have been billed.
+        self._tokens_today += reservation
         try:
             result = request_classification(
                 self._client, SYSTEM_PROMPT, user_message, self._settings.model, self._settings.max_tokens
@@ -457,14 +474,16 @@ class ClassificationAgent:
             self._defer(record_id, f"transient API error {exc!r}; next batch in {delay:.0f} s", backoff=False)
             raise _Backoff(delay) from exc
         self._transient_streak = 0
-        self._tokens_today += result.tokens_used
+        self._tokens_today += result.tokens_used - reservation  # reconciled to the billed usage
         return result
 
-    def _wait_for_budget(self) -> None:
+    def _wait_for_budget(self, reservation: int) -> None:
+        """Pause until UTC midnight unless `reservation` more tokens fit in
+        today's budget. The day's first call always goes ahead."""
         now = self._now()
         if now.date() != self._budget_day:
             self._budget_day, self._tokens_today = now.date(), 0
-        if self._tokens_today < self._settings.daily_token_budget:
+        if self._tokens_today == 0 or self._tokens_today + reservation <= self._settings.daily_token_budget:
             return
         midnight = datetime.combine(now.date() + timedelta(days=1), datetime.min.time(), timezone.utc)
         logger.warning(

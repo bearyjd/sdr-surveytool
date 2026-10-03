@@ -742,6 +742,29 @@ def test_a_stop_request_is_honored_before_each_records_llm_call(store):
     assert client.requests == [] and gateway.submitted == []
 
 
+def test_each_call_reserves_its_worst_case_before_it_is_made(store):
+    """Codex H2: the spend was counted only after a call returned, so the
+    last call of the day could overrun the budget by up to max_tokens. A
+    call now reserves its estimated input plus max_tokens, and is
+    reconciled to the billed usage afterwards."""
+    gateway = FakeGateway([_snippet_record(store, 1), _snippet_record(store, 2)])
+    sleeps: list[float] = []
+    agent = _agent(gateway, ScriptedClient([GOOD, GOOD]), store, sleeps=sleeps, daily_token_budget=1500)
+    agent.run_batch()  # record 1 bills 500; record 2's reservation (> 1024) would pass 1500
+    assert sleeps == [timedelta(hours=12).total_seconds()]
+    assert [s[0] for s in gateway.submitted] == [1, 2]
+
+
+def test_a_failed_call_keeps_its_reservation(store):
+    """A call that failed may still have been billed: its reservation stays."""
+    gateway = FakeGateway([_snippet_record(store, 1)])
+    sleeps: list[float] = []
+    agent = _agent(gateway, ScriptedClient([_status_error(529), GOOD]), store, sleeps=sleeps, daily_token_budget=3000)
+    assert _drain(agent, 2)[0] == 2.0
+    assert sleeps == [timedelta(hours=12).total_seconds()]  # the retry waited for the next day
+    assert [s[0] for s in gateway.submitted] == [1]
+
+
 def test_budget_resets_when_the_day_rolls_over(store):
     gateway = FakeGateway([_snippet_record(store, 1), _snippet_record(store, 2)])
     sleeps: list[float] = []
