@@ -55,11 +55,14 @@ class SnippetOutsideStore(Exception):
 class SnippetUnreadable(Exception):
     """The snippet is missing, unreadable, or malformed: about the record,
     unless `transient` (an I/O error that may pass, such as EIO), when the
-    agent retries it later."""
+    agent retries it later. `missing`: a file is not there at all, which the
+    agent blames on the record only once other snippets demonstrably read
+    (a stale copy of the store would make every snippet missing)."""
 
-    def __init__(self, message: str, transient: bool = False) -> None:
+    def __init__(self, message: str, transient: bool = False, missing: bool = False) -> None:
         super().__init__(message)
         self.transient = transient
+        self.missing = missing
 
 
 @dataclass(frozen=True)
@@ -119,7 +122,8 @@ def read_snippet(
         raise
     except Exception as exc:  # the files are untrusted: any parse or read failure is "unreadable"
         transient = isinstance(exc, OSError) and exc.errno in _TRANSIENT_ERRNOS
-        raise SnippetUnreadable(f"Cannot read {data}: {exc!r}", transient) from exc
+        missing = isinstance(exc, FileNotFoundError)
+        raise SnippetUnreadable(f"Cannot read {data}: {exc!r}", transient, missing) from exc
 
 
 def _samples(

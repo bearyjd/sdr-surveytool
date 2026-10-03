@@ -141,6 +141,8 @@ def test_a_transient_io_error_is_flagged_transient(store, monkeypatch):
 
 
 def test_a_missing_or_corrupt_snippet_is_not_transient(store):
+    """Only a missing file says `missing`: many in a row mean the wrong copy
+    of the store is mounted, which the agent must not blame on records."""
     with pytest.raises(SnippetUnreadable) as missing:
         read_snippet(str(store / "gone.sigmf-data"), store)
     data = _write(store)
@@ -148,6 +150,7 @@ def test_a_missing_or_corrupt_snippet_is_not_transient(store):
     with pytest.raises(SnippetUnreadable) as corrupt:
         read_snippet(str(data), store)
     assert not missing.value.transient and not corrupt.value.transient
+    assert missing.value.missing and not corrupt.value.missing
 
 
 def test_never_hashes_the_data_file(store, monkeypatch):

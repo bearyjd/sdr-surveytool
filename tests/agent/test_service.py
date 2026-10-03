@@ -264,13 +264,36 @@ def test_a_snippet_outside_the_store_is_judged_at_once(store, tmp_path):
     assert len(client.requests) == 1  # never asked about record 1
 
 
-def test_missing_snippets_in_a_healthy_store_are_judged_and_never_halt(store):
+def test_a_missing_snippet_amid_readable_ones_is_judged(store):
+    """Other snippets demonstrably read, so the store is the right one: each
+    missing file is about its record (marked once a later snippet reads),
+    however many there are in total."""
+    records = [_gone(_with_content(store), i) if i % 2 else _snippet_record(store, i) for i in range(1, 11)]
+    gateway = FakeGateway(records)
+    client = ScriptedClient([GOOD] * 5)
+    assert _agent(gateway, client, store).run_batch() == 10
+    judged = {s[0]: s for s in gateway.submitted if s[1] is REVIEW}
+    assert sorted(judged) == [1, 3, 5, 7, 9] and len(client.requests) == 5
+    assert all(s[2] is None and s[4].startswith("snippet_missing:") for s in judged.values())
+
+
+def test_a_stale_copy_of_the_store_marks_nothing_and_halts(store):
+    """The reviewer's probe: a stale (or empty-but-for-old-files) copy of
+    the store mounted at the right path. Every snippet is missing; that is
+    the mount, not the records."""
     gateway = FakeGateway([_gone(_with_content(store), i) for i in range(1, 9)])
-    client = ScriptedClient([])
-    assert _agent(gateway, client, store).run_batch() == 8
-    assert [(s[0], s[1], s[2]) for s in gateway.submitted] == [(i, REVIEW, None) for i in range(1, 9)]
-    assert all(s[4].startswith("snippet_unreadable:") for s in gateway.submitted)
-    assert client.requests == []
+    with pytest.raises(SystemicFault, match=r"5 snippets in a row are missing .*records \[1, 2, 3, 4, 5\]") as excinfo:
+        _agent(gateway, ScriptedClient([]), store).run_batch()
+    assert "stale or empty copy of the store" in str(excinfo.value) and gateway.submitted == []
+
+
+def test_a_missing_snippet_waits_for_proof_the_store_is_right(store):
+    """The last record's snippet is missing and nothing reads after it: it
+    stays pending, unmarked, rather than be blamed on a store not yet shown
+    to work."""
+    gateway = FakeGateway([_snippet_record(_with_content(store), 1), _gone(store, 2)])
+    _agent(gateway, ScriptedClient([GOOD]), store).run_batch()
+    assert [s[0] for s in gateway.submitted] == [1]
 
 
 def test_a_corrupt_snippet_in_a_healthy_store_is_judged(store):
@@ -737,12 +760,20 @@ def test_startup_check_refuses_a_root_that_is_a_file(tmp_path):
         _agent(FakeGateway([]), ScriptedClient([]), tmp_path / "file").check_snippet_root()
 
 
-def test_broken_snippets_never_block_startup(store):
-    """Store-root health, not the snippets: the newest are missing, but
-    their paths are under the root, so the mount is right."""
-    gateway = FakeGateway([_gone(_with_content(store), 1), _gone(store, 2), PendingRecord(3, None, FS, TUNED, None, None)])
+def test_startup_needs_one_of_the_newest_snippets_to_read(store):
+    """A broken snippet never blocks startup, as long as another of the
+    newest reads: that proves the mount."""
+    gateway = FakeGateway([_snippet_record(store, 1), _gone(store, 2), PendingRecord(3, None, FS, TUNED, None, None)])
     _agent(gateway, ScriptedClient([]), store).check_snippet_root()
     _agent(FakeGateway([]), ScriptedClient([]), store).check_snippet_root()  # nothing to probe yet
+
+
+def test_startup_halts_when_none_of_the_newest_snippets_reads(store):
+    """A stale copy of the store at the right path: the paths are under the
+    root, but not one of the newest snippets is there."""
+    gateway = FakeGateway([_gone(_with_content(store), i) for i in range(1, 4)])
+    with pytest.raises(SystemicFault, match="None of the newest pending snippets reads"):
+        _agent(gateway, ScriptedClient([]), store).check_snippet_root()
 
 
 def test_startup_check_halts_when_the_store_is_mounted_elsewhere(store, tmp_path):

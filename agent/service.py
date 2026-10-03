@@ -11,9 +11,11 @@ Two invariants:
 Every outcome falls in one of three classes (agent/README.md has the table):
 - per-record judgment: needs_review at once, NULL tag, a reason naming it,
   no LLM call, never counted toward a halt. A malformed record, no snippet
-  (rejected or dropped), a snippet outside the store, a snippet missing or
-  corrupt while the store root is healthy, no occupied region even against
-  the self floor, an analysis that fails twice;
+  (rejected or dropped), a snippet outside the store, a snippet corrupt
+  while the store root is healthy, a snippet missing once another snippet
+  has read after it (until then it is held: a stale copy of the store
+  makes every snippet missing), no occupied region even against the self
+  floor, an analysis that fails twice;
 - transient per-record: the record, with its verdict if one was decided, is
   kept in an in-run deferred set that later batches retry by id, so the
   advancing cursor never strands it. A transient read error, a write
@@ -22,8 +24,9 @@ Every outcome falls in one of three classes (agent/README.md has the table):
   pending for the next run;
 - systemic: halt, with nothing marked for it. The store root unhealthy
   (missing, not a directory, unreadable, or empty while records point into
-  it), a run of failed batches (the database unreachable), a run of invalid
-  model answers, a non-retryable API error, a write the database rejects.
+  it), a run of missing snippets with none read in between, a run of failed
+  batches (the database unreachable), a run of invalid model answers, a
+  non-retryable API error, a write the database rejects.
 
 Two outcomes sit outside the classes: an invalid model answer is held until
 a later answer validates (then it goes to review), and a spent daily token
@@ -130,12 +133,6 @@ def store_root_problem(root: Path, expect_content: bool = False) -> str | None:
     return None
 
 
-def _under(path: str, root: Path) -> bool:
-    """Lexically, without touching the file: is `path` inside `root`?"""
-    candidate = Path(path)
-    return candidate.is_absolute() and Path(*candidate.parts).is_relative_to(root.resolve())
-
-
 @dataclass(frozen=True)
 class AgentSettings:
     snippet_root: Path
@@ -143,6 +140,9 @@ class AgentSettings:
     max_tokens: int = DEFAULT_MAX_TOKENS
     batch_size: int = 20
     max_attempts_per_record: int = 10  # transient failures before a record waits for the next run
+    # Missing snippets in a row (none read in between) that mean the wrong
+    # copy of the store is mounted, rather than broken records.
+    max_consecutive_missing_snippets: int = 5
     max_consecutive_bad_outputs: int = 5
     daily_token_budget: int = 2_000_000
     backoff_seconds: float = 2.0
@@ -202,6 +202,9 @@ class ClassificationAgent:
         # invalid answer): they never reach the LLM again.
         self._answered: set[int] = set()
         self._bad_outputs: list[tuple[int, Decision]] = []
+        # Missing snippets, held until another snippet reads (then they are
+        # about their records) or until too many in a row halt the agent.
+        self._missing: list[tuple[int, Decision]] = []
         self._transient_streak = 0
         self._retry_in: float | None = None
         self._budget_day = now().date()
@@ -209,20 +212,31 @@ class ClassificationAgent:
 
     def check_snippet_root(self) -> None:
         """Before touching any record: the store root must be healthy, and
-        the newest pending snippet paths must lie under it (lexically: a
-        broken snippet is a judgment about its record, not a reason to
-        refuse to start). Step 4 stores resolve()d absolute paths, so a
-        store mounted at another path would put every snippet 'outside'."""
+        one of the newest pending snippets must actually read through it.
+        Step 4 stores resolve()d absolute paths, so a store mounted at
+        another path puts every snippet 'outside', and a stale copy at the
+        right path makes them missing; one broken snippet among readable
+        ones does not block startup."""
         root = self._settings.snippet_root
         problem = store_root_problem(root)
         if problem is not None:
             raise SystemicFault(f"The snippet store is unusable: {problem}")
         newest = self._gateway.fetch_newest_with_snippet(self._last_id, _STARTUP_PROBES)
-        paths = [record.iq_snippet_path for record in newest if record.iq_snippet_path and record.malformed is None]
-        if paths and not any(_under(path, root) for path in paths):
+        problems = []
+        for record in newest:
+            if record.iq_snippet_path is None or record.malformed is not None:
+                continue
+            try:
+                read_snippet(record.iq_snippet_path, root, record.sample_rate, record.center_freq)
+                return
+            except (SnippetOutsideStore, SnippetUnreadable) as exc:
+                problems.append(f"record {record.id}: {exc}")
+        if problems:
             raise SystemicFault(
-                f"None of the newest pending snippets is under {root} (e.g. {paths[0][:200]!r}). "
-                "Mount the snippet store read-only at the identical resolved path ingest uses."
+                f"None of the newest pending snippets reads under {root}: "
+                + "; ".join(problems)[:2000]
+                + ". Mount the live snippet store (not a stale copy) read-only at the identical "
+                "resolved path ingest uses."
             )
 
     def take_retry_delay(self) -> float | None:
@@ -296,7 +310,11 @@ class ClassificationAgent:
                 self._defer(record.id, str(exc))
                 return None
             self._require_healthy_root(expect_content=True)
+            if exc.missing:
+                self._hold_missing(record.id, needs_review(f"snippet_missing: {exc}"))
+                return None
             return needs_review(f"snippet_unreadable: {exc}")
+        self._release_missing()  # a snippet read, so the store is the right one
         analysis = self._analyse(record.id, snippet)
         if isinstance(analysis, Decision):
             return analysis
@@ -357,6 +375,24 @@ class ClassificationAgent:
             return
         self._deferred[record_id] = _Deferred(attempts, entry.verdict)
         logger.warning("Record %d deferred (attempt %d): %s", record_id, attempts, why)
+
+    def _hold_missing(self, record_id: int, verdict: Decision) -> None:
+        self._missing.append((record_id, verdict))
+        logger.warning("Record %d held pending: %s", record_id, verdict.reasoning)
+        if len(self._missing) >= self._settings.max_consecutive_missing_snippets:
+            ids = [held for held, _ in self._missing]
+            raise SystemicFault(
+                f"{len(ids)} snippets in a row are missing under {self._settings.snippet_root} "
+                f"(records {ids}) with none read in between: is a stale or empty copy of the "
+                "store mounted? Nothing was marked for them."
+            )
+
+    def _release_missing(self) -> None:
+        """Another snippet just read, so the store is the right one: each held
+        missing snippet was about its own record, and goes to review."""
+        while self._missing:
+            record_id, verdict = self._missing.pop(0)
+            self._write(record_id, verdict)
 
     def _hold_bad_output(self, record_id: int, verdict: Decision) -> None:
         self._bad_outputs.append((record_id, verdict))
