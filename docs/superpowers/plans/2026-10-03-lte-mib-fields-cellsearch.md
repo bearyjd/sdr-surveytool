@@ -686,10 +686,17 @@ git commit -m "docs: amend MIB spike spec for the CellSearch summary-table route
   coverage-mapping value. The LTE-Tracker route that does print SFN is preserved at
   `fc13404`.
 - **SIB1-3 and PLMN.** There is no SIB decode anywhere in the vendored codebase.
-- **Testing the 1 MHz frequency-match radius against non-identical frequencies.**
-  `--loadbin` scans a single frequency, so no real stdout has a block and row at
-  different printed frequencies. It is documented in Review Focus, not tested with
-  invented output.
+- **Real-stdout coverage of the 1 MHz frequency-match radius.** `--loadbin` scans a
+  single frequency, so no real stdout has a block and row at different printed
+  frequencies. Review follow-ups after this plan pinned the radius, the row
+  assignment and the value mappings with synthetic rows built from the real column
+  layout instead.
+- **Canonical records from the deduplicated summary table.** The parser returns one
+  dict per raw "Detected a … cell!" block, and CellSearch prints a block for every
+  detection before `dedup()`, so one cell can yield several dicts (a pre-existing
+  behavior). Since review, only the block `dedup()` kept gets the row's MIB fields;
+  the others get `None`. Emitting one record per summary-table row instead would
+  remove the duplicate per-cell records. Decide it when the normalizer is wired.
 - **LTE-Tracker and TDD tracking.** They are no longer used.
 - **Follow-ups (pre-existing issues, flagged here, not fixed):**
   - **`generate_fixture.py` sample format.**
