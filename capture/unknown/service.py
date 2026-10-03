@@ -115,10 +115,12 @@ class CaptureSettings:
             )
         if self.pre_trigger_seconds < 0:
             raise ValueError("pre_trigger_seconds must be >= 0")
-        if self.cooldown_seconds <= 0:
+        min_cooldown = max(1.0, self.pre_trigger_seconds + self.post_trigger_seconds)
+        if self.cooldown_seconds < min_cooldown:
             raise ValueError(
-                "cooldown_seconds must be > 0: the trigger is level-triggered, so a "
-                "zero cooldown re-captures a continuous emitter back to back"
+                f"cooldown_seconds must be >= {min_cooldown:g} (1 s, and at least one "
+                "snippet): the trigger is level-triggered, so a shorter cooldown "
+                "re-captures a continuous emitter back to back"
             )
         if self.min_free_bytes < 0:
             raise ValueError("min_free_bytes must be >= 0")

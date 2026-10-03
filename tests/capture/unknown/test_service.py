@@ -72,6 +72,20 @@ def test_settings_reject_non_positive_cooldown(tmp_path):
         _settings(tmp_path, cooldown_seconds=0.0)
 
 
+def test_settings_require_a_cooldown_of_at_least_a_second_and_a_snippet(tmp_path):
+    """A sub-microsecond cooldown rounds to timedelta(0), and one shorter than
+    the snippet re-arms a level trigger as soon as the capture completes."""
+    for too_short in (1e-7, 0.5):
+        with pytest.raises(ValueError, match="cooldown_seconds"):
+            _settings(tmp_path, cooldown_seconds=too_short)
+    assert _settings(tmp_path, cooldown_seconds=1.0).cooldown_seconds == 1.0  # 0.1 + 0.9 s
+    with pytest.raises(ValueError, match="cooldown_seconds"):
+        _settings(tmp_path, pre_trigger_seconds=1.0, post_trigger_seconds=2.0, cooldown_seconds=2.5)
+    assert _settings(
+        tmp_path, pre_trigger_seconds=1.0, post_trigger_seconds=2.0, cooldown_seconds=3.0
+    ).cooldown_seconds == 3.0
+
+
 def test_settings_reject_a_drift_threshold_inside_normal_buffering_lag(tmp_path):
     """Sample time normally lags wall time by ~100 ms of buffering; a tighter
     threshold would rebuild the radio session on every poll."""
