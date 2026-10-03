@@ -23,18 +23,41 @@ def test_gps_fix_quality_passthrough():
     assert args.gps_lon == -122.3
 
 
-def test_snippet_directories_default_to_absolute_paths_under_var_lib():
+def test_snippet_store_is_off_by_default_and_never_touches_var_lib(monkeypatch):
+    """WiFi/BT-only deployments must start exactly as before: no snippet
+    directory is created or checked unless the operator opts in."""
+
+    def no_store_expected(*args, **kwargs):
+        raise AssertionError("snippet store opened without opting in")
+
+    monkeypatch.setattr("ingest.main.LocalSnippetStore", no_store_expected)
     args = _parse_args(["--gps-fix-quality", "0"])
-    assert args.snippet_staging_dir == "/var/lib/sdr-surveytool/snippet-staging"
-    assert args.snippet_store_dir == "/var/lib/sdr-surveytool/snippets"
+    assert (args.snippet_staging_dir, args.snippet_store_dir) == (None, None)
+    assert _open_snippet_store(args) is None
 
 
 @pytest.mark.parametrize("flag", ["--snippet-staging-dir", "--snippet-store-dir"])
-def test_relative_snippet_directories_are_rejected(flag):
+def test_opting_in_takes_both_snippet_directories(flag, tmp_path):
+    with pytest.raises(SystemExit):
+        _parse_args(["--gps-fix-quality", "0", flag, str(tmp_path / "x")])
+
+
+@pytest.mark.parametrize("relative", ["staging", "store"])
+def test_relative_snippet_directories_are_rejected(relative, tmp_path):
     """Capture and ingest resolve relative paths against their own working
     directories; if those differ every snippet is rejected as outside_staging."""
+    staging = "data/snippet-staging" if relative == "staging" else str(tmp_path / "staging")
+    store = "data/snippets" if relative == "store" else str(tmp_path / "snippets")
     with pytest.raises(SystemExit):
-        _parse_args(["--gps-fix-quality", "0", flag, "data/snippets"])
+        _parse_args(["--gps-fix-quality", "0", "--snippet-staging-dir", staging, "--snippet-store-dir", store])
+
+
+def test_an_opted_in_store_with_a_bad_dir_fails_fast(tmp_path):
+    shared = tmp_path / "staging"
+    shared.mkdir()
+    shared.chmod(0o755)
+    with pytest.raises(PermissionError, match="chmod 700"):
+        _open_snippet_store(_dir_args(tmp_path))
 
 
 def test_snippet_directories_passthrough():

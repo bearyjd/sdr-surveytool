@@ -37,14 +37,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--snippet-staging-dir",
-        default="/var/lib/sdr-surveytool/snippet-staging",
-        help="Absolute directory capture processes stage SigMF snippets in. Must "
-        "match the capture side's --staging-dir; snippet paths outside it are rejected.",
+        default=None,
+        help="Opt in to storing unknown-signal IQ snippets (with --snippet-store-dir): "
+        "the absolute directory capture stages SigMF snippets in, e.g. "
+        "/var/lib/sdr-surveytool/snippet-staging. Must match the capture side's "
+        "--staging-dir. Without it, unknown-signal records are kept without IQ.",
     )
     parser.add_argument(
         "--snippet-store-dir",
-        default="/var/lib/sdr-surveytool/snippets",
-        help="Absolute directory ingest moves adopted SigMF snippets into.",
+        default=None,
+        help="Opt in to storing IQ snippets (with --snippet-staging-dir): the absolute "
+        "directory ingest moves adopted SigMF snippets into, e.g. "
+        "/var/lib/sdr-surveytool/snippets.",
     )
     parser.add_argument(
         "--max-snippet-bytes",
@@ -71,11 +75,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "explicitly to mark records as fix-less rather than fabricating one.",
     )
     args = parser.parse_args(argv)
-    for directory in (args.snippet_staging_dir, args.snippet_store_dir):
-        try:
-            require_absolute(directory)
-        except ValueError as exc:
-            parser.error(str(exc))
+    snippet_dirs = (args.snippet_staging_dir, args.snippet_store_dir)
+    if (snippet_dirs[0] is None) != (snippet_dirs[1] is None):
+        parser.error(
+            "--snippet-staging-dir and --snippet-store-dir enable the snippet store "
+            "together; pass both or neither"
+        )
+    for directory in snippet_dirs:
+        if directory is not None:
+            try:
+                require_absolute(directory)
+            except ValueError as exc:
+                parser.error(str(exc))
     if args.gps_fix_quality is None:
         parser.error(
             "--gps-fix-quality is required until a real GPS provider exists "
@@ -84,10 +95,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def _open_snippet_store(args: argparse.Namespace) -> LocalSnippetStore:
-    """Resolve, create and permission-check the snippet dirs, failing fast on
-    a misconfiguration before ingest accepts any record. The relative defaults
-    resolve against this process's working directory, so log the result."""
+def _open_snippet_store(args: argparse.Namespace) -> LocalSnippetStore | None:
+    """The snippet store if the operator opted in (both snippet dirs given),
+    else None: ingest then runs exactly as without unknown-signal capture,
+    and records carrying an iq_snippet_path are kept without it, flagged
+    no_snippet_store. When opted in, create and check the dirs (absolute,
+    0700, owned by this uid, hard-linkable), failing fast on a
+    misconfiguration before ingest accepts any record, and log them."""
+    if args.snippet_staging_dir is None:
+        logger.info(
+            "Snippet store disabled (no --snippet-staging-dir/--snippet-store-dir): "
+            "unknown-signal records are kept without IQ"
+        )
+        return None
     store = LocalSnippetStore(
         args.snippet_staging_dir, args.snippet_store_dir, max_snippet_bytes=args.max_snippet_bytes
     )
