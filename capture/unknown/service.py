@@ -22,7 +22,12 @@ from capture.unknown.normalizer import SnippetCaptureEvent, normalize_snippet_ev
 from capture.unknown.sample_clock import SampleClock
 from capture.unknown.snippet_assembler import CapturedSnippet, SnippetAssembler
 from capture.unknown.snippet_writer import write_sigmf_snippet
-from dsp.spectral import mean_burst_power_dbfs, occupied_bandwidth_hz, peak_power_dbfs
+from dsp.spectral import (
+    OccupiedBandwidth,
+    mean_burst_power_dbfs,
+    occupied_bandwidth,
+    peak_power_dbfs,
+)
 from schema.records import UnifiedRecord
 from storage.snippet_store import ensure_private_dir
 
@@ -219,18 +224,20 @@ def _snippet_record(
     survey_id: str,
     operator_id: str,
 ) -> UnifiedRecord:
+    bandwidth: OccupiedBandwidth = occupied_bandwidth(
+        snippet.iq, snippet.sample_rate, settings.threshold_dbfs
+    )
     event = SnippetCaptureEvent(
         timestamp=snippet.trigger.time,
         center_freq_hz=settings.center_freq_hz,
         sample_rate=snippet.sample_rate,
-        bandwidth_estimate_hz=occupied_bandwidth_hz(
-            snippet.iq, snippet.sample_rate, settings.threshold_dbfs
-        ),
+        bandwidth_estimate_hz=bandwidth.hz,
         peak_power_dbfs=peak_power_dbfs(snippet.power),
         mean_power_dbfs=mean_burst_power_dbfs(snippet.power, settings.threshold_dbfs),
         noise_floor_dbfs=settings.noise_floor_dbfs,
         snippet_path=snippet_path,
         snippet_duration_ms=round(len(snippet.iq) * 1000 / snippet.sample_rate),
+        bandwidth_estimate_reliable=bandwidth.reliable,
     )
     return normalize_snippet_event(event, survey_id, operator_id)
 

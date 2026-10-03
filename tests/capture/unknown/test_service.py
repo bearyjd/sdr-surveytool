@@ -185,6 +185,15 @@ def test_record_describes_the_snippet_at_its_actual_sample_rate(tmp_path):
     assert record.metadata.snippet_duration_ms == 2000  # 100_000 samples at 50 kS/s
 
 
+def test_record_flags_an_unreliable_bandwidth_estimate(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        service, "occupied_bandwidth", lambda *args: service.OccupiedBandwidth(hz=95_000.0, reliable=False)
+    )
+    record = process_snippet(_snippet(), _settings(tmp_path), "s1", "op1")
+    assert record.identifier.bandwidth_estimate == 95_000.0
+    assert record.metadata.quality_flags["bandwidth_estimate_unreliable"] is True
+
+
 def test_snippet_duration_reflects_samples_actually_captured(tmp_path):
     """A trigger in the first 0.1 s truncates the pre-trigger history."""
     record = process_snippet(_snippet(trigger_index=3_000, pre=3_000), _settings(tmp_path), "s1", "op1")
@@ -242,7 +251,7 @@ def test_a_measurement_failure_writes_nothing(tmp_path, monkeypatch, caplog):
     def broken_bandwidth(*args):
         raise FloatingPointError("injected DSP failure")
 
-    monkeypatch.setattr(service, "occupied_bandwidth_hz", broken_bandwidth)
+    monkeypatch.setattr(service, "occupied_bandwidth", broken_bandwidth)
     emitter = _FakeEmitter("/unused.sock")
     drops: Counter = Counter()
     with caplog.at_level(logging.ERROR):

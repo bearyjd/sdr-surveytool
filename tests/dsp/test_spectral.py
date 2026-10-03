@@ -9,8 +9,10 @@ import numpy as np
 import pytest
 
 from dsp.spectral import (
+    OccupiedBandwidth,
     dbfs,
     mean_burst_power_dbfs,
+    occupied_bandwidth,
     occupied_bandwidth_hz,
     peak_power_dbfs,
 )
@@ -33,6 +35,21 @@ def _band_limited(rng: np.random.Generator, n: int, power: float, bandwidth_hz: 
     spectrum[np.abs(freqs - offset_hz) > bandwidth_hz / 2] = 0
     x = np.fft.ifft(spectrum)
     return (x * math.sqrt(power / np.mean(np.abs(x) ** 2))).astype(np.complex64)
+
+
+def _hann_shaped(rng: np.random.Generator, n: int, power: float, occupancy: float) -> tuple:
+    """Noise with a raised-cosine (Hann-shaped) spectrum over `occupancy` of
+    the band: unlike a brick wall, its skirts sit below its median bin, so a
+    median noise floor eats into them. Returns the burst and its true 99%
+    occupied bandwidth."""
+    freqs = np.fft.fftfreq(n, 1 / FS)
+    half = occupancy * FS / 2
+    shape = np.where(np.abs(freqs) <= half, np.cos(np.pi * freqs / (2 * half)) ** 2, 0.0)
+    x = np.fft.ifft(np.fft.fft(_noise(rng, n, 1.0)) * np.sqrt(shape))
+    order = np.argsort(freqs)
+    cumulative = np.cumsum(shape[order]) / shape.sum()
+    true_bw = freqs[order][np.searchsorted(cumulative, 0.995)] - freqs[order][np.searchsorted(cumulative, 0.005)]
+    return (x * math.sqrt(power / np.mean(np.abs(x) ** 2))).astype(np.complex64), true_bw
 
 
 def _snippet_with(burst: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -67,6 +84,40 @@ def test_occupied_bandwidth_of_band_limited_burst(bandwidth_hz, offset_hz):
     burst = _band_limited(rng, 20_000, NOISE_POWER * 100, bandwidth_hz, offset_hz)
     estimate = occupied_bandwidth_hz(_snippet_with(burst, rng), FS, THRESHOLD_DBFS)
     assert estimate == pytest.approx(bandwidth_hz, rel=0.15)
+
+
+@pytest.mark.parametrize("occupancy, tolerance", [(0.5, 0.05), (0.7, 0.05), (0.85, 0.10)])
+def test_occupied_bandwidth_of_a_shaped_wideband_signal(occupancy, tolerance):
+    """The noise floor is the 10th-percentile PSD bin scaled to the noise
+    mean, which stays a noise-only statistic up to 90% occupancy. A median
+    floor sits inside such a signal and cuts its skirts: -21% at 70%,
+    -31% at 85% (measured)."""
+    rng = np.random.default_rng(7)
+    burst, true_bw = _hann_shaped(rng, 20_000, NOISE_POWER * 100, occupancy)
+    estimate = occupied_bandwidth(_snippet_with(burst, rng), FS, THRESHOLD_DBFS)
+    assert estimate.hz == pytest.approx(true_bw, rel=tolerance)
+    assert estimate.reliable
+
+
+def test_a_signal_filling_more_than_90_percent_of_the_band_is_flagged_unreliable():
+    rng = np.random.default_rng(7)
+    burst = _band_limited(rng, 20_000, NOISE_POWER * 100, 0.95 * FS, 0.0)
+    assert not occupied_bandwidth(_snippet_with(burst, rng), FS, THRESHOLD_DBFS).reliable
+
+
+def test_a_signal_wrapping_around_the_band_edge_is_flagged_unreliable():
+    """Centred on +-fs/2, a narrow signal shows up at both ends of the
+    shifted spectrum; its edge-to-edge span is not its bandwidth."""
+    rng = np.random.default_rng(7)
+    burst = _band_limited(rng, 20_000, NOISE_POWER * 100, 10_000, FS / 2)
+    assert not occupied_bandwidth(_snippet_with(burst, rng), FS, THRESHOLD_DBFS).reliable
+
+
+def test_occupied_bandwidth_hz_is_the_estimate_without_its_reliability():
+    rng = np.random.default_rng(7)
+    iq = _snippet_with(_band_limited(rng, 20_000, NOISE_POWER * 100, 20_000, 10_000), rng)
+    assert occupied_bandwidth_hz(iq, FS, THRESHOLD_DBFS) == occupied_bandwidth(iq, FS, THRESHOLD_DBFS).hz
+    assert isinstance(occupied_bandwidth(iq, FS, THRESHOLD_DBFS), OccupiedBandwidth)
 
 
 def test_occupied_bandwidth_of_a_tone_is_a_few_bins():

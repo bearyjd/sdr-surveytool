@@ -29,6 +29,9 @@ class SnippetCaptureEvent:
     noise_floor_dbfs: float
     snippet_path: str | None  # staged .sigmf-data path; None if the IQ was dropped
     snippet_duration_ms: int
+    # False when dsp.spectral couldn't measure the bandwidth meaningfully
+    # (fills > 90% of the band or wraps its edges): flagged on the record.
+    bandwidth_estimate_reliable: bool = True
 
 
 def normalize_snippet_event(
@@ -61,7 +64,10 @@ def normalize_snippet_event(
             peak_power=event.peak_power_dbfs,
         ),
         metadata=Metadata(
-            quality_flags={"power_units": "dBFS"},
+            quality_flags={
+                "power_units": "dBFS",
+                **({} if event.bandwidth_estimate_reliable else {"bandwidth_estimate_unreliable": True}),
+            },
             iq_snippet_path=event.snippet_path,
             snippet_duration_ms=event.snippet_duration_ms,
             sample_rate=event.sample_rate,

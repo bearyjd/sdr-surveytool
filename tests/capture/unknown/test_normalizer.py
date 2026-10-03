@@ -55,3 +55,10 @@ def test_record_survives_the_queue_json_round_trip():
 def test_event_without_a_snippet_normalizes_to_a_null_snippet_path():
     record = normalize_snippet_event(replace(EVENT, snippet_path=None), survey_id="s1", operator_id="op1")
     assert record.metadata.iq_snippet_path is None
+
+
+def test_unreliable_bandwidth_estimate_is_flagged_not_silently_reported():
+    record = normalize_snippet_event(
+        replace(EVENT, bandwidth_estimate_reliable=False), survey_id="s1", operator_id="op1"
+    )
+    assert record.metadata.quality_flags == {"power_units": "dBFS", "bandwidth_estimate_unreliable": True}
