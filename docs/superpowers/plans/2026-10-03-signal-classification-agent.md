@@ -20,9 +20,13 @@ record that step 4 stores:
     step 4's per-bin `dsp.spectral.noise_floor_psd` of the snippet's quiet pre-trigger
     frames. Emitters already on are found in that reference against a local median
     floor, as context only.
-  - Without a usable reference, it uses a bias-corrected percentile self floor (never
-    the median) and flags the analysis as reduced confidence. The usual cause is an
-    always-on emitter that fills its own pre-trigger.
+  - A frame is quiet below step 4's trigger threshold, which Task 6 makes step 4 record
+    in the SigMF.
+  - Without a usable reference, it uses a bias-corrected percentile self floor, never
+    the median. The usual cause is an always-on emitter that fills its own pre-trigger.
+    A self-floor primary reaching the outer 15% of the band cannot be told from
+    receiver roll-off. It is flagged `edge_region_unreliable` and capped at
+    `needs_review`.
   - It treats the band as circular: a signal straddling the ±fs/2 edge is one region.
   - `dsp/features.py` channelizes the primary region by FFT-bin selection and measures
     fine OBW and center, duty cycle, bursts, PAPR, flatness, and a symbol-rate line in |x|².
@@ -66,7 +70,10 @@ serves the boundary tests.
     then calls. Step 4's public signatures are unchanged;
   - the snippet's SigMF annotations. Step 4's writer labels `[0, trigger)` as
     `pre_trigger` (the below-threshold noise reference) and the rest as `burst`;
-  - in tests only: `capture.unknown.snippet_writer.write_sigmf_snippet(iq, staging_dir, sample_rate, center_freq_hz, capture_start, trigger_offset=None) -> Path`;
+  - `capture.unknown.snippet_writer.write_sigmf_snippet(iq, staging_dir, sample_rate, center_freq_hz, capture_start, trigger_offset=None) -> Path`.
+    Task 6 adds a keyword, `threshold_dbfs=None`, and `process_snippet` passes its
+    `CaptureSettings.threshold_dbfs`. This additive step-4 change lands on this branch,
+    because PR #5 stays frozen. The agent itself only reads the SigMF;
   - in tests only: `storage.snippet_store.LocalSnippetStore(staging_dir, root_dir).adopt(staged_data_path: str) -> str`.
     The constructor creates both directories and checks them (`0700`, owned by this euid),
     and proves that a hard link from staging into the store works. `adopt()` accepts only
@@ -130,15 +137,21 @@ serves the boundary tests.
     read as symbol-rate lines on 14 of 100 clean tones.
   - `test_ffts_run_in_bounded_batches_without_promotion` pins this.
 - **The noise floor and the trigger threshold.** Segmentation works in one of two modes.
-  - **The trigger threshold is not recorded.** Step 4 gates its reference on its trigger
-    threshold. Neither the record, the view nor the SigMF meta carries that threshold;
-    the meta has only a comment string. The agent therefore uses the fallback rule: a
-    pre-trigger frame is quiet 3 dB below the snippet's active-frame mean. That level
-    goes to step 4's `quiet_reference` as `threshold_dbfs`, which then requires ≥ 8
-    quiet frames. If step 4 recorded its threshold, the agent could use it instead.
-    Step 4's trigger margin defaults to 10 dB (`--threshold-db`), so a burst that
-    triggered normally clears 3 dB. One that raises the band power by less falls to
-    self mode: measured for a 67.5 kHz burst at 10–12 dB in-band SNR in a 1 MHz band.
+  - **The trigger threshold.** Step 4 gates its own reference on its trigger threshold.
+    At `9615218` the threshold reached neither the record nor the SigMF (only a comment
+    string). Task 6 therefore makes step 4's writer record it on the `pre_trigger`
+    annotation as `sdr_surveytool:threshold_dbfs`, in a declared, optional SigMF
+    extension. The agent passes it to `quiet_reference` as `threshold_dbfs`, which
+    requires ≥ 8 quiet frames.
+  - **The fallback.** A snippet without a valid recorded threshold (written earlier, or a
+    crafted value) falls back to a relative rule: a pre-trigger frame is quiet 3 dB below
+    the snippet's active-frame mean.
+    - Step 4's trigger margin defaults to 10 dB (`--threshold-db`), so a burst that
+      triggered normally clears 3 dB.
+    - One that raises the band power by less falls to self mode. That was measured for
+      a 67.5 kHz burst at 10–12 dB in-band SNR in a 1 MHz band, and for a burst adding
+      under 3 dB on top of an emitter already on (16 of 20 seeds). The recorded
+      threshold keeps the reference in both cases.
   - **Reference mode** (≥ 8 quiet frames):
     - The primary is the burst, measured against `noise_floor_psd` of the quiet frames.
       That floor is raised to the reference's own PSD wherever the reference is higher.
@@ -153,16 +166,22 @@ serves the boundary tests.
       2nd percentile. When they disagree by more than 3 dB, the band is crowded (more
       than ~90% occupied) and the 2nd-percentile floor is used.
     - A median floor would erase any signal occupying half the band.
-    - The floor is flat, so it is blind to roll-off. Every region is flagged unreliable,
-      and the analysis carries the `no_quiet_noise_reference` reason.
+    - The floor is flat, so it is blind to roll-off. A receiver's in-band noise reads as
+      one false region whose outer edge reaches 0.373–0.475 fs (15 dB cosine roll-off,
+      60–90% flat passbands, 20 seeds).
+    - The edge zone is the outer 15% of the band on each side, beyond ±0.35 fs
+      (`touches_edge_zone`); 10% would miss the 60% and 70% flat cases. A self-floor
+      primary that reaches it carries the `edge_region_unreliable` reason. A primary
+      away from it is judged like any other, and can ground.
     - An always-on emitter is still found as the primary, never "no region", so it never
       counts toward a halt.
     - The self floor lives in `dsp/segmentation.py`, because step 4 has no self-floor
       estimator.
   - **Reduced confidence.** `SnippetAnalysis.reduced_confidence` lists the reasons:
-    `no_quiet_noise_reference`, `non_finite_samples`, and `bandwidth_unreliable` (from
-    `bandwidth_is_reliable`). Any reason keeps every band match ungrounded. The prompt
-    states the floor source and the reasons.
+    `edge_region_unreliable`, `non_finite_samples`, and `bandwidth_unreliable` (from
+    `bandwidth_is_reliable`). Any reason keeps every band match ungrounded and caps
+    routing at `needs_review`, even for a matching modulation label. The prompt states
+    the floor source and the reasons.
 - **NaN and inf samples** never crash the agent. The reader zeroes and counts them
   (`Snippet.non_finite_samples`), which reduces confidence. A snippet with no finite
   sample at all is unreadable.
@@ -268,9 +287,14 @@ serves the boundary tests.
       that spectrum by the reference floor and found in the reference instead
       (`present_before_trigger: true`). The 3 strongest of both kinds go along.
   19. **Reduced confidence** (above) is not in the spec. Any reason keeps every band
-      match ungrounded.
+      match ungrounded and caps routing at `needs_review`.
   20. **NaN and inf samples** are zeroed and counted rather than rejected. The spec is
       silent on them.
+  21. **Step 4's SigMF writer records its trigger threshold** (Task 6). This is additive
+      step-4 code on this branch; the spec only reads step 4's output.
+  22. **The self-floor edge zone.** Without a quiet reference, a primary reaching the
+      outer 15% of the band is capped at `needs_review`. Validating the zone on real
+      bladeRF captures is a hardware follow-up.
 
 ## Verified facts (build-and-run spike, 2026-10-03)
 
@@ -354,7 +378,7 @@ noise −50 dBFS, signal −30 dBFS.
 | OOK, ten 5 ms bursts | duty +0.0046; exactly 10 bursts; mean burst +2.4% | ±0.01; exact; ±5% |
 | Two emitters (carrier + burst) | burst is primary every time: center ≤ 412 Hz, OBW ±0.6%, duty ≤ 0.0009 off; carrier as context at −9.8…−10.1 dB | ±1 kHz; ±3%; ±0.01; ±0.5 dB |
 | 5 kHz signal at 2 MS/s | fine OBW +0.1…+2.5%; coarse +95% | ±6% |
-| One band-limited signal filling 55–95% of the band, self floor (10 seeds each) | one region every time, OBW −0.7…−1.0%; always flagged unreliable | ±3% |
+| One band-limited signal filling 55–95% of the band, self floor (10 seeds each) | one region every time, OBW −0.7…−1.0%; reliable up to 90%, unreliable at 95%; in the edge zone from 70% (it then reaches beyond 0.35 fs) | ±3% |
 | The same at 60–95%, after a 25 ms quiet reference (10 seeds each) | one region every time, OBW −0.7…−1.0%; reliable through 90% (the OBW reads just under 90% of the band), unreliable at 95% | ±3% |
 | Two wideband emitters (300 and 250 kHz) and a −45 dBFS tone | regions in order: the stronger wideband, the other, the tone | ±3%; ±1 bin |
 | Task 8: 125 kHz burst + carrier at 915 MHz, 50 ms quiet reference | center −576…+569 Hz; OBW −0.8…0%; carrier context ≤ 3.3 Hz off at −9.86…−10.09 dB, `present_before_trigger` every seed; no reduced-confidence reason; grounded in `ism_902_928` every seed; the edge-straddling case unreliable and ungrounded every seed | ±2 kHz; ±5%; ±1 kHz; ±0.5 dB |
@@ -362,9 +386,13 @@ noise −50 dBFS, signal −30 dBFS.
 | 60 kHz signal straddling ±fs/2, reference floor | one region, OBW −0.7…+2.5%, unreliable 20/20 | ±5% |
 | 60 kHz signal at +450 kHz, reference floor | one region, reliable 20/20, center ≤ 1.7 kHz off | ±2 bins |
 | Colored noise: 60% or 80% flat passband, 15 dB cosine roll-off; a burst after a 25 ms reference | 20 kHz bursts: OBW +7.4% (22 bins), center ≤ 455 Hz off. 300 kHz bursts: OBW −0.7%, center ≤ 1.1 kHz off. One reliable region, no false context, 20/20 in each of the 4 cases | ±15% (20 kHz), ±3% (300 kHz); ±2 bins |
-| The same 20 kHz burst, self floor | a false region ≥ 560 kHz wide, unreliable 20/20 | > 500 kHz, unreliable |
+| The same 20 kHz burst, self floor | a false region ≥ 560 kHz wide that swallows the burst, 20/20; its outer edge at 0.373–0.389 fs (60% flat), 0.398–0.428 (70%), 0.442–0.452 (80%), 0.469–0.475 (90%), and 0.393–0.478 at 20 dB: in the 15% edge zone every time | > 500 kHz, in the zone |
+| Self floor, 8–20 dB roll-offs, 60–90% flat (400 captures) | the primary is not the clean burst in 259. A 15% zone misses 20 of those, all at 8–12 dB: central regions widened to 31–360 kHz that reach only 0.12–0.34 fs. A 10% zone misses 86, a 20% zone 15 | none: the hardware follow-up |
+| 30 kHz signal at ±300 / +450 kHz, self floor | outside / inside the edge zone 20/20 | exact |
 | A carrier and a 20 kHz emitter already on, plus a 20 kHz burst, on 80%/15 dB colored noise | primary is the burst 20/20; both earlier emitters found in the reference 20/20 (≤ 6 Hz and ≤ 523 Hz off), never in the burst regions | ±1 bin; ±2 bins |
-| Always-on emitter filling 90% of the band on 80%/15 dB colored noise | self floor 20/20; the primary every time, OBW −0.9%, unreliable | ±3% |
+| Always-on emitter filling 90% of the band on 80%/15 dB colored noise | self floor 20/20; the primary every time, OBW −0.9%, in the edge zone | ±3% |
+| Emitter already on (−40 dBFS, 20 kHz) plus a −43 dBFS 50 kHz burst; threshold −38.5 dBFS | recorded threshold: reference mode, the burst the only burst-time region (center ≤ 1.1 kHz off, OBW −0.4…+1.6%) and the emitter context, 20/20. 3 dB fallback: self floor in 16/20, the emitter then the primary | ±2 bins |
+| A pre-trigger above the recorded threshold (an always-on emitter) | self floor 20/20 | exact |
 | False symbol-rate lines, 100 seeds each | 0 band-limited, 0 tones, 0 random OOK, on the self floor and after a quiet reference alike | n/a |
 | Noise only | 0 regions, 20/20 | no regions |
 
@@ -389,8 +417,10 @@ noise −50 dBFS, signal −30 dBFS.
   region in 320 colored-noise references (60% and 80% flat, 15 and 25 dB roll-off, 24
   and 97 frames). A lower envelope (20th percentile) lags a steep skirt: 306 false
   regions in 40 references at 80%/25 dB. Task 2's second mutation step shows this.
-- **The trigger threshold** reaches neither the record nor the SigMF meta (only a
-  comment string), so the quiet gate uses the 3 dB fallback rule (Global Constraints).
+- **The trigger threshold** reached neither the record nor the SigMF meta at `9615218`
+  (only a comment string). Task 6 records it; sigmf 1.13 warns on an undeclared
+  extension key, so the writer declares `sdr_surveytool` (optional) in
+  `core:extensions`, and `validate()` then passes under `-W error`.
 - **A loud transient in part of the reference** does not spoil it: its frames fail the
   quiet gate. Without that gate, the continuous-emitter test fails.
 - These findings came while step 4 replaced its percentile floor (at `4b130a3`) with
@@ -503,12 +533,12 @@ Three caveats on the table:
    samples.** Expected:
    - the burst is the primary;
    - earlier emitters are context;
-   - the always-on emitter is classified with reduced confidence and never halts the
-     agent;
+   - the always-on emitter is classified and never halts the agent; reaching the band
+     edges without a reference, it is capped at `needs_review`;
    - nothing crashes, and every reliability flag is honest.
 
-   Reduced confidence or an unreliable bandwidth grounds nothing. Tasks 2, 3, 6, 8 and 10
-   (`test_an_always_on_emitter_is_classified_and_never_trips_a_halt`).
+   Any reduced-confidence reason grounds nothing and caps routing. Tasks 2, 3, 6, 8, 9
+   and 10 (`test_an_always_on_emitter_is_classified_and_never_trips_a_halt`).
 
 ## File Structure
 
@@ -516,6 +546,7 @@ Three caveats on the table:
 |---|---|
 | `schema/records.py` (modify) | `ClassificationStatus.NEEDS_REVIEW` |
 | `dsp/spectral.py` (modify) | Public `bandwidth_is_reliable`, shared with step 4 |
+| `capture/unknown/snippet_writer.py`, `capture/unknown/service.py` (modify) | Step 4 records its trigger threshold on the `pre_trigger` annotation |
 | `dsp/synthetic.py` | Deterministic test signals with known answers |
 | `dsp/segmentation.py` | Active-frame Welch PSD, reference or self floor, DC mask, circular regions, primary region, context found in the reference |
 | `dsp/features.py` | FFT-block channelizer and per-region features |
@@ -528,7 +559,7 @@ Three caveats on the table:
 | `agent/analysis.py` | Segmentation → primary features → context → band matches → classifier |
 | `agent/prompt.py` | System prompt; numeric-only user message |
 | `agent/llm.py` | Forced-tool request, response validation, transient-error rule |
-| `agent/routing.py` | Pure routing on the tag's grounded band prefix |
+| `agent/routing.py` | Pure routing on the tag's grounded band prefix, capped by any reduced-confidence reason |
 | `agent/service.py` | The loop, hold-and-release failure handling, the startup probe, the `sdr-agent` CLI |
 | `pyproject.toml`, `README.md`, `dsp/README.md`, `storage/README.md`, `agent/README.md`, architecture doc (modify) | Dependencies, packages, scripts, docs |
 | `tests/...` | One module per unit, plus `tests/test_no_tag_branching.py`, `tests/agent/test_import_boundary.py` and the end-to-end tests |
@@ -665,7 +696,8 @@ git commit -m "feat: add needs_review classification status"
       the middle `flat_fraction` of the band, with a raised-cosine roll-off to `-edge_db`
       at ±fs/2, as a receiver's anti-alias filter delivers it.
   - `dsp.segmentation`:
-    - constants `NFFT = 1024`, `MAX_CONTEXT_REGIONS = 3` and `BATCH_SAMPLES = 1 << 17`;
+    - constants `NFFT = 1024`, `MAX_CONTEXT_REGIONS = 3`, `BATCH_SAMPLES = 1 << 17` and
+      `EDGE_ZONE_FRACTION = 0.15`;
     - `SpectralRegion(start_offset_hz, end_offset_hz, center_offset_hz, obw_hz, excess_power, snr_db, bandwidth_reliable, noise_per_bin)`,
       frozen:
       - start/end run continuously past ±fs/2 for a wrapping region, and the center is
@@ -683,15 +715,18 @@ git commit -m "feat: add needs_review classification status"
     - `self_floor(psd, frames, percentile) -> float`,
       `local_floor(psd, frames) -> ndarray` and
       `circular_regions(above: bool ndarray, max_gap) -> list[index arrays]`;
-    - `segment_spectrum(iq, sample_rate, reference_iq=None) -> Segmentation`, which
-      raises `ValueError` below `NFFT` samples.
+    - `touches_edge_zone(region, sample_rate) -> bool`: the region reaches the outer
+      15% of the band on either side (beyond ±0.35 fs);
+    - `segment_spectrum(iq, sample_rate, reference_iq=None, threshold_dbfs=None) -> Segmentation`,
+      which raises `ValueError` below `NFFT` samples. `threshold_dbfs` is step 4's
+      trigger threshold, which Task 6 makes step 4 record in the SigMF.
 
 Design decisions, each measured (see Verified facts):
 - **Primary floor (reference mode).** The primary is the burst that triggered capture.
-  - Step 4 does not record its trigger threshold, so a pre-trigger frame counts as
-    quiet 3 dB below the active frames' mean power:
-    `quiet_reference(reference_iq, dbfs(active mean / 2))`. Reference mode needs at
-    least 8 such frames.
+  - A pre-trigger frame is quiet below step 4's recorded trigger threshold:
+    `quiet_reference(reference_iq, threshold_dbfs)`. A snippet without a recorded
+    threshold falls back to 3 dB below the active frames' mean power,
+    `dbfs(active mean / 2)`. Reference mode needs at least 8 quiet frames.
   - The burst-time PSD is measured against step 4's `noise_floor_psd` of those frames,
     raised to the reference's own PSD wherever that is higher. An emitter already on
     then leaves no residual that could pose as the burst.
@@ -704,9 +739,12 @@ Design decisions, each measured (see Verified facts):
   - The floor is the bias-corrected 10th-percentile bin, cross-checked against the
     2nd. When they disagree by more than 3 dB, the band is crowded and the
     2nd-percentile floor is used.
-  - The floor is flat, so it is blind to roll-off: every region it finds is flagged
-    unreliable. Task 8 turns that into reduced confidence. The always-on emitter is
-    still found as the primary, never "no region".
+  - The floor is flat, so it is blind to roll-off. A receiver's in-band noise reads as
+    one false region reaching 0.373–0.475 fs from the center (15 dB roll-off, 60–90%
+    flat passbands). A region reaching the outer 15% of the band (`touches_edge_zone`)
+    cannot be told from it; Task 8 flags such a primary and routing caps it. Regions
+    are otherwise judged by `bandwidth_is_reliable`, as in reference mode.
+  - The always-on emitter is still found as the primary, never "no region".
 - **Regions.**
   - Bins 6 dB above the floor, with gaps of ≤ 2 bins bridged.
   - The band is circular: the scan starts mid-way through the longest gap, so a signal
@@ -730,7 +768,7 @@ import numpy as np
 import pytest
 
 from dsp import synthetic
-from dsp.segmentation import NFFT, circular_regions, segment_spectrum
+from dsp.segmentation import NFFT, circular_regions, segment_spectrum, touches_edge_zone
 
 FS = 1e6
 N = 1 << 18  # 0.26 s
@@ -799,30 +837,31 @@ def test_wide_emitter_centred_on_dc_is_still_one_region():
     assert region.obw_hz == pytest.approx(100e3, rel=0.05)
 
 
-@pytest.mark.parametrize("occupancy", [0.6, 0.7, 0.85])
-def test_a_wideband_emitter_survives_the_self_floor(occupancy):
+@pytest.mark.parametrize("occupancy, in_edge_zone", [(0.6, False), (0.7, True), (0.85, True)])
+def test_a_wideband_emitter_survives_the_self_floor(occupancy, in_edge_zone):
     """No reference: a median floor sits inside any signal filling half the
     band and erases it; the percentile self floor does not (measured over 10
-    seeds: OBW -0.7%..-1.0% from 55% to 95%). It is blind to roll-off, so
-    every region it finds is flagged unreliable: reduced confidence."""
+    seeds: OBW -0.7%..-1.0% from 55% to 95%). Beyond 0.35 fs it reaches the
+    edge zone, where a self floor cannot tell it from receiver roll-off."""
     rng = np.random.default_rng(7)
     iq = synthetic.band_limited(rng, N, FS, occupancy * FS, 20e3, 1e-3) + synthetic.noise(rng, N, NOISE)
     segmentation = segment_spectrum(iq, FS)
     (region,) = segmentation.regions
     assert region.obw_hz == pytest.approx(occupancy * FS, rel=0.03)
-    assert segmentation.floor_source == "self" and not region.bandwidth_reliable
+    assert segmentation.floor_source == "self" and region.bandwidth_reliable
+    assert touches_edge_zone(region, FS) is in_edge_zone
 
 
-@pytest.mark.parametrize("occupancy", [0.9, 0.95])
-def test_a_crowded_band_is_still_one_region_but_flagged_unreliable(occupancy):
+@pytest.mark.parametrize("occupancy, reliable", [(0.9, True), (0.95, False)])
+def test_a_crowded_band_is_still_one_region(occupancy, reliable):
     """At ~90% the 10th-percentile floor lands inside the signal; the 2nd
-    percentile disagrees by > 3 dB, is used instead, and the region carries
-    step 4's >90% unreliability judgment."""
+    percentile disagrees by > 3 dB and is used instead. The OBW reads just
+    under 90% (reliable) at 90% and over it at 95% (step 4's judgment)."""
     rng = np.random.default_rng(8)
     iq = synthetic.band_limited(rng, N, FS, occupancy * FS, 20e3, 1e-3) + synthetic.noise(rng, N, NOISE)
     (region,) = segment_spectrum(iq, FS).regions
     assert region.obw_hz == pytest.approx(occupancy * FS, rel=0.03)
-    assert not region.bandwidth_reliable
+    assert region.bandwidth_reliable is reliable and touches_edge_zone(region, FS)
 
 
 def test_two_wideband_emitters_and_a_weak_tone():
@@ -921,15 +960,24 @@ def test_on_colored_noise_the_reference_floor_measures_the_burst(flat, bandwidth
     assert region.bandwidth_reliable and segmentation.before_trigger == ()
 
 
-def test_on_colored_noise_the_self_floor_is_fooled_and_says_so():
+@pytest.mark.parametrize("flat", [0.6, 0.8])
+def test_on_colored_noise_the_self_floor_is_fooled_into_the_edge_zone(flat):
     """Without a reference, a flat floor reads the in-band noise of a 15 dB
-    roll-off as one false region hundreds of kHz wide; that is why every
-    self-floor region is flagged unreliable."""
+    roll-off as one false region hundreds of kHz wide, swallowing the burst.
+    Its outer edge reaches 0.373-0.475 fs (60-90% flat, 20 seeds), so it
+    touches the edge zone, which begins at 0.35 fs."""
     rng = np.random.default_rng(13)
     burst = synthetic.band_limited(rng, N, FS, 20e3, 100e3, 1e-4)
-    iq = synthetic.colored_noise(rng, N, FS, NOISE, 0.6, 15.0) + burst
+    iq = synthetic.colored_noise(rng, N, FS, NOISE, flat, 15.0) + burst
     primary = segment_spectrum(iq, FS).primary
-    assert primary.obw_hz > 500e3 and not primary.bandwidth_reliable
+    assert primary.obw_hz > 500e3 and touches_edge_zone(primary, FS)
+
+
+@pytest.mark.parametrize("offset, in_edge_zone", [(300e3, False), (-300e3, False), (450e3, True), (-450e3, True)])
+def test_the_edge_zone_is_the_outer_15_percent_of_the_band_on_each_side(offset, in_edge_zone):
+    rng = np.random.default_rng(21)
+    iq = synthetic.band_limited(rng, N, FS, 30e3, offset, 1e-3) + synthetic.noise(rng, N, NOISE)
+    assert touches_edge_zone(segment_spectrum(iq, FS).primary, FS) is in_edge_zone
 
 
 def test_emitters_already_on_are_context_from_the_reference():
@@ -969,13 +1017,40 @@ def test_a_steep_roll_off_is_not_read_as_context():
 def test_an_always_on_emitter_is_the_primary_from_the_self_floor():
     """An always-on emitter (an LTE downlink) fills its own pre-trigger, so
     no reference frame is quiet: the self floor finds it as the primary,
-    never no region, flagged unreliable."""
+    never no region. Filling 90% of the band, it reaches the edge zone."""
     rng = np.random.default_rng(18)
     iq = synthetic.colored_noise(rng, N, FS, NOISE, 0.8, 15.0) + synthetic.band_limited(rng, N, FS, 0.9 * FS, 0.0, 1e-3)
     segmentation = segment_spectrum(iq, FS, iq[:PRE])
     assert segmentation.floor_source == "self"
     assert segmentation.primary.obw_hz == pytest.approx(0.9 * FS, rel=0.03)
-    assert not segmentation.primary.bandwidth_reliable
+    assert touches_edge_zone(segmentation.primary, FS)
+
+
+def test_the_recorded_trigger_threshold_selects_the_quiet_reference():
+    """An emitter already on below the trigger threshold, then a burst that
+    adds under 3 dB to the band. Step 4's recorded threshold finds the quiet
+    pre-trigger, so the burst is the primary and the emitter is context (20
+    of 20 seeds). The 3 dB fallback finds no quiet frame (16 of 20), and its
+    self floor makes the older, stronger emitter the primary."""
+    rng = np.random.default_rng(20)
+    burst = synthetic.band_limited(rng, N, FS, 50e3, 200e3, 5e-5)
+    burst[:PRE] = 0
+    iq = synthetic.noise(rng, N, NOISE) + synthetic.band_limited(rng, N, FS, 20e3, -250e3, 1e-4) + burst
+    recorded = segment_spectrum(iq, FS, iq[:PRE], threshold_dbfs=-38.5)
+    assert recorded.floor_source == "pre_trigger"
+    assert [region.center_offset_hz for region in recorded.regions] == [pytest.approx(200e3, abs=2 * BIN_HZ)]
+    assert [region.center_offset_hz for region in recorded.before_trigger] == [pytest.approx(-250e3, abs=2 * BIN_HZ)]
+    fallback = segment_spectrum(iq, FS, iq[:PRE])
+    assert fallback.floor_source == "self"
+    assert fallback.primary.center_offset_hz == pytest.approx(-250e3, abs=2 * BIN_HZ)
+
+
+def test_a_recorded_threshold_the_pre_trigger_exceeds_means_no_reference():
+    """An always-on emitter that retriggered fills its pre-trigger above the
+    threshold, so no frame is quiet and the self floor is used."""
+    rng = np.random.default_rng(14)
+    iq = synthetic.noise(rng, N, NOISE) + synthetic.band_limited(rng, N, FS, 300e3, -100e3, 1e-3)
+    assert segment_spectrum(iq, FS, iq[:PRE], threshold_dbfs=-35.0).floor_source == "self"
 
 
 def test_a_reference_holding_the_signal_falls_back_to_the_self_floor():
@@ -1223,18 +1298,20 @@ carries a usable reference -- the quiet frames (dsp.spectral.quiet_reference)
 of its "pre_trigger" samples -- the burst-time spectrum is measured against
 step 4's per-bin floor of them (noise_floor_psd), raised to the reference's
 own spectrum where that is higher, so an emitter already on before the
-trigger leaves no residual to pose as the burst. Step 4 gates on its trigger
-threshold, which the agent does not know, so a frame counts as quiet 3 dB
-below the snippet's active frames. The emitters already on are found in the
-reference itself, against a roll-off-aware local floor (the median of a
+trigger leaves no residual to pose as the burst. A frame is quiet below step
+4's trigger threshold, as its SigMF records it; for a snippet without one,
+3 dB below the snippet's active frames. The emitters already on are found in
+the reference itself, against a roll-off-aware local floor (the median of a
 sliding 65-bin window), and are context only.
 
 Without at least 8 quiet frames (no annotation, too short, or a continuous
 emitter retriggering after its cooldown, which fills its own pre-trigger),
 a self floor is estimated from the burst-time PSD -- a bias-corrected
 percentile, never the median, which sits inside any signal occupying half
-the band or more and erases it -- and every region is flagged unreliable:
-that floor is flat, so it is blind to roll-off.
+the band or more and erases it. That floor is flat, so it is blind to
+roll-off: a receiver's in-band noise reads as a false region reaching
+towards the band edges, and touches_edge_zone() marks the regions that
+cannot be told from one.
 
 The band is treated as circular, as dsp.features.channelize treats it: a
 signal straddling the +-fs/2 edge is one region, not two.
@@ -1260,13 +1337,23 @@ _ACTIVE_MARGIN = 2.0  # 3 dB above the quiet-frame level marks an active frame
 _MIN_ACTIVE_FRAMES = 16  # fewer than this and the loudest frames are used instead
 _REGION_THRESHOLD = 4.0  # 6 dB above the per-bin noise floor
 _MERGE_GAP_BINS = 2  # gaps this narrow (the masked DC bin, ripple) are bridged
-# A pre-trigger frame is quiet 3 dB below the active frames' mean power
-# (dsp.spectral.quiet_reference then needs at least 8 of them).
+# Without a recorded trigger threshold, a pre-trigger frame is quiet 3 dB
+# below the active frames' mean power (dsp.spectral.quiet_reference then
+# needs at least 8 of them).
 _QUIET_REFERENCE_RATIO = 2.0
+# Self floor on a receiver's roll-off: the in-band noise reads as one false
+# region whose outer edge, measured over 20 seeds with 60-90% flat passbands
+# and a 15 dB cosine roll-off, reaches 0.373-0.475 fs from the center (0.393+
+# at 20 dB). A self-floor region reaching the outer 15% of the band on either
+# side (beyond 0.35 fs) is therefore indistinguishable from it; 10% would
+# miss the 60% and 70% flat cases. Milder roll-offs (8-12 dB) can instead
+# widen a central region without reaching the zone: no width catches those,
+# and only a real receiver's measured roll-off can say how often they occur.
+EDGE_ZONE_FRACTION = 0.15
 # Self floor: the 10th-percentile bin sits inside a signal filling more than
 # ~90% of the band; the 2nd-percentile one stays noise-only up to ~98%. When
 # they disagree by more than 3 dB the band is crowded and the deep floor is
-# used. Either way every self-floor region is flagged unreliable.
+# used.
 _SELF_FLOOR_PERCENTILE = 10.0
 _DEEP_FLOOR_PERCENTILE = 2.0
 _CROWDED_RATIO = 2.0
@@ -1305,7 +1392,7 @@ class SpectralRegion:
 class Segmentation:
     regions: tuple[SpectralRegion, ...]  # during the burst, strongest first: [0] is the primary
     before_trigger: tuple[SpectralRegion, ...]  # emitters already on in the reference: context only
-    floor_source: str  # "pre_trigger" (step 4's reference) or "self" (every region unreliable)
+    floor_source: str  # "pre_trigger" (step 4's reference) or "self" (blind to roll-off)
     sample_rate: float
     active_frames: int
     total_frames: int
@@ -1447,10 +1534,21 @@ def _bridge_dc(psd: np.ndarray) -> np.ndarray:
     return bridged
 
 
-def _quiet_reference(reference_iq: np.ndarray | None, active_power: float) -> np.ndarray | None:
+def touches_edge_zone(region: SpectralRegion, sample_rate: float) -> bool:
+    """True when the region reaches the outer EDGE_ZONE_FRACTION of the band
+    on either side, where a self floor cannot tell it from roll-off."""
+    limit = (0.5 - EDGE_ZONE_FRACTION) * sample_rate
+    return region.start_offset_hz < -limit or region.end_offset_hz > limit
+
+
+def _quiet_reference(
+    reference_iq: np.ndarray | None, active_power: float, threshold_dbfs: float | None
+) -> np.ndarray | None:
     if reference_iq is None:
         return None
-    return quiet_reference(reference_iq, dbfs(active_power / _QUIET_REFERENCE_RATIO), NFFT)
+    if threshold_dbfs is None:
+        threshold_dbfs = dbfs(active_power / _QUIET_REFERENCE_RATIO)
+    return quiet_reference(reference_iq, threshold_dbfs, NFFT)
 
 
 def _self_floor(psd: np.ndarray, frames: int) -> np.ndarray:
@@ -1459,9 +1557,7 @@ def _self_floor(psd: np.ndarray, frames: int) -> np.ndarray:
     return np.full(len(psd), deep if floor > _CROWDED_RATIO * deep else floor)
 
 
-def _regions(
-    psd: np.ndarray, floor: np.ndarray, sample_rate: float, reliable: bool
-) -> tuple[SpectralRegion, ...]:
+def _regions(psd: np.ndarray, floor: np.ndarray, sample_rate: float) -> tuple[SpectralRegion, ...]:
     """Occupied regions of `psd` above `floor`, strongest first."""
     floor = np.maximum(floor, 1e-30)  # all-zero input: no regions, no 0/0
     bin_hz = sample_rate / len(psd)
@@ -1485,7 +1581,7 @@ def _regions(
                 obw_hz=obw,
                 excess_power=power,
                 snr_db=float(10 * np.log10(power / float(floor[bins].sum()))),
-                bandwidth_reliable=reliable and bandwidth_is_reliable(obw, sample_rate, wraps),
+                bandwidth_reliable=bandwidth_is_reliable(obw, sample_rate, wraps),
                 noise_per_bin=float(floor[bins].mean()),
             )
         )
@@ -1493,26 +1589,30 @@ def _regions(
 
 
 def segment_spectrum(
-    iq: np.ndarray, sample_rate: float, reference_iq: np.ndarray | None = None
+    iq: np.ndarray,
+    sample_rate: float,
+    reference_iq: np.ndarray | None = None,
+    threshold_dbfs: float | None = None,
 ) -> Segmentation:
     """Split the capture's burst-time spectrum into occupied regions, and
     find the emitters already on in `reference_iq` (the snippet's
-    pre-trigger samples, if any)."""
+    pre-trigger samples, if any, which lie below the trigger threshold
+    `threshold_dbfs` when step 4 recorded it)."""
     if len(iq) < NFFT:
         raise ValueError(f"Need at least {NFFT} samples, got {len(iq)}")
     powers = frame_powers(iq, NFFT)
     active = active_frame_mask(powers)
     psd = _bridge_dc(welch_psd(iq, NFFT, active))
-    quiet = _quiet_reference(reference_iq, float(np.mean(powers[active])))
+    quiet = _quiet_reference(reference_iq, float(np.mean(powers[active])), threshold_dbfs)
     if quiet is None:
-        regions = _regions(psd, _self_floor(psd, int(active.sum())), sample_rate, reliable=False)
+        regions = _regions(psd, _self_floor(psd, int(active.sum())), sample_rate)
         before: tuple[SpectralRegion, ...] = ()
     else:
         quiet_frames = len(quiet) // NFFT
         reference_psd = _bridge_dc(welch_psd(quiet, NFFT, np.ones(quiet_frames, dtype=bool)))
         floor = np.maximum(np.fft.fftshift(noise_floor_psd(quiet, NFFT)) * psd_scale(NFFT), reference_psd)
-        regions = _regions(psd, floor, sample_rate, reliable=True)
-        before = _regions(reference_psd, local_floor(reference_psd, quiet_frames), sample_rate, reliable=True)
+        regions = _regions(psd, floor, sample_rate)
+        before = _regions(reference_psd, local_floor(reference_psd, quiet_frames), sample_rate)
     return Segmentation(
         regions=regions,
         before_trigger=before,
@@ -1527,7 +1627,7 @@ def segment_spectrum(
 
 <!-- check: t2_green -->
 Run: `python -m pytest tests/dsp/test_segmentation.py -q`
-Expected: PASS, `37 passed`.
+Expected: PASS, `44 passed`.
 
 <!-- check: t2_spectral -->
 Run: `python -m pytest tests/dsp/test_spectral.py -q`
@@ -1538,7 +1638,7 @@ Run: `python -m pytest tests/capture/unknown -q`
 Expected: `exit 0`: step 4's capture tests still pass on the shared floor.
 
 
-- [ ] **Step 5: Prove both floors matter, then revert**
+- [ ] **Step 5: Prove both floors and the edge zone matter, then revert**
 
 Temporarily put back the median self floor the review flagged:
 
@@ -1556,7 +1656,7 @@ with
 ```
 <!-- check: t2_mutant -->
 Run: `python -m pytest tests/dsp/test_segmentation.py -q`
-Expected: FAIL, `8 failed, 29 passed`: every self-floor wideband, crowded and two-wideband case, and `test_an_always_on_emitter_is_the_primary_from_the_self_floor`.
+Expected: FAIL, `9 failed, 35 passed`: every self-floor wideband, crowded, two-wideband, colored-noise and always-on case, including `test_an_always_on_emitter_is_the_primary_from_the_self_floor`.
 
 
 Revert it:
@@ -1575,7 +1675,7 @@ with
 ```
 <!-- check: t2_reverted -->
 Run: `python -m pytest tests/dsp/test_segmentation.py -q`
-Expected: PASS, `37 passed`.
+Expected: PASS, `44 passed`.
 
 
 Then make the context floor a lower envelope (a 20th percentile) instead of the median:
@@ -1594,7 +1694,7 @@ _LOCAL_PERCENTILE = 20.0
 ```
 <!-- check: t2_local_mutant -->
 Run: `python -m pytest tests/dsp/test_segmentation.py -q`
-Expected: FAIL, `1 failed, 36 passed`: `test_a_steep_roll_off_is_not_read_as_context`.
+Expected: FAIL, `1 failed, 43 passed`: `test_a_steep_roll_off_is_not_read_as_context`.
 
 
 Revert it:
@@ -1613,7 +1713,45 @@ _LOCAL_PERCENTILE = 50.0
 ```
 <!-- check: t2_local_reverted -->
 Run: `python -m pytest tests/dsp/test_segmentation.py -q`
-Expected: PASS, `37 passed`.
+Expected: PASS, `44 passed`.
+
+
+Then narrow the edge zone to 10% per side:
+
+<!-- edit: dsp/segmentation.py -->
+Replace
+
+```python
+EDGE_ZONE_FRACTION = 0.15
+```
+
+with
+
+```python
+EDGE_ZONE_FRACTION = 0.10
+```
+<!-- check: t2_zone_mutant -->
+Run: `python -m pytest tests/dsp/test_segmentation.py -q`
+Expected: FAIL, `2 failed, 42 passed`: the 70% wideband case and `test_on_colored_noise_the_self_floor_is_fooled_into_the_edge_zone[0.6]`.
+
+
+Revert it:
+
+<!-- edit: dsp/segmentation.py -->
+Replace
+
+```python
+EDGE_ZONE_FRACTION = 0.10
+```
+
+with
+
+```python
+EDGE_ZONE_FRACTION = 0.15
+```
+<!-- check: t2_zone_reverted -->
+Run: `python -m pytest tests/dsp/test_segmentation.py -q`
+Expected: PASS, `44 passed`.
 
 
 - [ ] **Step 6: Commit**
@@ -2066,11 +2204,13 @@ imports from `capture/`.
 - `spectral.py`: dBFS power statistics and occupied bandwidth (used by `capture/unknown`).
 - `segmentation.py`: Welch PSD over active frames, split into occupied regions (Part 4).
   The primary, the burst that triggered capture, is measured against
-  `spectral.noise_floor_psd` of the snippet's quiet pre-trigger frames
-  (`spectral.quiet_reference`). Emitters already on are found in that reference against
-  a local median floor, as context. Without a quiet reference, a percentile self floor
-  is used and every region is flagged unreliable. The band is circular (a signal
-  straddling +-fs/2 is one region), like `features.channelize`.
+  `spectral.noise_floor_psd` of the snippet's pre-trigger frames that are quiet below
+  the recorded trigger threshold (`spectral.quiet_reference`). Emitters already on are
+  found in that reference against a local median floor, as context. Without a quiet
+  reference, a percentile self floor is used; `touches_edge_zone` marks regions in the
+  outer 15% of the band, which that flat floor cannot tell from receiver roll-off. The
+  band is circular (a signal straddling +-fs/2 is one region), like
+  `features.channelize`.
 - `features.py`: channelize one region and measure it: fine OBW and center, duty cycle,
   bursts, PAPR, spectral flatness, symbol rate (Part 4).
 - `synthetic.py`: deterministic test signals with known answers (tone, band-limited noise,
@@ -2449,7 +2589,7 @@ def install_agent_boundary(
         # would read ':word' as a bind parameter, and the driver only parses
         # '%' placeholders when parameters are passed, so the file's
         # format('%I', ...) reaches PostgreSQL untouched.
-        conn.connection.driver_connection.cursor().execute(sql)
+        conn.connection.cursor().execute(sql)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -3638,30 +3778,118 @@ git commit -m "feat: add the agent database gateway with a connect-time boundary
 
 ---
 
-### Task 6: Contained, capped SigMF snippet reader
+### Task 6: Step 4 records its trigger threshold; the contained, capped SigMF snippet reader
 
 **Files:**
+- Modify (step 4, additive): `capture/unknown/snippet_writer.py` (record the threshold),
+  `capture/unknown/service.py` (pass it). PR #5 stays frozen, so this lands here.
 - Create: `agent/snippet_reader.py`
 - Test: `tests/agent/test_snippet_reader.py`, which writes real step-4 snippets with
-  `capture.unknown.snippet_writer`.
+  `capture.unknown.snippet_writer`; plus tests added to step 4's
+  `tests/capture/unknown/test_snippet_writer.py` and `tests/capture/unknown/test_service.py`.
 
 **Interfaces:**
-- Consumes: sigmf and numpy only.
-- Produces, in `agent.snippet_reader`:
-  - `SnippetOutsideStore(Exception)`: a judgment about the record (→ `needs_review`);
-  - `SnippetUnreadable(Exception)`: stays pending, and counts toward the halt;
-  - `Snippet(iq: complex64 ndarray, sample_rate, center_freq_hz, truncated, pre_trigger_samples=0, non_finite_samples=0)`,
-    frozen:
-    - `pre_trigger_samples` is the length of step 4's `pre_trigger` annotation (start 0,
-      integer length), clipped to the samples read, or 0;
-    - `non_finite_samples` counts the NaN or inf samples, which the reader zeroes so
-      the DSP never sees them. Task 8 turns a non-zero count into reduced confidence.
-      A snippet with no finite sample at all is `SnippetUnreadable`;
-  - `read_snippet(snippet_path: str | None, store_root: Path, record_sample_rate: float | None = None, record_center_hz: float | None = None) -> Snippet`.
-    The record's rate and frequency are authoritative; the file's must agree;
-  - constants `MAX_SECONDS = 2.0`, `MAX_SAMPLES = 1 << 25` and `MIN_SAMPLES = 1024`.
+- Consumes: sigmf and numpy only (the reader); step 4's `CaptureSettings.threshold_dbfs`
+  (the writer's caller).
+- Produces:
+  - in `capture.unknown.snippet_writer`: `THRESHOLD_KEY = "sdr_surveytool:threshold_dbfs"`
+    and a new keyword `write_sigmf_snippet(..., trigger_offset=None, threshold_dbfs=None)`.
+    With both, the `pre_trigger` annotation carries the threshold, and the global
+    declares the optional `sdr_surveytool` extension, so the meta validates without a
+    warning. Without a `pre_trigger` annotation nothing is recorded;
+  - `process_snippet` passes `settings.threshold_dbfs`;
+  - in `agent.snippet_reader`:
+    - `SnippetOutsideStore(Exception)`: a judgment about the record (→ `needs_review`);
+    - `SnippetUnreadable(Exception)`: stays pending, and counts toward the halt;
+    - `THRESHOLD_KEY`, the same string (`agent/` cannot import `capture/`);
+    - `Snippet(iq: complex64 ndarray, sample_rate, center_freq_hz, truncated, pre_trigger_samples=0, non_finite_samples=0, trigger_threshold_dbfs=None)`,
+      frozen:
+      - `pre_trigger_samples` is the length of step 4's `pre_trigger` annotation (start 0,
+        integer length), clipped to the samples read, or 0;
+      - `trigger_threshold_dbfs` is that annotation's recorded threshold. Anything but a
+        finite number below 0 dBFS reads as None: the meta is untrusted, and a crafted
+        +100 dBFS would make an always-on emitter's pre-trigger count as quiet;
+      - `non_finite_samples` counts the NaN or inf samples, which the reader zeroes so
+        the DSP never sees them. Task 8 turns a non-zero count into reduced confidence.
+        A snippet with no finite sample at all is `SnippetUnreadable`;
+    - `read_snippet(snippet_path: str | None, store_root: Path, record_sample_rate: float | None = None, record_center_hz: float | None = None) -> Snippet`.
+      The record's rate and frequency are authoritative; the file's must agree;
+    - constants `MAX_SECONDS = 2.0`, `MAX_SAMPLES = 1 << 25` and `MIN_SAMPLES = 1024`.
 
 - [ ] **Step 1: Write the failing tests**
+
+Append to step 4's `tests/capture/unknown/test_snippet_writer.py`:
+
+<!-- append: tests/capture/unknown/test_snippet_writer.py -->
+```python
+
+
+def test_the_trigger_threshold_is_recorded_on_the_pre_trigger_annotation(tmp_path):
+    """Part 4 selects its quiet noise-reference frames with the exact
+    threshold capture used. The field lives in a declared, optional SigMF
+    extension, so the meta still validates without a warning."""
+    data_path = write_sigmf_snippet(IQ, tmp_path, 2e6, 915e6, START, trigger_offset=100, threshold_dbfs=-37.5)
+    recording = sigmffile.fromfile(str(data_path))
+    pre_trigger, burst = recording.get_annotations()
+    assert pre_trigger[snippet_writer.THRESHOLD_KEY] == -37.5
+    assert snippet_writer.THRESHOLD_KEY not in burst
+    assert recording.get_global_field(sigmf.EXTENSIONS_KEY) == [
+        {"name": "sdr_surveytool", "version": "1.0.0", "optional": True}
+    ]
+    recording.validate()
+
+
+@pytest.mark.parametrize("trigger_offset, threshold", [(100, None), (0, -37.5), (None, -37.5)])
+def test_no_threshold_without_a_pre_trigger_annotation_to_carry_it(tmp_path, trigger_offset, threshold):
+    data_path = write_sigmf_snippet(
+        IQ, tmp_path, 2e6, 915e6, START, trigger_offset=trigger_offset, threshold_dbfs=threshold
+    )
+    recording = sigmffile.fromfile(str(data_path))
+    assert all(snippet_writer.THRESHOLD_KEY not in a for a in recording.get_annotations())
+    assert recording.get_global_field(sigmf.EXTENSIONS_KEY) is None
+```
+
+In step 4's `tests/capture/unknown/test_service.py`, import the key:
+
+<!-- edit: tests/capture/unknown/test_service.py -->
+Replace
+
+```python
+from capture.unknown.snippet_assembler import CapturedSnippet
+
+```
+
+with
+
+```python
+from capture.unknown.snippet_assembler import CapturedSnippet
+from capture.unknown.snippet_writer import THRESHOLD_KEY
+
+```
+
+and add, before `test_snippet_duration_reflects_samples_actually_captured`:
+
+<!-- edit: tests/capture/unknown/test_service.py -->
+Replace
+
+```python
+def test_snippet_duration_reflects_samples_actually_captured(tmp_path):
+```
+
+with
+
+```python
+def test_the_sigmf_records_the_trigger_threshold_for_part_4(tmp_path):
+    settings = _settings(tmp_path)
+    record = process_snippet(_snippet(), settings, "s1", "op1")
+    pre_trigger, _ = sigmffile.fromfile(record.metadata.iq_snippet_path).get_annotations()
+    assert pre_trigger[THRESHOLD_KEY] == settings.threshold_dbfs == -30.0
+
+
+def test_snippet_duration_reflects_samples_actually_captured(tmp_path):
+```
+
+Then the reader's tests:
 
 <!-- write: tests/agent/test_snippet_reader.py -->
 ```python
@@ -3676,6 +3904,7 @@ import sigmf.hashing
 
 import agent.snippet_reader
 from agent.snippet_reader import (
+    THRESHOLD_KEY,
     SnippetOutsideStore,
     SnippetUnreadable,
     read_snippet,
@@ -3763,6 +3992,25 @@ def test_a_malformed_pre_trigger_annotation_means_no_reference(store, annotation
     data = _write(store)
     _edit_meta(data, lambda m: m.update({"annotations": [annotation]}))
     assert read_snippet(str(data), store).pre_trigger_samples == 0
+
+
+def test_step4s_recorded_trigger_threshold_is_read(store):
+    iq = (np.arange(4096) % 7).astype(np.complex64)
+    recorded = write_sigmf_snippet(iq, store, FS, FREQ, START, trigger_offset=1024, threshold_dbfs=-37.5)
+    assert read_snippet(str(recorded), store).trigger_threshold_dbfs == -37.5
+    unrecorded = write_sigmf_snippet(iq, store, FS, FREQ, START, trigger_offset=1024)
+    assert read_snippet(str(unrecorded), store).trigger_threshold_dbfs is None
+
+
+@pytest.mark.parametrize("threshold", ["-30", True, float("nan"), float("inf"), 0.0, 100.0, None])
+def test_a_malformed_threshold_means_none_not_unreadable(store, threshold):
+    """The meta is untrusted: a crafted threshold (say +100 dBFS, which would
+    make an always-on emitter's pre-trigger count as quiet) is ignored."""
+    data = _write(store)
+    annotation = {"core:label": "pre_trigger", "core:sample_start": 0, "core:sample_count": 1024}
+    _edit_meta(data, lambda m: m.update({"annotations": [{**annotation, THRESHOLD_KEY: threshold}]}))
+    snippet = read_snippet(str(data), store)
+    assert (snippet.pre_trigger_samples, snippet.trigger_threshold_dbfs) == (1024, None)
 
 
 def test_the_reference_is_clipped_to_what_was_read(store, monkeypatch):
@@ -3886,12 +4134,171 @@ def test_too_short_snippet_is_unreadable(store):
 
 - [ ] **Step 2: Run them to verify they fail**
 
+<!-- check: t6_red_writer -->
+Run: `python -m pytest tests/capture/unknown/test_snippet_writer.py -q`
+Expected: FAIL, `4 failed`: `write_sigmf_snippet() got an unexpected keyword argument 'threshold_dbfs'`.
+
 <!-- check: t6_red -->
-Run: `python -m pytest tests/agent/test_snippet_reader.py -q`
-Expected: collection ERROR, `ModuleNotFoundError: No module named 'agent.snippet_reader'`.
+Run: `python -m pytest tests/capture/unknown/test_service.py tests/agent/test_snippet_reader.py -q`
+Expected: collection ERRORs, `2 errors`: `ImportError: cannot import name 'THRESHOLD_KEY'` and `ModuleNotFoundError: No module named 'agent.snippet_reader'`.
 
 
 - [ ] **Step 3: Implement**
+
+In step 4's `capture/unknown/snippet_writer.py`:
+
+<!-- edit: capture/unknown/snippet_writer.py -->
+Replace
+
+```python
+_RECORDER = "sdr-surveytool capture.unknown"
+
+```
+
+with
+
+```python
+_RECORDER = "sdr-surveytool capture.unknown"
+# The trigger threshold rides on the "pre_trigger" annotation under this
+# project's own SigMF extension namespace, declared (optional) in the global.
+THRESHOLD_KEY = "sdr_surveytool:threshold_dbfs"
+_EXTENSION = {"name": "sdr_surveytool", "version": "1.0.0", "optional": True}
+
+```
+
+<!-- edit: capture/unknown/snippet_writer.py -->
+Replace
+
+```python
+    trigger_offset: int | None = None,
+) -> Path:
+```
+
+with
+
+```python
+    trigger_offset: int | None = None,
+    threshold_dbfs: float | None = None,
+) -> Path:
+```
+
+<!-- edit: capture/unknown/snippet_writer.py -->
+Replace
+
+```python
+    dsp.spectral.noise_floor_psd expects, and "burst" from the trigger on. The basename carries a random suffix, so
+    concurrent capture processes can never collide.
+
+```
+
+with
+
+```python
+    dsp.spectral.noise_floor_psd expects, and "burst" from the trigger on.
+    `threshold_dbfs`, the trigger threshold those pre-trigger samples are
+    below, is recorded on the "pre_trigger" annotation (THRESHOLD_KEY), so a
+    reader can select the same quiet frames capture's own bandwidth
+    measurement used (dsp.spectral.quiet_reference). The basename carries a
+    random suffix, so concurrent capture processes can never collide.
+
+```
+
+<!-- edit: capture/unknown/snippet_writer.py -->
+Replace
+
+```python
+        meta = SigMFFile(
+            data_file=str(data_path),
+            global_info={
+                sigmf.DATATYPE_KEY: "cf32_le",
+                sigmf.SAMPLE_RATE_KEY: float(sample_rate),
+                sigmf.RECORDER_KEY: _RECORDER,
+                sigmf.DESCRIPTION_KEY: "Energy-triggered unknown-signal snippet",
+            },
+        )
+```
+
+with
+
+```python
+        global_info = {
+            sigmf.DATATYPE_KEY: "cf32_le",
+            sigmf.SAMPLE_RATE_KEY: float(sample_rate),
+            sigmf.RECORDER_KEY: _RECORDER,
+            sigmf.DESCRIPTION_KEY: "Energy-triggered unknown-signal snippet",
+        }
+        records_threshold = threshold_dbfs is not None and bool(trigger_offset)
+        if records_threshold:
+            global_info[sigmf.EXTENSIONS_KEY] = [dict(_EXTENSION)]
+        meta = SigMFFile(data_file=str(data_path), global_info=global_info)
+```
+
+<!-- edit: capture/unknown/snippet_writer.py -->
+Replace
+
+```python
+            _annotate_trigger(meta, trigger_offset, len(iq))
+```
+
+with
+
+```python
+            _annotate_trigger(meta, trigger_offset, len(iq), threshold_dbfs if records_threshold else None)
+```
+
+<!-- edit: capture/unknown/snippet_writer.py -->
+Replace
+
+```python
+def _annotate_trigger(meta: SigMFFile, trigger_offset: int, length: int) -> None:
+    if trigger_offset > 0:
+        meta.add_annotation(
+            0,
+            length=trigger_offset,
+            metadata={
+                sigmf.LABEL_KEY: "pre_trigger",
+                sigmf.COMMENT_KEY: "Below the trigger threshold: per-bin noise reference",
+            },
+        )
+```
+
+with
+
+```python
+def _annotate_trigger(
+    meta: SigMFFile, trigger_offset: int, length: int, threshold_dbfs: float | None
+) -> None:
+    if trigger_offset > 0:
+        pre_trigger: dict[str, str | float] = {
+            sigmf.LABEL_KEY: "pre_trigger",
+            sigmf.COMMENT_KEY: "Below the trigger threshold: per-bin noise reference",
+        }
+        if threshold_dbfs is not None:
+            pre_trigger[THRESHOLD_KEY] = float(threshold_dbfs)
+        meta.add_annotation(0, length=trigger_offset, metadata=pre_trigger)
+```
+
+In step 4's `capture/unknown/service.py`, pass the threshold:
+
+<!-- edit: capture/unknown/service.py -->
+Replace
+
+```python
+        trigger_offset=snippet.trigger.sample_index - snippet.start_index,
+    )
+    return str(data_path)
+```
+
+with
+
+```python
+        trigger_offset=snippet.trigger.sample_index - snippet.start_index,
+        threshold_dbfs=settings.threshold_dbfs,
+    )
+    return str(data_path)
+```
+
+Then the reader:
 
 <!-- write: agent/snippet_reader.py -->
 ```python
@@ -3910,6 +4317,9 @@ everything in the .sigmf-meta file. The reader therefore:
 - reads at most 2 s of samples, and never more than MAX_SAMPLES;
 - zeroes NaN/inf samples (DMA or driver corruption) and counts them, as step
   4 does when it measures, so a corrupt sample never crashes the analysis.
+
+It also reads step 4's "pre_trigger" annotation: the noise reference's
+length and the trigger threshold it lies below.
 """
 
 from __future__ import annotations
@@ -3931,6 +4341,10 @@ MAX_SECONDS = 2.0
 MAX_SAMPLES = 1 << 25
 MIN_SAMPLES = 1024  # one coarse FFT frame (dsp.segmentation.NFFT)
 _MAX_META_BYTES = 1 << 20
+# Step 4's writer records its trigger threshold on the "pre_trigger"
+# annotation under this key (capture.unknown.snippet_writer.THRESHOLD_KEY;
+# agent/ cannot import capture/).
+THRESHOLD_KEY = "sdr_surveytool:threshold_dbfs"
 
 
 class SnippetOutsideStore(Exception):
@@ -3954,6 +4368,10 @@ class Snippet:
     # the trigger, the noise reference), clipped to what was read; 0 if none.
     pre_trigger_samples: int = 0
     non_finite_samples: int = 0  # NaN/inf samples, zeroed in `iq`
+    # The trigger threshold the pre-trigger samples lie below, as step 4
+    # recorded it; None when absent or malformed (segmentation then gates
+    # the reference relative to the burst instead).
+    trigger_threshold_dbfs: float | None = None
 
 
 def _contained(path: Path, root: Path) -> Path:
@@ -4007,14 +4425,11 @@ def _samples(
 ) -> Snippet:
     datatype = recording.get_global_field(sigmf.DATATYPE_KEY)
     channels = recording.get_global_field(sigmf.NUM_CHANNELS_KEY, 1)
-    sample_rate = recording.get_global_field(sigmf.SAMPLE_RATE_KEY)
     captures = recording.get_captures()
-    center = captures[0].get(sigmf.FREQUENCY_KEY) if captures else None
     if datatype != "cf32_le" or channels != 1:
         raise SnippetUnreadable(f"{data}: expected one cf32_le channel, got {datatype} x {channels}")
-    for name, value in (("sample rate", sample_rate), ("center frequency", center)):
-        if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-            raise SnippetUnreadable(f"{data}: invalid {name} {value!r}")
+    sample_rate = _positive(data, "sample rate", recording.get_global_field(sigmf.SAMPLE_RATE_KEY))
+    center = _positive(data, "center frequency", captures[0].get(sigmf.FREQUENCY_KEY) if captures else None)
     for name, claimed, actual in (
         ("sample rate", record_sample_rate, sample_rate),
         ("center frequency", record_center_hz, center),
@@ -4033,19 +4448,29 @@ def _samples(
     non_finite = int(iq.size - np.count_nonzero(finite))
     if non_finite == iq.size:
         raise SnippetUnreadable(f"{data}: every sample is NaN or inf")
+    pre_trigger_samples, threshold = _pre_trigger(recording, count)
     return Snippet(
         iq=np.where(finite, iq, 0).astype(np.complex64) if non_finite else iq,
         sample_rate=float(sample_rate),
         center_freq_hz=float(center),
         truncated=recording.sample_count > count,
-        pre_trigger_samples=_pre_trigger_samples(recording, count),
+        pre_trigger_samples=pre_trigger_samples,
         non_finite_samples=non_finite,
+        trigger_threshold_dbfs=threshold,
     )
 
 
-def _pre_trigger_samples(recording: sigmffile.SigMFFile, count: int) -> int:
-    """Step 4 annotates [0, trigger) as "pre_trigger". Anything else (no
-    annotation, another start, a non-integer length) means no reference."""
+def _positive(data: Path, name: str, value: object) -> float:
+    if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise SnippetUnreadable(f"{data}: invalid {name} {value!r}")
+    return float(value)
+
+
+def _pre_trigger(recording: sigmffile.SigMFFile, count: int) -> tuple[int, float | None]:
+    """Step 4 annotates [0, trigger) as "pre_trigger", with the trigger
+    threshold. Anything else (no annotation, another start, a non-integer
+    length) means no reference; a threshold that is not a finite number
+    below full scale (0 dBFS, which step 4 never accepts) means none."""
     for annotation in recording.get_annotations():
         length = annotation.get(sigmf.SAMPLE_COUNT_KEY)
         if (
@@ -4054,23 +4479,29 @@ def _pre_trigger_samples(recording: sigmffile.SigMFFile, count: int) -> int:
             and type(length) is int
             and length > 0
         ):
-            return min(length, count)
-    return 0
+            threshold = annotation.get(THRESHOLD_KEY)
+            valid = type(threshold) in (int, float) and math.isfinite(threshold) and threshold < 0
+            return min(length, count), float(threshold) if valid else None
+    return 0, None
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass, warnings as errors**
+- [ ] **Step 4: Run the tests to verify they pass, warnings as errors for the reader**
 
 <!-- check: t6_green -->
 Run: `python -m pytest tests/agent/test_snippet_reader.py -q -W error`
-Expected: PASS, `30 passed`, with no warnings.
+Expected: PASS, `38 passed`, with no warnings.
+
+<!-- check: t6_capture -->
+Run: `python -m pytest tests/capture/unknown -q`
+Expected: `exit 0`: step 4's capture tests, plus the three new threshold cases.
 
 
 - [ ] **Step 5: Commit**
 
 <!-- run -->
 ```bash
-git add agent/snippet_reader.py tests/agent/test_snippet_reader.py
-git commit -m "feat: add a contained, capped, checksum-free SigMF snippet reader for the agent"
+git add capture/unknown/snippet_writer.py capture/unknown/service.py tests/capture/unknown/test_snippet_writer.py tests/capture/unknown/test_service.py agent/snippet_reader.py tests/agent/test_snippet_reader.py
+git commit -m "feat: record the trigger threshold in snippets and add a contained SigMF reader for the agent"
 ```
 
 ---
@@ -4764,9 +5195,10 @@ git commit -m "feat: add the cited US band table with grounded matching"
 
 **Interfaces:**
 - Consumes:
-  - `dsp.segmentation.segment_spectrum`, `NFFT` and `MAX_CONTEXT_REGIONS` (Task 2);
+  - `dsp.segmentation.segment_spectrum`, `touches_edge_zone`, `NFFT` and
+    `MAX_CONTEXT_REGIONS` (Task 2);
   - `dsp.features.region_features` and `RegionFeatures` (Task 3);
-  - `agent.snippet_reader.Snippet` (Task 6);
+  - `agent.snippet_reader.Snippet` (Task 6), its `trigger_threshold_dbfs` included;
   - `agent.band_table.BandEntry`, `BandMatch` and `match_bands` (Task 7).
 - Produces:
   - `agent.classifier`:
@@ -4781,10 +5213,12 @@ git commit -m "feat: add the cited US band table with grounded matching"
     - `SnippetAnalysis(tuned_center_hz, sample_rate, noise_reference, reduced_confidence: tuple[str, ...], analysed_seconds, truncated, coarse_resolution_hz, primary: RegionFeatures | None, signal_center_hz, context, band_matches, modulation)`,
       with `.grounded_band_ids -> frozenset[str]` and `.modulation_label -> str | None`:
       - `noise_reference` is the floor source. Segmentation gets the snippet's
-        `pre_trigger` samples as its reference;
-      - `reduced_confidence` holds any of `"no_quiet_noise_reference"` (self floor),
+        `pre_trigger` samples as its reference, and its recorded trigger threshold;
+      - `reduced_confidence` holds any of `EDGE_REGION_UNRELIABLE =
+        "edge_region_unreliable"` (a self-floor primary that `touches_edge_zone`),
         `"non_finite_samples"` and `"bandwidth_unreliable"`. Any reason keeps every band
-        match ungrounded;
+        match ungrounded, and Task 9's routing caps it at `needs_review`. A self-floor
+        primary away from the band edges carries no reason and can ground;
     - `analyse_snippet(snippet, bands, classifier) -> SnippetAnalysis`.
   - `agent.prompt`:
     - `SYSTEM_PROMPT`;
@@ -4803,7 +5237,7 @@ import json
 import numpy as np
 import pytest
 
-from agent.analysis import analyse_snippet
+from agent.analysis import EDGE_REGION_UNRELIABLE, analyse_snippet
 from agent.band_table import load_band_table
 from agent.classifier import ModulationPrediction, UnavailableClassifier
 from agent.prompt import build_user_message
@@ -4819,10 +5253,12 @@ BANDS = load_band_table().entries
 PRE = round(0.05 * FS)  # the pre-trigger: everything before the burst
 
 
-def _snippet(iq: np.ndarray, pre_trigger: int = PRE, non_finite: int = 0) -> Snippet:
+def _snippet(
+    iq: np.ndarray, pre_trigger: int = PRE, non_finite: int = 0, threshold: float | None = None
+) -> Snippet:
     return Snippet(
         iq=iq, sample_rate=FS, center_freq_hz=TUNED, truncated=False,
-        pre_trigger_samples=pre_trigger, non_finite_samples=non_finite,
+        pre_trigger_samples=pre_trigger, non_finite_samples=non_finite, trigger_threshold_dbfs=threshold,
     )
 
 
@@ -4851,15 +5287,59 @@ def test_analysis_places_the_primary_in_absolute_frequency_and_grounds_it():
     assert analysis.modulation is None and analysis.grounded_band_ids == {"ism_902_928"}
 
 
-def test_without_a_quiet_reference_confidence_is_reduced_and_nothing_grounds():
-    """The self floor is blind to receiver roll-off (a narrow burst on
-    colored noise reads hundreds of kHz wide), so it never grounds."""
+def test_without_a_quiet_reference_a_central_primary_still_grounds():
     analysis = analyse_snippet(_snippet(_two_emitters(), pre_trigger=0), BANDS, UnavailableClassifier())
-    assert analysis.noise_reference == "self"
-    assert "no_quiet_noise_reference" in analysis.reduced_confidence
+    assert (analysis.noise_reference, analysis.reduced_confidence) == ("self", ())
     assert analysis.signal_center_hz == pytest.approx(915.2e6, abs=2e3)
-    assert analysis.grounded_band_ids == frozenset()
+    assert analysis.grounded_band_ids == {"ism_902_928"}
     assert analysis.context[0].present_before_trigger is None  # no reference to tell
+
+
+def test_on_colored_noise_without_a_reference_the_edge_zone_grounds_nothing():
+    """The self floor reads a 15 dB receiver roll-off as one region some
+    600 kHz wide that swallows the 20 kHz burst. It reaches the band-edge
+    zone, so it is flagged and grounds nothing; with the pre-trigger
+    reference the same capture grounds the burst itself."""
+    rng = np.random.default_rng(24)
+    burst = synthetic.band_limited(rng, N, FS, 20e3, 100e3, 1e-4)
+    burst[:PRE] = 0
+    iq = synthetic.colored_noise(rng, N, FS, 1e-5, 0.6, 15.0) + burst
+    blind = analyse_snippet(_snippet(iq, pre_trigger=0), BANDS, UnavailableClassifier())
+    assert blind.primary.obw_hz > 500e3
+    assert (blind.noise_reference, blind.reduced_confidence) == ("self", (EDGE_REGION_UNRELIABLE,))
+    assert [(m.entry.id, m.grounded) for m in blind.band_matches] == [("ism_902_928", False)]
+    referenced = analyse_snippet(_snippet(iq), BANDS, UnavailableClassifier())
+    assert referenced.primary.obw_hz == pytest.approx(20e3, rel=0.15)
+    assert (referenced.reduced_confidence, referenced.grounded_band_ids) == ((), {"ism_902_928"})
+
+
+def test_the_edge_zone_applies_only_without_a_reference():
+    """A real 125 kHz burst at +420 kHz reaches the zone (beyond 0.35 fs).
+    The self floor cannot vouch for it; the pre-trigger reference can."""
+    rng = np.random.default_rng(25)
+    burst = synthetic.gate(synthetic.band_limited(rng, N, FS, 125e3, 420e3, 1e-3), FS, [(0.05, 0.1)])
+    iq = burst + synthetic.noise(rng, N, 1e-5)
+    assert analyse_snippet(_snippet(iq, pre_trigger=0), BANDS, UnavailableClassifier()).reduced_confidence == (
+        EDGE_REGION_UNRELIABLE,
+    )
+    assert analyse_snippet(_snippet(iq), BANDS, UnavailableClassifier()).grounded_band_ids == {"ism_902_928"}
+
+
+def test_the_recorded_trigger_threshold_reaches_segmentation():
+    """An emitter already on below the trigger threshold plus a weaker
+    burst: with step 4's recorded threshold the burst is the primary; with
+    the 3 dB fallback the self floor makes the older emitter the primary."""
+    pre = round(0.025 * FS)
+    rng = np.random.default_rng(20)
+    burst = synthetic.band_limited(rng, N, FS, 50e3, 200e3, 5e-5)
+    burst[:pre] = 0
+    iq = synthetic.noise(rng, N, 1e-5) + synthetic.band_limited(rng, N, FS, 20e3, -250e3, 1e-4) + burst
+    recorded = analyse_snippet(_snippet(iq, pre_trigger=pre, threshold=-38.5), BANDS, UnavailableClassifier())
+    assert recorded.noise_reference == "pre_trigger"
+    assert recorded.signal_center_hz == pytest.approx(915.2e6, abs=2e3)
+    fallback = analyse_snippet(_snippet(iq, pre_trigger=pre), BANDS, UnavailableClassifier())
+    assert fallback.noise_reference == "self"
+    assert fallback.signal_center_hz == pytest.approx(914.75e6, abs=2e3)
 
 
 def test_non_finite_samples_reduce_confidence():
@@ -4870,13 +5350,13 @@ def test_non_finite_samples_reduce_confidence():
 
 def test_an_always_on_emitter_is_still_the_primary():
     """An always-on emitter fills its own pre-trigger: no quiet reference,
-    so the self floor finds it (with reduced confidence), never nothing."""
+    so the self floor finds it, never nothing. Filling 90% of the band, it
+    reaches the edge zone."""
     rng = np.random.default_rng(23)
     iq = synthetic.band_limited(rng, N, FS, 0.9 * FS, 0.0, 1e-3) + synthetic.noise(rng, N, 1e-5)
     analysis = analyse_snippet(_snippet(iq), BANDS, UnavailableClassifier())
     assert analysis.primary.obw_hz == pytest.approx(0.9 * FS, rel=0.03)
-    assert analysis.noise_reference == "self"
-    assert "no_quiet_noise_reference" in analysis.reduced_confidence
+    assert (analysis.noise_reference, analysis.reduced_confidence) == ("self", (EDGE_REGION_UNRELIABLE,))
 
 
 def test_out_of_table_signal_is_ungrounded_unless_the_classifier_predicts():
@@ -4993,8 +5473,10 @@ emitters go along as context: those already on before the trigger (found in
 the reference) and any other burst-time regions. The primary's absolute
 center and fine OBW are matched against the curated band table; the
 modulation classifier gets the capture. Anything that makes the
-measurements less trustworthy is listed in reduced_confidence and keeps
-every band match ungrounded.
+measurements less trustworthy is listed in reduced_confidence, keeps every
+band match ungrounded, and caps routing at needs_review. Without a quiet
+reference, that includes a primary reaching the band-edge zone, which the
+self floor cannot tell from receiver roll-off (edge_region_unreliable).
 """
 
 from __future__ import annotations
@@ -5006,7 +5488,16 @@ from agent.band_table import BandEntry, BandMatch, match_bands
 from agent.classifier import ModulationClassifier, ModulationPrediction
 from agent.snippet_reader import Snippet
 from dsp.features import RegionFeatures, region_features
-from dsp.segmentation import MAX_CONTEXT_REGIONS, NFFT, Segmentation, SpectralRegion, segment_spectrum
+from dsp.segmentation import (
+    MAX_CONTEXT_REGIONS,
+    NFFT,
+    Segmentation,
+    SpectralRegion,
+    segment_spectrum,
+    touches_edge_zone,
+)
+
+EDGE_REGION_UNRELIABLE = "edge_region_unreliable"
 
 
 @dataclass(frozen=True)
@@ -5049,18 +5540,21 @@ def analyse_snippet(
     snippet: Snippet, bands: tuple[BandEntry, ...], classifier: ModulationClassifier
 ) -> SnippetAnalysis:
     reference = snippet.iq[: snippet.pre_trigger_samples] if snippet.pre_trigger_samples else None
-    segmentation = segment_spectrum(snippet.iq, snippet.sample_rate, reference)
+    segmentation = segment_spectrum(snippet.iq, snippet.sample_rate, reference, snippet.trigger_threshold_dbfs)
     primary_region = segmentation.primary
     primary = None if primary_region is None else region_features(snippet.iq, segmentation, primary_region)
-    signal_center = None if primary is None else snippet.center_freq_hz + primary.center_offset_hz
-    reasons = _reduced_confidence(segmentation.floor_source, snippet.non_finite_samples, primary)
+    reasons = _reduced_confidence(segmentation, snippet.non_finite_samples, primary_region, primary)
     context = () if primary_region is None else _context(snippet, segmentation, primary_region)
-    # Any reduced-confidence reason keeps every match ungrounded: an
-    # unreliable bandwidth makes the OBW plausibility check meaningless.
-    matches = () if primary is None else tuple(
-        BandMatch(match.entry, match.grounded and not reasons)
-        for match in match_bands(bands, signal_center, primary.obw_hz)
-    )
+    signal_center: float | None = None
+    matches: tuple[BandMatch, ...] = ()
+    if primary is not None:
+        signal_center = snippet.center_freq_hz + primary.center_offset_hz
+        # Any reduced-confidence reason keeps every match ungrounded: an
+        # unreliable bandwidth makes the OBW plausibility check meaningless.
+        matches = tuple(
+            BandMatch(match.entry, match.grounded and not reasons)
+            for match in match_bands(bands, signal_center, primary.obw_hz)
+        )
     return SnippetAnalysis(
         tuned_center_hz=snippet.center_freq_hz,
         sample_rate=snippet.sample_rate,
@@ -5077,10 +5571,19 @@ def analyse_snippet(
     )
 
 
-def _reduced_confidence(floor_source: str, non_finite: int, primary: RegionFeatures | None) -> tuple[str, ...]:
+def _reduced_confidence(
+    segmentation: Segmentation,
+    non_finite: int,
+    primary_region: SpectralRegion | None,
+    primary: RegionFeatures | None,
+) -> tuple[str, ...]:
     reasons = []
-    if floor_source == "self":
-        reasons.append("no_quiet_noise_reference")  # the self floor is blind to roll-off
+    if (
+        segmentation.floor_source == "self"
+        and primary_region is not None
+        and touches_edge_zone(primary_region, segmentation.sample_rate)
+    ):
+        reasons.append(EDGE_REGION_UNRELIABLE)  # may be the receiver's roll-off, not a signal
     if non_finite:
         reasons.append("non_finite_samples")
     if primary is not None and not primary.bandwidth_reliable:
@@ -5131,8 +5634,11 @@ frequency falls in. Call record_classification exactly once.
 - confidence: the probability your tag is right. Above 0.85 only when the features agree
   with a grounded band-table entry. Spectral features alone rarely justify high confidence.
   bandwidth_reliable false means the occupied bandwidth could not be measured (the signal
-  fills the capture or wraps its edge); reduced_confidence lists why the measurements are
+  fills the capture or wraps its edge). reduced_confidence lists why the measurements are
   less trustworthy, and no tag is accepted without review while it is non-empty.
+  edge_region_unreliable means that, with no quiet noise reference (noise_reference
+  "self"), the primary emitter reaches the outer band edges, where the receiver's noise
+  roll-off can pose as a signal.
   Other emitters with present_before_trigger true were already on before the capture
   triggered; the primary emitter is the one that triggered it.
 - reasoning: the evidence, and any alternative identities you considered.
@@ -5147,8 +5653,8 @@ def _round(value: float | None) -> float | None:
 
 
 def build_user_message(analysis: SnippetAnalysis) -> str:
-    primary = analysis.primary
-    if primary is None:
+    primary, center_hz = analysis.primary, analysis.signal_center_hz
+    if primary is None or center_hz is None:
         raise ValueError("No primary region: there is nothing to classify")
     payload = {
         "capture": {
@@ -5160,7 +5666,7 @@ def build_user_message(analysis: SnippetAnalysis) -> str:
             "reduced_confidence": list(analysis.reduced_confidence),
         },
         "primary_emitter": {
-            "center_mhz": _round(analysis.signal_center_hz / 1e6),
+            "center_mhz": _round(center_hz / 1e6),
             "occupied_bandwidth_khz": _round(primary.obw_hz / 1e3),
             "snr_db": _round(primary.snr_db),
             "duty_cycle": _round(primary.duty_cycle),
@@ -5211,7 +5717,7 @@ def build_user_message(analysis: SnippetAnalysis) -> str:
 
 <!-- check: t8_green -->
 Run: `python -m pytest tests/agent/test_analysis_prompt.py -q`
-Expected: PASS, `8 passed`.
+Expected: PASS, `11 passed`.
 
 
 - [ ] **Step 5: Commit**
@@ -5233,8 +5739,8 @@ git commit -m "feat: add snippet analysis, the classifier seam and the agent pro
   `tests/agent/test_llm_live.py` (optional, skipped by default)
 
 **Interfaces:**
-- Consumes: anthropic, pydantic and `ClassificationStatus`. The live test also uses
-  Tasks 6–8.
+- Consumes: anthropic, pydantic and `ClassificationStatus`; the routing test uses
+  `agent.analysis.EDGE_REGION_UNRELIABLE` (Task 8). The live test also uses Tasks 6–8.
 - Produces:
   - `agent.llm`:
     - `DEFAULT_MODEL = "claude-sonnet-5-5"`, `DEFAULT_MAX_TOKENS = 1024`,
@@ -5252,9 +5758,11 @@ git commit -m "feat: add snippet analysis, the classifier seam and the agent pro
   - `agent.routing`:
     - `AUTO_CLASSIFY_CONFIDENCE = 0.85`, `MAX_REASONING_CHARS = 4000`;
     - `Decision(status, tag, confidence, reasoning)`, frozen;
-    - `route(classification, grounded_band_ids: frozenset[str], modulation_label: str | None) -> Decision`.
-      It returns `auto_classified` only when the tag's band prefix (before the first `:`)
-      is a grounded id, or its last part equals the modulation label;
+    - `route(classification, grounded_band_ids: frozenset[str], modulation_label: str | None, reduced_confidence: tuple[str, ...] = ()) -> Decision`.
+      It returns `auto_classified` only when there is no reduced-confidence reason, and
+      the tag's band prefix (before the first `:`) is a grounded id or its last part
+      equals the modulation label. A reason caps even a matching modulation label: a
+      self-floor primary in the band-edge zone may be receiver roll-off, not a signal;
     - `needs_review(reason) -> Decision`, with a NULL tag, confidence 0 and the reason
       truncated to 4000 characters.
 
@@ -5419,6 +5927,7 @@ def test_connection_errors_and_timeouts_are_transient():
 # tests/agent/test_routing.py
 import pytest
 
+from agent.analysis import EDGE_REGION_UNRELIABLE
 from agent.llm import Classification
 from agent.routing import AUTO_CLASSIFY_CONFIDENCE, needs_review, route
 from schema.records import ClassificationStatus
@@ -5462,6 +5971,17 @@ def test_everything_else_needs_review_keeping_the_models_answer(classification, 
     assert decision.status is ClassificationStatus.NEEDS_REVIEW
     assert (decision.tag, decision.confidence) == (classification.tag, classification.confidence)
     assert decision.reasoning.startswith("Because.") and why in decision.reasoning
+
+
+@pytest.mark.parametrize("reasons", [(EDGE_REGION_UNRELIABLE,), ("non_finite_samples", "bandwidth_unreliable")])
+def test_any_reduced_confidence_reason_caps_at_needs_review(reasons):
+    """A self-floor primary in the band-edge zone may be the receiver's
+    roll-off, not a signal: neither a grounded band nor a matching
+    modulation label can auto-classify it, nor any other reason's record."""
+    for grounded, modulation in ((GROUNDED, None), (frozenset(), "lora")):
+        decision = route(_c(confidence=0.99), grounded, modulation, reasons)
+        assert decision.status is ClassificationStatus.NEEDS_REVIEW
+        assert f"reduced confidence ({', '.join(reasons)})" in decision.reasoning
 
 
 def test_routed_reasoning_fits_the_db_limit():
@@ -5670,10 +6190,11 @@ def is_transient(exc: BaseException) -> bool:
 ```python
 # agent/routing.py
 """Confidence-based routing (pure). auto_classified needs a tag, confidence
->= 0.85, AND grounding of that very tag: its band prefix (the part before
-the first ':') is the id of a grounded band-table entry, or its last part is
-the modulation classifier's label. Everything else is needs_review, which is
-terminal for the agent."""
+>= 0.85, no reduced-confidence reason (agent.analysis; e.g.
+edge_region_unreliable), AND grounding of that very tag: its band prefix
+(the part before the first ':') is the id of a grounded band-table entry, or
+its last part is the modulation classifier's label. Everything else is
+needs_review, which is terminal for the agent."""
 
 from __future__ import annotations
 
@@ -5695,11 +6216,16 @@ class Decision:
 
 
 def route(
-    classification: Classification, grounded_band_ids: frozenset[str], modulation_label: str | None
+    classification: Classification,
+    grounded_band_ids: frozenset[str],
+    modulation_label: str | None,
+    reduced_confidence: tuple[str, ...] = (),
 ) -> Decision:
     tag = classification.tag
     if tag is None:
         why = "the model proposed no tag"
+    elif reduced_confidence:
+        why = f"reduced confidence ({', '.join(reduced_confidence)})"
     elif classification.confidence < AUTO_CLASSIFY_CONFIDENCE:
         why = f"confidence {classification.confidence:.2f} is below {AUTO_CLASSIFY_CONFIDENCE:.2f}"
     elif not grounded_band_ids and modulation_label is None:
@@ -5752,7 +6278,7 @@ with
 
 <!-- check: t9_green -->
 Run: `python -m pytest tests/agent/test_llm.py tests/agent/test_routing.py tests/agent/test_llm_live.py -q`
-Expected: PASS, `39 passed, 1 skipped`. The skip is the live test.
+Expected: PASS, `41 passed, 1 skipped`. The skip is the live test.
 
 
 The live test is skipped. To run it, which costs a few thousand tokens:
@@ -5804,7 +6330,7 @@ Failure handling, as tested:
 | Startup: relative root, or none of the 5 newest pending snippets reads | `SystemicFault` ("mount the store read-only at the identical resolved path") |
 | No snippet (`iq_snippet_path` NULL) | `needs_review` at once: NULL tag, the flag named, no LLM call, never counted toward a halt |
 | Snippet outside the store | Held pending. Goes to `needs_review` once a later snippet is analysed |
-| Always-on emitter (no quiet pre-trigger frame) | Classified from the self floor with `reduced_confidence`; it is the primary, never "no region", and never counts toward a halt |
+| Always-on emitter (no quiet pre-trigger frame) | Classified from the self floor; it is the primary, never "no region", and never counts toward a halt. Reaching the band-edge zone, it is capped at `needs_review` (`edge_region_unreliable`); away from it, it can be `auto_classified` |
 | Some samples NaN or inf | Zeroed and counted; classified with `reduced_confidence` |
 | Snippet unreadable (every sample non-finite included), no occupied region, or feature extraction failed | Stays pending |
 | 5 snippet failures of any kind in a row | `SystemicFault` naming the ids and `--start-after-id`, with nothing marked |
@@ -5917,15 +6443,15 @@ def store(tmp_path) -> Path:
     return tmp_path / "snippets"
 
 
-def _snippet_record(store: Path, record_id: int, quiet: bool = False, always_on: bool = False) -> PendingRecord:
+def _snippet_record(store: Path, record_id: int, quiet: bool = False, always_on: float = 0.0) -> PendingRecord:
     """A real step-4 SigMF pair with its 50 ms pre_trigger annotation: a
     125 kHz burst at 915.2 MHz from the trigger on, noise only, or an
-    always-on emitter filling 90% of the band (and its own pre-trigger)."""
+    always-on emitter filling `always_on` of the band (and its own pre-trigger)."""
     rng = np.random.default_rng(record_id)
     n = 1 << 18
     iq = synthetic.noise(rng, n, 1e-5)
     if always_on:
-        iq = iq + synthetic.band_limited(rng, n, FS, 0.9 * FS, 0.0, 1e-3)
+        iq = iq + synthetic.band_limited(rng, n, FS, always_on * FS, 0.0, 1e-3)
     elif not quiet:
         iq = iq + synthetic.gate(synthetic.band_limited(rng, n, FS, 125e3, 200e3, 1e-3), FS, [(0.05, 0.1)])
     path = write_sigmf_snippet(iq, store, FS, TUNED, START, trigger_offset=round(0.05 * FS))
@@ -6076,17 +6602,21 @@ def test_a_snippet_with_no_occupied_region_stays_pending_and_counts(store):
     assert gateway.submitted == [] and client.requests == []
 
 
-def test_an_always_on_emitter_is_classified_and_never_trips_a_halt(store):
+@pytest.mark.parametrize("width, status", [(0.9, REVIEW), (0.1, AUTO)])
+def test_an_always_on_emitter_is_classified_and_never_trips_a_halt(store, width, status):
     """An always-on emitter (an LTE downlink) retriggers after every
     cooldown and fills its own pre-trigger, so there is no quiet reference.
     It is still found as the primary region every time -- never 'no
-    region' -- with reduced confidence, so it goes to review, not a halt."""
-    gateway = FakeGateway([_snippet_record(store, i, always_on=True) for i in range(1, 8)])
+    region' -- and never halts the agent. Filling 90% of the band it reaches
+    the self floor's edge zone and is capped at needs_review; a central
+    100 kHz one is grounded and auto-classified."""
+    gateway = FakeGateway([_snippet_record(store, i, always_on=width) for i in range(1, 8)])
     client = ScriptedClient([{**GOOD, "tag": "ism_902_928:lte", "confidence": 0.95}] * 7)
     assert _agent(gateway, client, store).run_batch() == 7
     assert len(client.requests) == 7
-    assert [(s[0], s[1]) for s in gateway.submitted] == [(i, REVIEW) for i in range(1, 8)]
-    assert all("no grounded band-table match" in s[4] for s in gateway.submitted)
+    assert [(s[0], s[1]) for s in gateway.submitted] == [(i, status) for i in range(1, 8)]
+    if status is REVIEW:
+        assert all("reduced confidence (edge_region_unreliable)" in s[4] for s in gateway.submitted)
 
 
 def test_an_analysed_snippet_resets_the_streak(store):
@@ -6316,6 +6846,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import cast
 
 import anthropic
 
@@ -6490,7 +7021,12 @@ class ClassificationAgent:
         if result.classification is None:
             self._hold_bad_output(record.id, needs_review(f"Model output failed validation: {result.failure}"))
             return None
-        decision = route(result.classification, analysis.grounded_band_ids, analysis.modulation_label)
+        decision = route(
+            result.classification,
+            analysis.grounded_band_ids,
+            analysis.modulation_label,
+            analysis.reduced_confidence,
+        )
         self._unwritten[record.id] = decision  # before anything else can fail
         self._release_bad_outputs()
         return decision
@@ -6679,9 +7215,12 @@ def main(argv: list[str] | None = None) -> None:
         max_tokens=args.max_tokens,
         daily_token_budget=args.daily_token_budget,
     )
+    client = anthropic.Anthropic(api_key=api_key, max_retries=_SDK_MAX_RETRIES, timeout=_SDK_TIMEOUT_SECONDS)
     agent = ClassificationAgent(
         gateway,
-        anthropic.Anthropic(api_key=api_key, max_retries=_SDK_MAX_RETRIES, timeout=_SDK_TIMEOUT_SECONDS),
+        # The SDK's overloaded messages.create (streaming variants included)
+        # is wider than the one call MessagesClient describes.
+        cast(MessagesClient, client),
         settings,
         load_band_table(Path(args.band_table)).entries,
         start_after_id=args.start_after_id,
@@ -6725,7 +7264,7 @@ sdr-agent-boundary
 
 <!-- check: t10_green -->
 Run: `python -m pytest tests/agent/test_service.py -q`
-Expected: PASS, `42 passed` in about 5 s.
+Expected: PASS, `43 passed` in about 5 s.
 
 
 - [ ] **Step 5: Prove that the LLM is never asked twice, then revert**
@@ -6746,7 +7285,7 @@ with
 ```
 <!-- check: t10_mutant -->
 Run: `python -m pytest tests/agent/test_service.py -q`
-Expected: FAIL, `1 failed, 41 passed`: `test_the_llm_is_never_asked_twice_for_a_record`.
+Expected: FAIL, `1 failed, 42 passed`: `test_the_llm_is_never_asked_twice_for_a_record`.
 
 
 Revert it:
@@ -6765,7 +7304,7 @@ with
 ```
 <!-- check: t10_reverted -->
 Run: `python -m pytest tests/agent/test_service.py -q`
-Expected: PASS, `42 passed`.
+Expected: PASS, `43 passed`.
 
 
 - [ ] **Step 6: Commit**
@@ -7187,8 +7726,13 @@ against a small curated US band table with eCFR citations, and asks Claude for o
 forced `record_classification` tool call. Routing writes `auto_classified` only when the
 confidence is >= 0.85 and the tag's band prefix (`ism_902_928` in `ism_902_928:lora`) is
 a band-table entry the signal is grounded in; everything else goes to `needs_review`.
-Any `reduced_confidence` reason (no quiet pre-trigger noise reference, NaN or inf
-samples, an unreliable bandwidth) keeps every band match ungrounded.
+The noise reference is the snippet's pre-trigger, below the trigger threshold step 4
+records in the SigMF. Any `reduced_confidence` reason (NaN or inf samples, an unreliable
+bandwidth, or `edge_region_unreliable`: with no quiet reference, a primary reaching the
+outer 15% of the band on either side, where receiver roll-off can pose as a signal) keeps
+every band match ungrounded and caps routing at `needs_review`. The 15% edge zone is
+justified only by synthetic roll-offs; validating it on recorded bladeRF captures is a
+hardware follow-up.
 The tag, confidence and reasoning go back into the record's own metadata, and nothing
 else does. A record whose snippet ingest rejected or capture dropped (`iq_snippet_path`
 NULL, `quality_flags.snippet_rejected` / `snippet_dropped` set) is closed out as
@@ -7308,8 +7852,9 @@ The scenario:
 - The in-memory test runs step 4's own `process_snippet`, then builds the
   `PendingRecord` from that record's own sample rate and frequency. The record and its
   SigMF file must therefore agree, as the reader requires. The `pre_trigger` annotation
-  step 4 writes supplies the noise reference, and the prompt says so
-  (`noise_reference: "pre_trigger"`). Its tolerances hold over 20 seeds (Verified facts).
+  step 4 writes supplies the noise reference, its recorded −35 dBFS threshold selects
+  the quiet frames, and the prompt says so (`noise_reference: "pre_trigger"`). Its
+  tolerances hold over 20 seeds (Verified facts).
 
 Both tests pass on their first run, because all the parts already exist.
 
@@ -7412,7 +7957,9 @@ def _captured(seed: int) -> CapturedSnippet:
 
 def test_step4_snippet_to_classification(tmp_path):
     staging, store_root = tmp_path / "staging", tmp_path / "snippets"
-    settings = CaptureSettings(center_freq_hz=TUNED, sample_rate=FS, noise_floor_dbfs=-50.0, staging_dir=staging)
+    # Trigger threshold -35 dBFS, which step 4 records in the SigMF: the
+    # carrier plus noise (-39.6 dBFS) stays below it, the burst crosses it.
+    settings = CaptureSettings(center_freq_hz=TUNED, sample_rate=FS, noise_floor_dbfs=-45.0, staging_dir=staging)
     record = process_snippet(_captured(42), settings, "survey-1", "op-1")
     stored = LocalSnippetStore(staging, store_root).adopt(record.metadata.iq_snippet_path)
 
@@ -7449,7 +7996,7 @@ def test_step4_snippet_to_classification(tmp_path):
     (request,) = llm.requests
     prompt = request["messages"][0]["content"]
     payload = json.loads(prompt[prompt.index("{") :])
-    assert payload["capture"]["noise_reference"] == "pre_trigger"  # step 4's annotation
+    assert payload["capture"]["noise_reference"] == "pre_trigger"  # quiet below the recorded threshold
     assert payload["primary_emitter"]["center_mhz"] == pytest.approx(915.2, abs=0.002)
     assert payload["primary_emitter"]["occupied_bandwidth_khz"] == pytest.approx(125, rel=0.05)
     assert payload["primary_emitter"]["duty_cycle"] == pytest.approx(0.3 / (N / FS), abs=0.01)
@@ -7661,12 +8208,18 @@ distrobox-host-exec podman stop sdr-part4-pg
   - no ingest socket;
   - egress only to the database and `api.anthropic.com`;
   - about 1 GiB of memory.
-- **The self floor on real hardware.** With a quiet pre-trigger reference, the per-bin
-  floor follows the receiver's roll-off. Without one, the percentile self floor assumes
-  flat noise, and a roll-off of more than about 6 dB reads as a false wide region
-  (measured with a synthetic 15 dB roll-off). Continuous emitters, which retrigger and
-  fill their own reference, always take this path. The AD9361's real roll-off needs a
-  recorded bladeRF capture to check.
+- **Validating the self floor and its edge zone on a real bladeRF (hardware follow-up).**
+  With a quiet pre-trigger reference, the per-bin floor follows the receiver's roll-off.
+  Without one, the percentile self floor assumes flat noise. Continuous emitters, which
+  retrigger and fill their own reference, always take this path.
+  - The 15% edge zone is justified only by synthetic cosine roll-offs: at 15–20 dB it
+    catches every false region measured.
+  - At 8–12 dB, a central region can instead be widened by in-band noise without
+    reaching the zone (20 of 259 wrong primaries), and could ground with an inflated
+    OBW.
+  - The AD9361's real roll-off, per sample rate and analog bandwidth, needs recorded
+    bladeRF captures. They will show whether the zone width holds, or whether self-floor
+    records should never ground.
 - **More than one agent worker.** The atomic pending check makes a duplicate submit fail
   safely (`RecordNotPending`), but there is no work-claiming protocol.
 - **Rescanning held-back records.** The cursor only moves forward. A record left
