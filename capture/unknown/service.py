@@ -45,6 +45,9 @@ _SNIPPET_QUEUE_MAXSIZE = 2
 # 56 MS/s, 42.7 MiB of complex64).
 _SOURCE_BUFFER_SECONDS = 0.1
 _MIN_CLOCK_DRIFT_SECONDS = 0.5
+# A session that ends in a drift rebuild sooner than this after opening
+# doesn't reset the backoff (see run()).
+_QUICK_DRIFT_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -161,19 +164,31 @@ def run(
     settings = replace(settings, staging_dir=staging_dir)
     logger.info("Staging unknown-signal snippets in %s", staging_dir)
     backoff = _INITIAL_BACKOFF_SECONDS
+    escalate = False  # the previous session drifted soon after opening
     last_trigger_at: Mapping[float, datetime] = {}
     drops: Counter[str] = Counter()  # dropped snippets by cause, for the logs
     with RecordEmitter(socket_path) as emitter:
         while True:
+            opened_at: float | None = None
             try:
                 with _open_session(settings, last_trigger_at, drops) as snippets:
-                    backoff = _INITIAL_BACKOFF_SECONDS  # the radio opened
+                    opened_at = time.monotonic()
+                    if not escalate:
+                        backoff = _INITIAL_BACKOFF_SECONDS  # the radio opened
                     for snippet in snippets:
                         last_trigger_at = record_trigger(last_trigger_at, snippet.trigger)
                         _stage_and_emit(snippet, settings, emitter, survey_id, operator_id, drops)
                         # Up to ~670 MB: don't hold it while waiting for the next.
                         del snippet
-            except Exception:
+            except Exception as failure:
+                # Sustained overflow makes every new session drift within
+                # seconds: count a quick drift rebuild like a failure to open,
+                # so the backoff escalates instead of rebuilding in a loop.
+                escalate = (
+                    isinstance(failure, _ClockDrift)
+                    and opened_at is not None
+                    and time.monotonic() - opened_at < _QUICK_DRIFT_SECONDS
+                )
                 logger.exception(
                     "Unknown-signal capture session failed; retrying in %.1fs", backoff
                 )
@@ -317,6 +332,10 @@ def _open_session(
         flowgraph.top_block.wait()
 
 
+class _ClockDrift(RuntimeError):
+    """Sample time diverged from wall time; the session must be rebuilt."""
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -359,6 +378,7 @@ def _drain(
         except queue.Empty:
             pass
         failure = None
+        drift_failure = None
         if tap.error is not None:
             failure = "Snippet tap failed; flowgraph stopped"
         else:
@@ -369,7 +389,7 @@ def _drain(
                 # time stands still and the stall check owns that case.
                 drift = (wall_clock() - clock.time_at(last_seen)).total_seconds()
                 if abs(drift) > max_drift_seconds:
-                    failure = (
+                    drift_failure = (
                         f"Sample clock is {drift:+.1f}s off the wall clock (dropped "
                         "samples or a clock step); rebuilding to re-anchor"
                     )
@@ -378,6 +398,9 @@ def _drain(
         if failure is not None:
             yield from _take_all(snippets)
             raise RuntimeError(failure) from tap.error
+        if drift_failure is not None:
+            yield from _take_all(snippets)
+            raise _ClockDrift(drift_failure)
 
 
 def _take_all(snippets: queue.Queue) -> Iterator[CapturedSnippet]:

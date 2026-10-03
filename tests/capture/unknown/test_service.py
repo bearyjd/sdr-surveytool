@@ -293,6 +293,43 @@ def test_run_survives_radio_failures_and_keeps_cooldown_across_rebuilds(tmp_path
     assert len(emitters[0].records) == 1
 
 
+def test_quick_drift_rebuilds_escalate_the_backoff_instead_of_looping(tmp_path, monkeypatch):
+    """Sustained overflow makes every new session drift within seconds. A
+    session that drifts within 60 s of opening must not reset the backoff,
+    while a drift after a long healthy session still restarts promptly."""
+    sessions = []
+
+    @contextmanager
+    def fake_open_session(settings, last_trigger_at, drops):
+        sessions.append(len(sessions) + 1)
+        if len(sessions) == 4:
+            raise KeyboardInterrupt
+
+        def drifting():
+            raise service._ClockDrift("Sample clock is +3.0s off the wall clock")
+            yield  # pragma: no cover
+
+        yield drifting()
+
+    # monotonic() at: open 1, drift 1 (100 s later), open 2, drift 2 (1 s),
+    # open 3, drift 3 (1 s).
+    ticks = iter([0.0, 100.0, 100.0, 101.0, 101.0, 102.0])
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) > 10:
+            raise AssertionError(f"run() kept retrying: {sleeps}")
+
+    monkeypatch.setattr(service, "_open_session", fake_open_session)
+    monkeypatch.setattr(service, "RecordEmitter", _FakeEmitter)
+    monkeypatch.setattr(service.time, "sleep", fake_sleep)
+    monkeypatch.setattr(service.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(KeyboardInterrupt):
+        service.run(_settings(tmp_path, min_free_bytes=0), "/unused.sock", "s1", "op1")
+    assert sleeps == [1.0, 1.0, 2.0]
+
+
 def test_run_resolves_secures_and_logs_staging_dir_at_startup(tmp_path, monkeypatch, caplog):
     monkeypatch.chdir(tmp_path)
     seen = []
