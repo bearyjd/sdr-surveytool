@@ -347,15 +347,16 @@ def _drain(
             now = monotonic()
             if tap.samples_seen != last_seen:
                 last_seen, last_progress = tap.samples_seen, now
-            elif now - last_progress > stall_seconds:
-                failure = f"SDR stream stalled: no samples for {stall_seconds:g}s"
-            if failure is None:
-                drift = (wall_clock() - clock.time_at(tap.samples_seen)).total_seconds()
+                # Judged only on progress: with no samples arriving, sample
+                # time stands still and the stall check owns that case.
+                drift = (wall_clock() - clock.time_at(last_seen)).total_seconds()
                 if abs(drift) > max_drift_seconds:
                     failure = (
                         f"Sample clock is {drift:+.1f}s off the wall clock (dropped "
                         "samples or a clock step); rebuilding to re-anchor"
                     )
+            elif now - last_progress > stall_seconds:
+                failure = f"SDR stream stalled: no samples for {stall_seconds:g}s"
         if failure is not None:
             yield from _take_all(snippets)
             raise RuntimeError(failure) from tap.error

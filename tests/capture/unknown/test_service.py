@@ -172,16 +172,43 @@ def test_drain_delivers_completed_snippets_before_reporting_a_stall():
     assert list(_take_until_error(drained)) == ["snippet-1", "snippet-2", "snippet-3"]
 
 
-@pytest.mark.parametrize("wall_offset_s", [3.5, -1.5])
+@pytest.mark.parametrize("wall_offset_s", [2.5, -2.5])
 def test_drain_ends_the_session_when_sample_time_drifts_from_wall_time(wall_offset_s):
     """Dropped samples (SDR overflow) put sample time behind wall time, and an
     NTP/GPS clock step jumps wall time either way. Past the threshold the
     session ends, and the rebuild re-anchors the sample clock."""
     tap = _FakeTap()
-    tap.samples_seen = 100_000  # sample time = anchor + 1.0 s
-    walls = iter([ANCHOR + timedelta(seconds=1.5), ANCHOR + timedelta(seconds=wall_offset_s)])
-    drained = _drain(queue.Queue(), tap, monotonic=lambda: 0.0, wall_clock=lambda: next(walls))
+    tap.samples_seen = 100_000
+    progress = iter([100_000, 200_000])  # the stream advances to anchor + 2.0 s
+
+    def monotonic():
+        tap.samples_seen = next(progress)
+        return 0.0
+
+    walls = iter([ANCHOR + timedelta(seconds=2.0 + wall_offset_s)])
+    drained = _drain(queue.Queue(), tap, monotonic=monotonic, wall_clock=lambda: next(walls))
     with pytest.raises(RuntimeError, match="off the wall clock"):
+        next(drained)
+
+
+def test_frozen_stream_is_reported_as_a_stall_not_as_clock_drift():
+    """With no samples arriving, sample time stands still while wall time
+    moves on. That is the stall watchdog's case (including a slow stream
+    start), not a clock step, so drift is only judged on progress."""
+    ticks = iter([0.0, 1.0, 2.5, 4.0, 6.0])
+    now = [0.0]
+
+    def monotonic():
+        now[0] = next(ticks)
+        return now[0]
+
+    drained = _drain(
+        queue.Queue(),
+        _FakeTap(),
+        monotonic=monotonic,
+        wall_clock=lambda: ANCHOR + timedelta(seconds=now[0]),
+    )
+    with pytest.raises(RuntimeError, match="stalled"):
         next(drained)
 
 
