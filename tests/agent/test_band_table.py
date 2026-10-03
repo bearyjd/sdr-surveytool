@@ -124,3 +124,15 @@ def test_marine_vhf_covers_every_ais_channel(center_hz):
     (match,) = match_bands(load_band_table().entries, center_hz, 14e3)
     assert (match.entry.id, match.grounded) == ("marine_vhf", True)
     assert match.entry.citation == "47 CFR 80.373(f); 80.393"
+
+
+def test_an_expected_width_wider_than_its_band_is_rejected():
+    """A signal wider than the band cannot lie inside it, so such a range
+    could only ever ground by mistake."""
+    with pytest.raises(ValidationError, match="wider than the band"):
+        _entry("x", 100e6, 101e6, (10e3, 2e6))
+
+
+def test_every_shipped_expected_width_fits_its_band():
+    for entry in load_band_table().entries:
+        assert entry.expected_obw_hz[1] <= entry.end_hz - entry.start_hz, entry.id

@@ -39,6 +39,8 @@ class BandEntry(BaseModel):
         low, high = self.expected_obw_hz
         if not 0 <= low < high <= MAX_HZ:
             raise ValueError(f"{self.id}: expected_obw_hz must be 0 <= min < max")
+        if self.expected_obw_hz[1] > self.end_hz - self.start_hz:
+            raise ValueError(f"{self.id}: expected_obw_hz maximum is wider than the band")
         return self
 
 
