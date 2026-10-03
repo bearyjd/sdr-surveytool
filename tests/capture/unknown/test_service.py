@@ -133,6 +133,35 @@ def test_full_snippet_queue_drops_and_counts_without_blocking():
     assert drops == Counter({"queue_full": 1})
 
 
+def test_drain_delivers_completed_snippets_before_reraising_a_tap_failure():
+    snippets: queue.Queue = queue.Queue()
+    snippets.put("snippet-1")
+    snippets.put("snippet-2")
+    tap = _FakeTap()
+    tap.error = ValueError("assembler bug")
+    drained = service._drain(snippets, tap, stall_seconds=5.0, poll_seconds=0.0, monotonic=lambda: 0.0)
+    assert [next(drained), next(drained)] == ["snippet-1", "snippet-2"]
+    with pytest.raises(RuntimeError, match="tap failed"):
+        next(drained)
+
+
+def test_drain_delivers_completed_snippets_before_reporting_a_stall():
+    snippets: queue.Queue = queue.Queue()
+    for name in ("snippet-1", "snippet-2", "snippet-3"):
+        snippets.put(name)
+    times = iter([0.0, 9.0, 9.0, 9.0, 9.0])
+    drained = service._drain(
+        snippets, _FakeTap(), stall_seconds=5.0, poll_seconds=0.0, monotonic=lambda: next(times)
+    )
+    assert list(_take_until_error(drained)) == ["snippet-1", "snippet-2", "snippet-3"]
+
+
+def _take_until_error(drained):
+    with pytest.raises(RuntimeError, match="stalled"):
+        while True:
+            yield next(drained)
+
+
 class _FakeEmitter:
     def __init__(self, socket_path: str) -> None:
         self.records = []

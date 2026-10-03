@@ -290,6 +290,8 @@ def _drain(
     view, so health is polled: a tap error is re-raised, and samples_seen
     frozen for stall_seconds means the SDR stopped streaming. The monotonic
     clock here is health-checking only; no record timing depends on it.
+    Snippets the flowgraph completed before it died are still delivered
+    before the failure is raised.
     """
     last_seen = tap.samples_seen
     last_progress = monotonic()
@@ -300,13 +302,26 @@ def _drain(
             pass
         else:
             yield snippet
+        failure = None
         if tap.error is not None:
-            raise RuntimeError("Snippet tap failed; flowgraph stopped") from tap.error
-        now = monotonic()
-        if tap.samples_seen != last_seen:
-            last_seen, last_progress = tap.samples_seen, now
-        elif now - last_progress > stall_seconds:
-            raise RuntimeError(f"SDR stream stalled: no samples for {stall_seconds:.0f}s")
+            failure = "Snippet tap failed; flowgraph stopped"
+        else:
+            now = monotonic()
+            if tap.samples_seen != last_seen:
+                last_seen, last_progress = tap.samples_seen, now
+            elif now - last_progress > stall_seconds:
+                failure = f"SDR stream stalled: no samples for {stall_seconds:g}s"
+        if failure is not None:
+            yield from _take_all(snippets)
+            raise RuntimeError(failure) from tap.error
+
+
+def _take_all(snippets: queue.Queue) -> Iterator[CapturedSnippet]:
+    while True:
+        try:
+            yield snippets.get_nowait()
+        except queue.Empty:
+            return
 
 
 def _build_soapy_source(settings: CaptureSettings):
