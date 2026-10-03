@@ -24,6 +24,7 @@ class CapturedSnippet:
     start_index: int
     start_time: datetime  # sample-derived UTC time of iq[0]
     trigger: TriggerEvent
+    sample_rate: float  # the rate the samples were actually taken at
 
 
 @dataclass
@@ -157,4 +158,5 @@ class SnippetAssembler:
             start_index=active.start_index,
             start_time=self._clock.time_at(active.start_index),
             trigger=active.trigger,
+            sample_rate=self._clock.sample_rate,
         )

@@ -37,7 +37,9 @@ def _settings(staging_dir: Path, **overrides) -> CaptureSettings:
     )
 
 
-def _snippet(trigger_index: int = 60_000, pre: int = 10_000, post: int = 90_000) -> CapturedSnippet:
+def _snippet(
+    trigger_index: int = 60_000, pre: int = 10_000, post: int = 90_000, sample_rate: float = FS
+) -> CapturedSnippet:
     n = pre + post
     iq = np.full(n, 0.01, dtype=np.complex64)
     iq[pre : pre + 20_000] = 0.1  # -20 dBFS burst right at the trigger
@@ -47,12 +49,13 @@ def _snippet(trigger_index: int = 60_000, pre: int = 10_000, post: int = 90_000)
         iq=iq,
         power=power,
         start_index=start,
-        start_time=ANCHOR + timedelta(seconds=start / FS),
+        start_time=ANCHOR + timedelta(seconds=start / sample_rate),
         trigger=TriggerEvent(
             sample_index=trigger_index,
-            time=ANCHOR + timedelta(seconds=trigger_index / FS),
+            time=ANCHOR + timedelta(seconds=trigger_index / sample_rate),
             center_freq_hz=915e6,
         ),
+        sample_rate=sample_rate,
     )
 
 
@@ -98,6 +101,12 @@ def test_process_snippet_stages_sigmf_and_builds_record(tmp_path):
     assert record.metadata.snippet_duration_ms == 1000
     assert record.metadata.sample_rate == FS
     assert record.metadata.classification_status is ClassificationStatus.UNCLASSIFIED
+
+
+def test_record_describes_the_snippet_at_its_actual_sample_rate(tmp_path):
+    record = process_snippet(_snippet(sample_rate=FS / 2), _settings(tmp_path), "s1", "op1")
+    assert record.metadata.sample_rate == FS / 2
+    assert record.metadata.snippet_duration_ms == 2000  # 100_000 samples at 50 kS/s
 
 
 def test_snippet_duration_reflects_samples_actually_captured(tmp_path):
@@ -423,8 +432,12 @@ def test_run_releases_each_snippet_before_waiting_for_the_next(tmp_path, monkeyp
 
         yield snippets()
 
+    def no_retry(seconds):  # raised inside run()'s except block, so it escapes
+        raise AssertionError("run() retried; the fake session failed unexpectedly")
+
     monkeypatch.setattr(service, "_open_session", fake_open_session)
     monkeypatch.setattr(service, "RecordEmitter", _FakeEmitter)
+    monkeypatch.setattr(service.time, "sleep", no_retry)
     with pytest.raises(KeyboardInterrupt):
         service.run(_settings(tmp_path, min_free_bytes=0), "/unused.sock", "s1", "op1")
     assert alive_while_waiting == [False]

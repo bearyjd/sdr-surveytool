@@ -117,28 +117,30 @@ def process_snippet(
     operator_id: str,
 ) -> UnifiedRecord:
     """Stage `snippet` as SigMF and build its UnifiedRecord. All times are
-    sample-derived (see SampleClock); the duration is what was actually
-    captured, which is shorter than pre + post when the trigger came within
-    pre_trigger_seconds of the stream starting."""
+    sample-derived (see SampleClock) at the snippet's own sample rate, which
+    is the rate read back from the SDR, not necessarily the requested one.
+    The duration is what was actually captured, which is shorter than
+    pre + post when the trigger came within pre_trigger_seconds of the
+    stream starting."""
     data_path = write_sigmf_snippet(
         snippet.iq,
         settings.staging_dir,
-        settings.sample_rate,
+        snippet.sample_rate,
         settings.center_freq_hz,
         snippet.start_time,
     )
     event = SnippetCaptureEvent(
         timestamp=snippet.trigger.time,
         center_freq_hz=settings.center_freq_hz,
-        sample_rate=settings.sample_rate,
+        sample_rate=snippet.sample_rate,
         bandwidth_estimate_hz=occupied_bandwidth_hz(
-            snippet.iq, settings.sample_rate, settings.threshold_dbfs
+            snippet.iq, snippet.sample_rate, settings.threshold_dbfs
         ),
         peak_power_dbfs=peak_power_dbfs(snippet.power),
         mean_power_dbfs=mean_burst_power_dbfs(snippet.power, settings.threshold_dbfs),
         noise_floor_dbfs=settings.noise_floor_dbfs,
         snippet_path=str(data_path),
-        snippet_duration_ms=round(len(snippet.iq) * 1000 / settings.sample_rate),
+        snippet_duration_ms=round(len(snippet.iq) * 1000 / snippet.sample_rate),
     )
     return normalize_snippet_event(event, survey_id, operator_id)
 
@@ -270,9 +272,18 @@ def _open_session(
     # Open the device first: opening and tuning a bladeRF can take seconds, and
     # the anchor must be read as close as possible to sample 0, i.e. right
     # before start(), or every timestamp would be early by the open time.
-    source = _build_soapy_source(settings)
+    source, actual_rate = _build_soapy_source(settings)
+    if actual_rate != settings.sample_rate:
+        logger.warning(
+            "SDR runs at %.9g samples/s, not the requested %.9g; timing uses the actual rate",
+            actual_rate,
+            settings.sample_rate,
+        )
+        # Every sample count and the clock follow the rate the samples
+        # actually arrive at, or sample time drifts from wall time.
+        settings = replace(settings, sample_rate=actual_rate)
     source.set_min_output_buffer(settings.samples(_SOURCE_BUFFER_SECONDS))
-    clock = SampleClock(anchor=datetime.now(timezone.utc), sample_rate=settings.sample_rate)
+    clock = SampleClock(anchor=datetime.now(timezone.utc), sample_rate=actual_rate)
     assembler = SnippetAssembler(
         clock=clock,
         center_freq_hz=settings.center_freq_hz,
@@ -377,8 +388,9 @@ def _take_all(snippets: queue.Queue) -> Iterator[CapturedSnippet]:
             return
 
 
-def _build_soapy_source(settings: CaptureSettings) -> gr.basic_block:
-    """gr-soapy source for the configured device. Never called by tests (no
+def _build_soapy_source(settings: CaptureSettings) -> tuple[gr.basic_block, float]:
+    """gr-soapy source for the configured device, and the sample rate read
+    back from it (drivers round unsupported rates). Never called by tests (no
     SDR hardware); API verified by introspection against GNU Radio 3.10.12 and
     its bundled soapy_bladerf_source.block.yml template. Without a device or
     driver module, soapy.source raises RuntimeError('SoapySDR::Device::make()
@@ -394,7 +406,7 @@ def _build_soapy_source(settings: CaptureSettings) -> gr.basic_block:
     # Manual gain: a dBFS trigger threshold is only meaningful at fixed gain.
     source.set_gain_mode(0, False)
     source.set_gain(0, settings.gain_db)
-    return source
+    return source, source.get_sample_rate(0)
 
 
 def _parse_args(argv: list[str] | None = None) -> tuple[CaptureSettings, argparse.Namespace]:

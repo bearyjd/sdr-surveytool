@@ -77,6 +77,7 @@ def test_snippet_is_exact_slice_around_trigger_for_any_chunking(chunk):
     np.testing.assert_array_equal(snippet.iq, iq[900:1_400])
     np.testing.assert_array_equal(snippet.power, power[900:1_400])
     assert snippet.iq.dtype == np.complex64 and snippet.power.dtype == np.float32
+    assert snippet.sample_rate == FS
 
 
 def test_trigger_within_first_pre_samples_truncates_pre_trigger_history():

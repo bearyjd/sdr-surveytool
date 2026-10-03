@@ -1,5 +1,6 @@
 """_open_session against the real GNU Radio scheduler; only the SDR source
 itself (_build_soapy_source) is replaced, by a finite vector source."""
+import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
@@ -58,7 +59,7 @@ def test_open_session_streams_snippets_then_stalls_and_tears_down(tmp_path, monk
 
     def fake_source(settings):
         opened_at.append(datetime.now(timezone.utc))
-        return blocks.vector_source_c(_iq_with_burst_at(50_000), False)
+        return blocks.vector_source_c(_iq_with_burst_at(50_000), False), FS
 
     monkeypatch.setattr(service, "_build_soapy_source", fake_source)
     settings = _settings(tmp_path)
@@ -80,7 +81,9 @@ def test_open_session_streams_snippets_then_stalls_and_tears_down(tmp_path, monk
 
 def test_open_session_tears_down_a_flowgraph_whose_start_fails(tmp_path, monkeypatch, top_block_calls):
     monkeypatch.setattr(
-        service, "_build_soapy_source", lambda settings: blocks.vector_source_c(np.zeros(10, np.complex64), False)
+        service,
+        "_build_soapy_source",
+        lambda settings: (blocks.vector_source_c(np.zeros(10, np.complex64), False), FS),
     )
 
     def failing_start(self):
@@ -102,7 +105,7 @@ def test_source_gets_100ms_of_output_buffer_before_start(tmp_path, monkeypatch):
 
     def fake_source(settings):
         sources.append(blocks.vector_source_c(np.zeros(1_000, np.complex64), False))
-        return sources[-1]
+        return sources[-1], FS
 
     real_start = gr.top_block.start
 
@@ -116,3 +119,26 @@ def test_source_gets_100ms_of_output_buffer_before_start(tmp_path, monkeypatch):
         with pytest.raises(RuntimeError, match="stalled"):
             next(snippets)
     assert seen_at_start == [10_000]  # 0.1 s at 100 kS/s
+
+
+def test_session_times_samples_at_the_rate_the_sdr_actually_runs(tmp_path, monkeypatch, caplog):
+    """Drivers round unsupported rates. Timestamps, windows and the snippet's
+    own rate must follow the rate read back from the device, or sample time
+    drifts from wall time by the rounding error."""
+    actual = FS / 2
+    opened_at = []
+
+    def fake_source(settings):
+        opened_at.append(datetime.now(timezone.utc))
+        return blocks.vector_source_c(_iq_with_burst_at(50_000), False), actual
+
+    monkeypatch.setattr(service, "_build_soapy_source", fake_source)
+    with caplog.at_level(logging.WARNING):
+        with service._open_session(_settings(tmp_path), {}, Counter()) as snippets:
+            snippet = next(snippets)
+
+    assert "requested" in caplog.text
+    assert snippet.sample_rate == actual
+    assert len(snippet.iq) == round(0.1 * actual) + round(0.9 * actual)
+    anchor = snippet.trigger.time - timedelta(seconds=snippet.trigger.sample_index / actual)
+    assert opened_at[0] <= anchor <= opened_at[0] + timedelta(seconds=5)
