@@ -1046,6 +1046,35 @@ def test_a_record_whose_metadata_is_not_an_object_is_never_pending(boundary, met
     assert _admin_scalar(boundary, "SELECT metadata::text FROM survey_records WHERE id = :id", id=record_id) == metadata
 
 
+@pytest.mark.parametrize(
+    "value, poisoned",
+    [
+        (r'"\u0000"', True),  # a real NUL escape
+        (r'"a\\\u0000"', True),  # an escaped backslash, then a real NUL escape
+        (r'"\\u0000"', False),  # a legit backslash followed by the text u0000
+        (r'"a\\\\u0000"', False),  # two escaped backslashes, then text
+    ],
+)
+def test_only_a_real_nul_escape_hides_a_row(boundary, value, poisoned):
+    """Security L1: matching the raw text \\u0000 also hid a legit string
+    holding a backslash followed by u0000. A NUL escape is one preceded by an
+    even number of backslashes."""
+    watermark = _watermark(boundary)
+    record_id = _insert(boundary, Modality.UNKNOWN, None)
+    _admin_scalar(
+        boundary,
+        "UPDATE survey_records SET metadata = (left(metadata::text, -1) || ', \"note\": ' || :v || '}')::json"
+        " WHERE id = :id RETURNING id",
+        v=value, id=record_id,
+    )
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        visible = record_id in [r.id for r in gateway.fetch_pending(watermark, 100)]
+    finally:
+        gateway.close()
+    assert visible is not poisoned
+
+
 def test_agent_classifies_a_real_row_through_the_boundary(boundary, tmp_path):
     """The whole agent against real PostgreSQL: a stored step-4 snippet, a
     pending row, the agent login role, a fake LLM; the row ends up

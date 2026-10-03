@@ -55,7 +55,8 @@ A row whose JSON holds a `\u0000` escape (only a writer bypassing the schema's N
 can store one) makes every `->>` on it fail, so the view leaves it out and
 `classify_unknown` refuses it; a write that still meets one (SQLSTATE 22P05) skips that
 record. Such rows stay pending until cleaned up by hand; find them with
-`SELECT id FROM survey_records WHERE strpos(metadata::text || identifier::text || signal::text, E'\\u0000') > 0;`.
+`SELECT id FROM survey_records WHERE metadata::text || identifier::text || signal::text ~ '(^|[^\\])(\\\\)*\\u0000';`
+(standard_conforming_strings on; a `\u0000` preceded by an even number of backslashes).
 
 An invalid model answer (validation failure, refusal, `max_tokens`) is held until a later
 answer validates, then goes to review. A spent daily token budget pauses until UTC
