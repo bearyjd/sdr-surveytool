@@ -148,9 +148,23 @@ pipeline, §7 storage).
 >     a `processing_error` record;
 >   - settings must be finite, with `sample_rate <= 61.44e6` and windows `<= 5 s`;
 >   - queue-full drops keep a summary emitted as a `queue_full` record.
-> - **Final counts:** the full suite gives `230 passed, 1 skipped`, and the
+> - **Second adversarial pass:**
+>   - an adopted pair is discarded only when a fresh query confirms no row
+>     references it;
+>   - adopt fsyncs the store dir before returning and staging after cleanup, and
+>     retries EINTR/EAGAIN/EMFILE/ENFILE three times;
+>   - `--max-snippet-memory-bytes` (default 2 GiB) startup check;
+>   - cooldown must be at least max(1 s, pre + post);
+>   - emitter connect/send timeout (5 s);
+>   - the writer removes the published meta if the final dir fsync fails;
+>   - the meta size is capped at 1 MiB;
+>   - the bandwidth floor is the bias-corrected 10th-percentile PSD bin, and
+>     `bandwidth_estimate_unreliable` is set past 90% of fs or on edge wrap;
+>   - cooldowns are merged from the assembler at session end, so they count from
+>     the trigger.
+> - **Final counts:** the full suite gives `255 passed, 1 skipped`, and the
 >   `-W error` subset (`tests/capture/unknown tests/dsp
->   tests/storage/test_snippet_store.py`) gives `160 passed`.
+>   tests/storage/test_snippet_store.py`) gives `182 passed`.
 
 ## Verified facts (build-and-run spike, 2026-10-03)
 

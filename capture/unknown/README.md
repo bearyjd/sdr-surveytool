@@ -49,8 +49,14 @@ The dBFS power stats and the occupied-bandwidth estimate live in the shared top-
     anchor is clamped to the anchor (and logged), so the step can't extend a
     cooldown.
 - `identifier.bandwidth_estimate` is the 99%-power occupied bandwidth of the burst
-  (resolution sample_rate / 1024). It is within +-5% at >= 15 dB SNR and up to +24% at
-  the 10 dB trigger margin. Bursts shorter than 1024 samples are overestimated.
+  (resolution sample_rate / 1024).
+  - **Noise floor:** the 10th-percentile PSD bin, scaled to the noise mean. Unlike a
+    median, this stays valid for signals filling up to 90% of the band.
+  - **Accuracy:** within +-5% at >= 15 dB SNR (flat spectra up to 85% of the band,
+    shaped spectra within 2% at 70%), and up to +24% at the 10 dB trigger margin.
+    Bursts only a few 1024-sample frames long are overestimated.
+  - **Unreliable estimates:** a burst filling more than 90% of the band, or wrapping
+    its edges, carries `quality_flags.bandwidth_estimate_unreliable: true`.
 
 ## Snippet handoff (capture never writes to storage)
 
@@ -62,7 +68,8 @@ data first and meta last; the staging directory is fsynced after both renames. S
 measurement runs before anything is written. If the record cannot be emitted, the
 staged pair is deleted. Capture can start before ingest: the emitter connects
 lazily, and while ingest is down, emits fail per snippet and their staged pairs are
-deleted.
+deleted. Connects and sends time out after 5 s, so a wedged ingest that stops reading
+fails emits the same way instead of blocking capture.
 
 Ingest's `LocalSnippetStore` treats the path as untrusted:
 
@@ -72,16 +79,21 @@ Ingest's `LocalSnippetStore` treats the path as untrusted:
 - **File checks:** both files must be regular files with a single hard link. The data
   file's size must be plausible cf32: non-empty, a multiple of 8 bytes, and at most
   `--max-snippet-bytes` (default 4,915,200,000, the largest snippet capture can be
-  configured to write). Ingest never parses SigMF.
+  configured to write). The meta must be 1 byte to 1 MiB. Ingest never parses SigMF.
 - **How it adopts:** it hard-links both into `--snippet-store-dir` without replacing
   anything there. It checks that each linked inode is the one it checked and has
-  exactly two links, and only then removes the staged names.
+  exactly two links, and fsyncs the store directory before returning, so a database
+  row never references a name a power cut could lose. Only then does it remove the
+  staged names (and fsync staging). Transient errors (EINTR, EAGAIN, EMFILE, ENFILE)
+  are retried up to 3 times before counting as a rejection.
 - **Rejections:** a rejected snippet, including any I/O error during adoption,
   doesn't lose the detection. The record is still persisted, with
   `iq_snippet_path: null` and `quality_flags.snippet_rejected` set to the reason.
-- **Failed persist:** if persisting the record fails after its snippet was adopted
-  (e.g. the database is down), ingest removes the adopted pair from the store again
-  instead of orphaning it.
+- **Failed persist:** if persisting the record fails after its snippet was adopted,
+  ingest removes the adopted pair again only once a fresh query confirms no row
+  references it. The error may have come after COMMIT, so if that check fails too
+  (e.g. the database is down), the files are kept: an orphan is recoverable, a
+  dangling reference is not.
 
 **Deployment requirements** (checked at startup, which fails with an actionable
 message):
@@ -128,6 +140,15 @@ sdr-capture-unknown --survey-id s1 --operator-id op1 \
 `--noise-floor-dbfs` is required: measure it at your gain and frequency first. All
 numeric settings must be finite; `--sample-rate` is capped at 61.44e6 (the AD9361
 maximum), and the averaging, pre- and post-trigger windows at 5 s each.
+`--cooldown-s` must be at least 1 s and at least one snippet (pre + post). A
+cooldown starts at the trigger and survives session rebuilds, even when the capture
+never completed.
+
+Startup also refuses a configuration whose snippet buffers could exceed
+`--max-snippet-memory-bytes` (default 2 GiB, sized for an 8 GB Jetson). The
+estimate is 12 B/sample for 2 queued, 1 processing and 1 assembling snippet, plus
+2 × 12 B × pre for the trigger history and 10 B/sample of measurement transients.
+The defaults need 1.21 GB; 56 MS/s with 1 s snippets needs 3.38 GB.
 `--sample-rate` defaults to 20e6. The bladeRF reaches ~56e6, but the Python chain
 sustained only ~58 MS/s on a fast x86 desktop and has not been profiled on the Jetson.
 A 1 s snippet is 160 MB on disk at 20 MS/s (448 MB at 56 MS/s). In memory it is
