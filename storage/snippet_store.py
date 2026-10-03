@@ -148,8 +148,10 @@ class LocalSnippetStore:
             for final in linked:
                 final.unlink(missing_ok=True)
             raise
+        # Both are stored now; a staged name that already vanished must not
+        # orphan the stored pair by failing this cleanup.
         for source, _ in sources:
-            source.unlink()
+            source.unlink(missing_ok=True)
         return str(self._root_dir / data.name)
 
 

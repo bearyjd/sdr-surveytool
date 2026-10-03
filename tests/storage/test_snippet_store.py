@@ -206,6 +206,27 @@ def test_other_os_errors_become_rejections(dirs, monkeypatch):
     assert data.exists() and meta.exists()
 
 
+def test_a_source_vanishing_after_both_links_still_completes_the_adoption(dirs, monkeypatch):
+    """Once both files are linked into the store the pair is safe; a staged
+    name disappearing at that point must not orphan the stored pair (and
+    drop the record's snippet) by failing the source cleanup."""
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    data, _ = _stage(staging)
+    real_link = os.link
+
+    def link_then_lose_the_data_source(src, dst, *, follow_symlinks=True):
+        real_link(src, dst, follow_symlinks=follow_symlinks)
+        if str(src).endswith(".sigmf-meta"):
+            os.unlink(data)
+
+    monkeypatch.setattr(snippet_store.os, "link", link_then_lose_the_data_source)
+    final = store.adopt(str(data))
+    assert Path(final) == root.resolve() / f"{STEM}.sigmf-data"
+    assert sorted(p.name for p in root.iterdir()) == [f"{STEM}.sigmf-data", f"{STEM}.sigmf-meta"]
+    assert list(staging.iterdir()) == []
+
+
 def test_store_refuses_dirs_on_different_filesystems(dirs, monkeypatch):
     """adopt() hard-links, which cannot cross filesystems: fail at startup,
     not on the first snippet."""
