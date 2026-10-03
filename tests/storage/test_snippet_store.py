@@ -315,3 +315,11 @@ def test_store_refuses_a_world_readable_staging_dir(tmp_path):
     staging.chmod(0o755)
     with pytest.raises(PermissionError, match="chmod 700"):
         LocalSnippetStore(staging, tmp_path / "snippets")
+
+
+def test_staged_name_pattern_accepts_only_ascii_digits():
+    ascii_name = "20261003T145000123456Z_915000000Hz_0123abcd.sigmf-data"
+    # Same shape, but the date uses Arabic-Indic digits, which \d matches without re.ASCII.
+    unicode_digit_name = "٢٠٢٦١٠٠٣" + ascii_name[8:]
+    assert snippet_store.STAGED_DATA_NAME.fullmatch(ascii_name)
+    assert snippet_store.STAGED_DATA_NAME.fullmatch(unicode_digit_name) is None

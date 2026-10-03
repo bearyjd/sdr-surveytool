@@ -16,7 +16,9 @@ _PRIVATE_DIR_MODE = 0o700
 # The only staged names adopt() accepts: exactly what
 # capture.unknown.snippet_writer writes ("<%Y%m%dT%H%M%S%f>Z_<Hz>Hz_<8 hex>").
 # Bounded, so a null byte or an over-long name is rejected before any syscall.
-STAGED_DATA_NAME = re.compile(r"\d{8}T\d{12}Z_\d{1,12}Hz_[0-9a-f]{8}\.sigmf-data")
+STAGED_DATA_NAME = re.compile(
+    r"\d{8}T\d{12}Z_\d{1,12}Hz_[0-9a-f]{8}\.sigmf-data", re.ASCII
+)
 
 
 def ensure_private_dir(path: Path | str) -> Path:
