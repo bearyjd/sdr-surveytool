@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import signal
 import threading
@@ -70,6 +71,7 @@ from agent.db_gateway import (
 from agent.llm import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
+    MAX_TOKENS_RANGE,
     RECORD_CLASSIFICATION_TOOL,
     LlmResult,
     MessagesClient,
@@ -552,6 +554,28 @@ def run(
             sleep(poll_seconds)
 
 
+def _positive_float(text: str) -> float:
+    value = float(text)
+    if not (math.isfinite(value) and value > 0):
+        raise argparse.ArgumentTypeError(f"must be a positive number, got {text!r}")
+    return value
+
+
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {text!r}")
+    return value
+
+
+def _max_tokens(text: str) -> int:
+    value = int(text)
+    low, high = MAX_TOKENS_RANGE
+    if not low <= value <= high:
+        raise argparse.ArgumentTypeError(f"must be between {low} and {high}, got {text!r}")
+    return value
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Part 4 unknown-signal classification agent")
     parser.add_argument(
@@ -562,9 +586,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--agent-role", default=DEFAULT_AGENT_ROLE)
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
-    parser.add_argument("--daily-token-budget", type=int, default=AgentSettings.daily_token_budget)
-    parser.add_argument("--poll-seconds", type=float, default=30.0)
+    parser.add_argument("--max-tokens", type=_max_tokens, default=DEFAULT_MAX_TOKENS)
+    parser.add_argument("--daily-token-budget", type=_positive_int, default=AgentSettings.daily_token_budget)
+    parser.add_argument("--poll-seconds", type=_positive_float, default=30.0)
     parser.add_argument("--band-table", default=str(DEFAULT_BAND_TABLE))
     parser.add_argument(
         "--start-after-id",

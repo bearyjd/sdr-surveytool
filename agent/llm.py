@@ -18,6 +18,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
 DEFAULT_MAX_TOKENS = 1024
+# One forced record_classification call (reasoning at most 2000 characters)
+# needs well under 1000 output tokens: below 256 a full answer cannot fit,
+# and 8192, far under any current model's output limit, bounds the budget
+# reservation each call makes.
+MAX_TOKENS_RANGE = (256, 8192)
 TOOL_NAME = "record_classification"
 TAG_PATTERN = r"^[a-z0-9][a-z0-9_.:-]{0,63}$"  # also enforced by classify_unknown
 MAX_REASONING_CHARS = 2000

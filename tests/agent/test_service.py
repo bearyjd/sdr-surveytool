@@ -472,6 +472,30 @@ def test_an_always_on_emitter_is_classified_and_never_trips_a_halt(store, width,
         assert all(why in s[4] for s in gateway.submitted)
 
 
+@pytest.mark.parametrize(
+    "flag, value",
+    [
+        ("--poll-seconds", "0"), ("--poll-seconds", "-5"), ("--poll-seconds", "nan"),
+        ("--max-tokens", "0"), ("--max-tokens", "255"), ("--max-tokens", "8193"),
+        ("--daily-token-budget", "0"), ("--daily-token-budget", "-1"),
+    ],
+)
+def test_the_cli_refuses_out_of_range_numbers(tmp_path, capsys, flag, value):
+    """Codex M9: a zero poll interval spins, a zero budget pauses forever,
+    and max_tokens outside what one forced tool call needs is a mistake."""
+    with pytest.raises(SystemExit) as excinfo:
+        _parse_args(["--snippet-store-dir", str(tmp_path), flag, value])
+    assert excinfo.value.code == 2 and flag in capsys.readouterr().err
+
+
+def test_the_cli_accepts_the_edges_of_each_range(tmp_path):
+    args = _parse_args(
+        ["--snippet-store-dir", str(tmp_path), "--poll-seconds", "0.5", "--max-tokens", "256", "--daily-token-budget", "1"]
+    )
+    assert (args.poll_seconds, args.max_tokens, args.daily_token_budget) == (0.5, 256, 1)
+    assert _parse_args(["--snippet-store-dir", str(tmp_path), "--max-tokens", "8192"]).max_tokens == 8192
+
+
 def test_self_floor_grounding_is_off_unless_the_flag_is_given(tmp_path):
     assert AgentSettings(snippet_root=tmp_path).allow_self_floor_grounding is False
     args = ["--snippet-store-dir", str(tmp_path)]
