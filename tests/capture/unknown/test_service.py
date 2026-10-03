@@ -79,6 +79,44 @@ def test_settings_reject_a_drift_threshold_inside_normal_buffering_lag(tmp_path)
     assert _settings(tmp_path, max_clock_drift_seconds=0.5).max_clock_drift_seconds == 0.5
 
 
+FLOAT_SETTINGS = [
+    "center_freq_hz",
+    "sample_rate",
+    "noise_floor_dbfs",
+    "threshold_db",
+    "averaging_seconds",
+    "pre_trigger_seconds",
+    "post_trigger_seconds",
+    "cooldown_seconds",
+    "gain_db",
+    "stall_seconds",
+    "max_clock_drift_seconds",
+]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", FLOAT_SETTINGS)
+def test_settings_reject_non_finite_numbers(tmp_path, field, value):
+    """NaN slips past every ordering check (all comparisons are False), and
+    inf turns windows and cooldowns into hangs or never-triggers."""
+    with pytest.raises(ValueError, match=field):
+        _settings(tmp_path, **{field: value})
+
+
+def test_settings_cap_the_sample_rate_at_the_ad9361_maximum(tmp_path):
+    assert _settings(tmp_path, sample_rate=61.44e6).sample_rate == 61.44e6
+    with pytest.raises(ValueError, match="61.44e6"):
+        _settings(tmp_path, sample_rate=61.45e6)
+
+
+@pytest.mark.parametrize("field", ["averaging_seconds", "pre_trigger_seconds", "post_trigger_seconds"])
+def test_settings_cap_each_window_at_five_seconds(tmp_path, field):
+    """At 61.44 MS/s a 5 s window is already 2.5 GB of cf32 in memory."""
+    assert getattr(_settings(tmp_path, **{field: 5.0}), field) == 5.0
+    with pytest.raises(ValueError, match=field):
+        _settings(tmp_path, **{field: 5.01})
+
+
 def test_settings_reject_windows_shorter_than_one_sample(tmp_path):
     with pytest.raises(ValueError, match="at least one sample"):
         _settings(tmp_path, averaging_seconds=1e-7)

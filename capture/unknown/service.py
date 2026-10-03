@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import queue
 import shutil
 import signal
@@ -45,6 +46,21 @@ _SNIPPET_QUEUE_MAXSIZE = 2
 # 56 MS/s, 42.7 MiB of complex64).
 _SOURCE_BUFFER_SECONDS = 0.1
 _MIN_CLOCK_DRIFT_SECONDS = 0.5
+_MAX_SAMPLE_RATE = 61.44e6  # AD9361 (bladeRF xA9) maximum
+_MAX_WINDOW_SECONDS = 5.0  # cap on each of the averaging, pre- and post-trigger windows
+_FLOAT_SETTINGS = (
+    "center_freq_hz",
+    "sample_rate",
+    "noise_floor_dbfs",
+    "threshold_db",
+    "averaging_seconds",
+    "pre_trigger_seconds",
+    "post_trigger_seconds",
+    "cooldown_seconds",
+    "gain_db",
+    "stall_seconds",
+    "max_clock_drift_seconds",
+)
 # A session that ends in a drift rebuild sooner than this after opening
 # doesn't reset the backoff (see run()).
 _QUICK_DRIFT_SECONDS = 60.0
@@ -76,8 +92,17 @@ class CaptureSettings:
     max_clock_drift_seconds: float = 2.0
 
     def __post_init__(self) -> None:
-        if self.sample_rate <= 0 or self.center_freq_hz <= 0:
-            raise ValueError("sample_rate and center_freq_hz must be positive")
+        # First: NaN passes every ordering check below (comparisons are False).
+        for name in _FLOAT_SETTINGS:
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f"{name} must be finite, got {getattr(self, name)!r}")
+        if not 0 < self.sample_rate <= _MAX_SAMPLE_RATE:
+            raise ValueError("sample_rate must be in (0, 61.44e6] samples/s (the AD9361 maximum)")
+        if self.center_freq_hz <= 0:
+            raise ValueError("center_freq_hz must be positive")
+        for name in ("averaging_seconds", "pre_trigger_seconds", "post_trigger_seconds"):
+            if getattr(self, name) > _MAX_WINDOW_SECONDS:
+                raise ValueError(f"{name} must be <= {_MAX_WINDOW_SECONDS:g} s")
         if self.threshold_dbfs >= 0.0:
             raise ValueError(
                 f"Trigger threshold {self.threshold_dbfs} dBFS is at or above full "
