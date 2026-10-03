@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import subprocess
+from types import MappingProxyType
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,14 @@ _CELL_BLOCK = re.compile(
 
 _SUMMARY_HEADER = "Detected the following cells:"
 
+# Channel bandwidth for each MIB downlink bandwidth (3GPP TS 36.101
+# Table 5.6-1). Its keys are also the only n_RB values _SUMMARY_ROW accepts.
+_BANDWIDTH_MHZ_BY_N_RB = MappingProxyType(
+    {6: 1.4, 15: 3.0, 25: 5.0, 50: 10.0, 75: 15.0, 100: 20.0}
+)
+_N_RB_ALTERNATION = "|".join(str(n_rb) for n_rb in _BANDWIDTH_MHZ_BY_N_RB)
+_NORMAL_OR_EXTENDED = MappingProxyType({"N": "normal", "E": "extended"})
+
 # One row of the "Detected the following cells:" summary table CellSearch
 # prints last (columns: DPX CID A fc freq-offset RXPWR C nRB P PR
 # CrystalCorrectionFactor). Only cells whose MIB passed CRC reach it, so A
@@ -27,19 +36,19 @@ _SUMMARY_HEADER = "Detected the following cells:"
 _SUMMARY_ROW = re.compile(
     r"^(?P<duplex>FDD|TDD)\s+(?P<cell_id>\d+)\s+(?P<n_ports>[124])\s+"
     r"(?P<freq_mhz>[\d.]+)M\s+\S+\s+\S+\s+"
-    r"(?P<cp_type>[NE])\s+(?P<n_rb_dl>6|15|25|50|75|100)\s+"
+    rf"(?P<cp_type>[NE])\s+(?P<n_rb_dl>{_N_RB_ALTERNATION})\s+"
     r"(?P<phich_duration>[NE])\s+(?P<phich_resource>1/6|1/2|one|two)\s+\S+$",
     re.MULTILINE,
 )
 
-# Channel bandwidth for each MIB downlink bandwidth (3GPP TS 36.101
-# Table 5.6-1).
-_BANDWIDTH_MHZ_BY_N_RB = {6: 1.4, 15: 3.0, 25: 5.0, 50: 10.0, 75: 15.0, 100: 20.0}
-_NORMAL_OR_EXTENDED = {"N": "normal", "E": "extended"}
-
-# CellSearch's own dedup() treats same-ID detections within 1 MHz as one
-# cell. The table prints fc to 5 significant digits and the detection
-# block to 6, so frequencies are matched within this radius, not exactly.
+# CellSearch's dedup() merges same-ID detections whose actual carriers
+# (fc_requested + freq_superfine) lie within 1 MHz. The parser approximates
+# that by comparing fc alone: the table doesn't carry the residual offset at
+# full precision, and prints fc to 5 significant digits against the
+# detection block's 6. The approximation can only lose a match (MIB fields
+# left None, warning logged), never attach another cell's row: a candidate
+# must also share the detection's duplex mode and cell ID, and the nearest
+# one wins.
 _SAME_CELL_MHZ = 1.0
 
 _MIB_KEYS = (
