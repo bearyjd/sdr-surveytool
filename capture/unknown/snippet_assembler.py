@@ -140,6 +140,7 @@ class SnippetAssembler:
 
     def _collect(self, iq: np.ndarray, power: np.ndarray, pos: int) -> int:
         active = self._active
+        assert active is not None, "_collect() is only called mid-capture"
         take = min(len(active.iq) - active.filled, len(iq) - pos)
         active.iq[active.filled : active.filled + take] = iq[pos : pos + take]
         active.power[active.filled : active.filled + take] = power[pos : pos + take]
@@ -149,6 +150,7 @@ class SnippetAssembler:
 
     def _finish(self) -> CapturedSnippet:
         active, self._active = self._active, None
+        assert active is not None, "_finish() is only called mid-capture"
         return CapturedSnippet(
             iq=active.iq,
             power=active.power,

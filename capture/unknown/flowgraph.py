@@ -52,7 +52,7 @@ class SnippetTap(gr.sync_block):
             # 3.10.12). WORK_DONE ends the flowgraph cleanly instead; the
             # owner re-raises self.error.
             self.error = exc
-            return int(gr.WORK_DONE)
+            return int(gr.WORK_DONE)  # pyright: ignore[reportAttributeAccessIssue]
         self.samples_seen = start + len(iq)
         return len(iq)
 
@@ -80,8 +80,9 @@ def build_flowgraph(
     i-averaging_samples+1 .. i. The source is any complex64 GNU Radio block:
     gr-soapy in production, a vector/file source in tests."""
     top_block = gr.top_block("unknown_signal_capture")
-    magnitude_squared = blocks.complex_to_mag_squared(1)
-    moving_average = blocks.moving_average_ff(
+    # pyright can't see into GNU Radio's pybind11 modules (no stubs).
+    magnitude_squared = blocks.complex_to_mag_squared(1)  # pyright: ignore[reportAttributeAccessIssue]
+    moving_average = blocks.moving_average_ff(  # pyright: ignore[reportAttributeAccessIssue]
         averaging_samples, 1.0 / averaging_samples, _MOVING_AVERAGE_MAX_ITER, 1
     )
     tap = SnippetTap(assembler, on_snippet)

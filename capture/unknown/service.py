@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 from capture.common.emitter import RecordEmitter
 from capture.unknown.energy_trigger import TriggerConfig, record_trigger
@@ -23,6 +24,9 @@ from capture.unknown.snippet_writer import write_sigmf_snippet
 from dsp.spectral import mean_burst_power_dbfs, occupied_bandwidth_hz, peak_power_dbfs
 from schema.records import UnifiedRecord
 from storage.snippet_store import ensure_private_dir
+
+if TYPE_CHECKING:
+    from gnuradio import gr
 
 logger = logging.getLogger(__name__)
 
@@ -299,9 +303,16 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class _TapHealth(Protocol):
+    """What _drain polls on the flowgraph's SnippetTap."""
+
+    samples_seen: int
+    error: Exception | None
+
+
 def _drain(
     snippets: queue.Queue,
-    tap,
+    tap: _TapHealth,
     clock: SampleClock,
     stall_seconds: float,
     max_drift_seconds: float,
@@ -311,8 +322,7 @@ def _drain(
 ) -> Iterator[CapturedSnippet]:
     """Yield snippets as the flowgraph completes them; raise once it dies.
 
-    `tap` is the flowgraph's SnippetTap (anything with samples_seen and
-    error). A GNU Radio flowgraph fails silently from Python's point of
+    `tap` is the flowgraph's SnippetTap. A GNU Radio flowgraph fails silently from Python's point of
     view, so health is polled: a tap error is re-raised, samples_seen
     frozen for stall_seconds means the SDR stopped streaming, and sample time
     (clock.time_at(samples_seen)) more than max_drift_seconds from wall time
@@ -359,7 +369,7 @@ def _take_all(snippets: queue.Queue) -> Iterator[CapturedSnippet]:
             return
 
 
-def _build_soapy_source(settings: CaptureSettings):
+def _build_soapy_source(settings: CaptureSettings) -> gr.basic_block:
     """gr-soapy source for the configured device. Never called by tests (no
     SDR hardware); API verified by introspection against GNU Radio 3.10.12 and
     its bundled soapy_bladerf_source.block.yml template. Without a device or
@@ -367,7 +377,10 @@ def _build_soapy_source(settings: CaptureSettings):
     no match'), which run() logs and retries with backoff."""
     from gnuradio import soapy
 
-    source = soapy.source(settings.device, "fc32", 1, settings.device_args, "", [""], [""])
+    # pyright can't see into GNU Radio's pybind11 modules (no stubs).
+    source = soapy.source(  # pyright: ignore[reportAttributeAccessIssue]
+        settings.device, "fc32", 1, settings.device_args, "", [""], [""]
+    )
     source.set_sample_rate(0, settings.sample_rate)
     source.set_frequency(0, settings.center_freq_hz)
     # Manual gain: a dBFS trigger threshold is only meaningful at fixed gain.
@@ -383,6 +396,18 @@ def _parse_args(argv: list[str] | None = None) -> tuple[CaptureSettings, argpars
     parser.add_argument("--socket-path", default="/tmp/sdr-ingest.sock")
     parser.add_argument("--survey-id", required=True)
     parser.add_argument("--operator-id", required=True)
+    _add_radio_args(parser)
+    _add_trigger_args(parser)
+    _add_safety_args(parser)
+    args = parser.parse_args(argv)
+    try:
+        settings = _settings_from_args(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return settings, args
+
+
+def _add_radio_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--center-freq", type=float, required=True, help="Hz")
     parser.add_argument(
         "--sample-rate",
@@ -392,6 +417,12 @@ def _parse_args(argv: list[str] | None = None) -> tuple[CaptureSettings, argpars
         "~56e6, but the Python capture chain sustained only ~58e6 on a fast "
         "x86 desktop; profile the Jetson before raising this.",
     )
+    parser.add_argument("--gain-db", type=float, default=30.0)
+    parser.add_argument("--device", default="driver=bladerf")
+    parser.add_argument("--device-args", default="")
+
+
+def _add_trigger_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--noise-floor-dbfs",
         type=float,
@@ -405,9 +436,15 @@ def _parse_args(argv: list[str] | None = None) -> tuple[CaptureSettings, argpars
     parser.add_argument("--pre-trigger-s", type=float, default=0.1)
     parser.add_argument("--post-trigger-s", type=float, default=0.9)
     parser.add_argument("--cooldown-s", type=float, default=30.0)
-    parser.add_argument("--gain-db", type=float, default=30.0)
-    parser.add_argument("--device", default="driver=bladerf")
-    parser.add_argument("--device-args", default="")
+
+
+def _add_safety_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--staging-dir",
+        default="data/snippet-staging",
+        help="Must match ingest's --snippet-staging-dir, on the same filesystem "
+        "as its --snippet-store-dir, owned by the uid both services run as.",
+    )
     parser.add_argument(
         "--min-free-bytes",
         type=int,
@@ -422,32 +459,25 @@ def _parse_args(argv: list[str] | None = None) -> tuple[CaptureSettings, argpars
         help="Rebuild the radio session (re-anchoring sample time) when sample "
         "time and wall time diverge by more than this.",
     )
-    parser.add_argument(
-        "--staging-dir",
-        default="data/snippet-staging",
-        help="Must match ingest's --snippet-staging-dir.",
+
+
+def _settings_from_args(args: argparse.Namespace) -> CaptureSettings:
+    return CaptureSettings(
+        center_freq_hz=args.center_freq,
+        sample_rate=args.sample_rate,
+        noise_floor_dbfs=args.noise_floor_dbfs,
+        staging_dir=Path(args.staging_dir),
+        threshold_db=args.threshold_db,
+        averaging_seconds=args.averaging_ms / 1000.0,
+        pre_trigger_seconds=args.pre_trigger_s,
+        post_trigger_seconds=args.post_trigger_s,
+        cooldown_seconds=args.cooldown_s,
+        gain_db=args.gain_db,
+        device=args.device,
+        device_args=args.device_args,
+        min_free_bytes=args.min_free_bytes,
+        max_clock_drift_seconds=args.max_clock_drift_s,
     )
-    args = parser.parse_args(argv)
-    try:
-        settings = CaptureSettings(
-            center_freq_hz=args.center_freq,
-            sample_rate=args.sample_rate,
-            noise_floor_dbfs=args.noise_floor_dbfs,
-            staging_dir=Path(args.staging_dir),
-            threshold_db=args.threshold_db,
-            averaging_seconds=args.averaging_ms / 1000.0,
-            pre_trigger_seconds=args.pre_trigger_s,
-            post_trigger_seconds=args.post_trigger_s,
-            cooldown_seconds=args.cooldown_s,
-            gain_db=args.gain_db,
-            device=args.device,
-            device_args=args.device_args,
-            min_free_bytes=args.min_free_bytes,
-            max_clock_drift_seconds=args.max_clock_drift_s,
-        )
-    except ValueError as exc:
-        parser.error(str(exc))
-    return settings, args
 
 
 def _raise_keyboard_interrupt(signum: int, frame: object) -> None:
