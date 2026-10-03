@@ -50,13 +50,20 @@ The dBFS power stats and the occupied-bandwidth estimate live in the shared top-
     cooldown.
 - `identifier.bandwidth_estimate` is the 99%-power occupied bandwidth of the burst
   (resolution sample_rate / 1024).
-  - **Noise floor:** the 10th-percentile PSD bin, scaled to the noise mean. Unlike a
-    median, this stays valid for signals filling up to 90% of the band.
-  - **Accuracy:** within +-5% at >= 15 dB SNR (flat spectra up to 85% of the band,
-    shaped spectra within 2% at 70%), and up to +24% at the 10 dB trigger margin.
-    Bursts only a few 1024-sample frames long are overestimated.
-  - **Unreliable estimates:** a burst filling more than 90% of the band, or wrapping
-    its edges, carries `quality_flags.bandwidth_estimate_unreliable: true`.
+  - **Noise floor:** measured per FFT bin from the snippet's own pre-trigger samples,
+    which are below the threshold by construction (`dsp.spectral.noise_floor_psd`).
+    It therefore follows the SDR's anti-alias roll-off and colored noise, and it
+    subtracts an emitter that was already on below the threshold, so the estimate
+    describes the burst that triggered capture.
+  - **Accuracy:** across 20 seeds, within -3%..+3% for 10-70 kHz brick-wall and
+    70-85% shaped bursts at 11-20 dB SNR. This holds on white noise and on noise
+    through 60%/80%-passband roll-off filters. Bursts only a few 1024-sample frames
+    long are overestimated.
+  - **Unreliable estimates:** these carry
+    `quality_flags.bandwidth_estimate_unreliable: true`:
+    - a burst filling more than 90% of the band, or wrapping its edges;
+    - a snippet with fewer than 8 frames of pre-trigger reference (e.g. a trigger
+      right after stream start), which falls back to a flat median floor.
 
 ## Snippet handoff (capture never writes to storage)
 
@@ -64,7 +71,9 @@ Capture writes `<stamp>_<freq>Hz_<id>.sigmf-data` + `.sigmf-meta` into `--stagin
 and emits the record with `iq_snippet_path` set to the staged absolute `.sigmf-data` path.
 Each file is written under a hidden temporary name, fsynced, and renamed into place,
 data first and meta last; the staging directory is fsynced after both renames. So a
-`.sigmf-meta` never appears without its complete data, even across a crash. Every
+`.sigmf-meta` never appears without its complete data, even across a crash. The
+meta marks the trigger with standard SigMF annotations: `pre_trigger` (the noise
+reference) over `[0, trigger)` and `burst` from the trigger sample on. Every
 measurement runs before anything is written. If the record cannot be emitted, the
 staged pair is deleted. Capture can start before ingest: the emitter connects
 lazily, and while ingest is down, emits fail per snippet and their staged pairs are
@@ -90,10 +99,10 @@ Ingest's `LocalSnippetStore` treats the path as untrusted:
   doesn't lose the detection. The record is still persisted, with
   `iq_snippet_path: null` and `quality_flags.snippet_rejected` set to the reason.
 - **Failed persist:** if persisting the record fails after its snippet was adopted,
-  ingest removes the adopted pair again only once a fresh query confirms no row
-  references it. The error may have come after COMMIT, so if that check fails too
-  (e.g. the database is down), the files are kept: an orphan is recoverable, a
-  dangling reference is not.
+  ingest removes the adopted pair, and reverts the grid-density count, only once a
+  fresh query confirms no row references it. The error may have come after COMMIT,
+  so if the row is found, or the check fails too (e.g. the database is down), the
+  files and count are kept: an orphan is recoverable, a dangling reference is not.
 
 **Deployment requirements** (checked at startup, which fails with an actionable
 message):

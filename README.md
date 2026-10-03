@@ -27,6 +27,10 @@ for the full architecture design.
   staging and store directories must be owned by it with mode `0700`, and both must
   be on **one filesystem and mount**. Snippets are hard-linked from staging into the
   store. Both services check this at startup.
+- Capture services (WiFi, Bluetooth, unknown) never block on ingest. The shared
+  emitter connects lazily, so they can start first. Each connect or send times out
+  after 5 s and is retried once, so a stalled ingest costs the record being sent
+  after about 2 x 5 s. That record is dropped and logged, and capture carries on.
 - Unknown-signal capture flags such as `--min-free-bytes` (disk floor, default
   2 GiB) and `--max-clock-drift-s` (re-anchor threshold, default 2 s) are documented
   in [capture/unknown/README.md](capture/unknown/README.md).

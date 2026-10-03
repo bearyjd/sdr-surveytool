@@ -162,9 +162,17 @@ pipeline, §7 storage).
 >     `bandwidth_estimate_unreliable` is set past 90% of fs or on edge wrap;
 >   - cooldowns are merged from the assembler at session end, so they count from
 >     the trigger.
-> - **Final counts:** the full suite gives `255 passed, 1 skipped`, and the
+> - **Verification round:**
+>   - the 10th-percentile floor regressed on colored, rolled-off noise, so the
+>     bandwidth floor is now measured per bin from the snippet's pre-trigger
+>     samples (`dsp.spectral.noise_floor_psd`, `reference_iq=`);
+>   - when there's no usable reference, a median fallback is used and the estimate
+>     is flagged unreliable;
+>   - SigMF annotations mark `pre_trigger` and `burst`;
+>   - the ingest grid count is reverted only when the row is confirmed absent.
+> - **Final counts:** the full suite gives `270 passed, 1 skipped`, and the
 >   `-W error` subset (`tests/capture/unknown tests/dsp
->   tests/storage/test_snippet_store.py`) gives `182 passed`.
+>   tests/storage/test_snippet_store.py`) gives `197 passed`.
 
 ## Verified facts (build-and-run spike, 2026-10-03)
 
