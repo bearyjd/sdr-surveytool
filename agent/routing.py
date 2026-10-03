@@ -3,10 +3,12 @@
 <band-id>:<signal> (a non-empty signal), confidence >= 0.85, no
 reduced-confidence reason (agent.analysis; e.g. edge_region_unreliable), AND
 grounding of that very tag: its band id is a grounded band-table entry, and
-its signal is one that entry is known for (every word of it appears in one
-of the entry's typical_signals, case and punctuation aside). In v1 only the
-band table grounds; a modulation classifier's label never does by itself.
-Everything else is needs_review, which is terminal for the agent."""
+its signal is one that entry is known for: lower-cased, with -, _, . and
+spaces stripped, it equals a word or a run of consecutive words of one of
+the entry's typical_signals, treated the same way (wifi matches "Wi-Fi",
+adsb "ADS-B", 80211n "802.11n"). In v1 only the band table grounds; a
+modulation classifier's label never does by itself. Everything else is
+needs_review, which is terminal for the agent."""
 
 from __future__ import annotations
 
@@ -29,14 +31,36 @@ class Decision:
     reasoning: str
 
 
-def _words(text: str) -> set[str]:
-    return set(re.findall(r"[a-z0-9]+", text.lower()))
+_CLAUSES = re.compile(r"[/(),;:]")  # a typical-signal description's parts
+_JOINERS = re.compile(r"[-_.:\s]+")  # stripped on both sides before comparing
+_MAX_PHRASE_WORDS = 4
+# Words that name no signal on their own ("FHSS and FSK", "1 Mbit/s").
+_FILLER = {"and", "or", "on", "of", "the", "in", "for", "with", "to", "s", "mhz", "khz", "band", "channels"}
+
+
+def _normalized(text: str) -> str:
+    return _JOINERS.sub("", text.lower())
+
+
+def _forms(described: str) -> set[str]:
+    """Each word of a typical-signal description, and each run of up to 4
+    consecutive words within one of its clauses, normalized. A lone filler
+    word or number is not a form."""
+    forms = set()
+    for clause in _CLAUSES.split(described):
+        words = clause.split()
+        for start in range(len(words)):
+            for stop in range(start + 1, min(start + _MAX_PHRASE_WORDS, len(words)) + 1):
+                form = _normalized("".join(words[start:stop]))
+                if stop - start > 1 or (form not in _FILLER and not form.isdigit()):
+                    forms.add(form)
+    return forms
 
 
 def _typical(signal: str, typical_signals: Sequence[str]) -> bool:
-    """Every word of `signal` appears in one typical-signal description."""
-    words = _words(signal)
-    return bool(words) and any(words <= _words(described) for described in typical_signals)
+    """`signal`, normalized, is a form of one typical-signal description."""
+    wanted = _normalized(signal)
+    return bool(wanted) and any(wanted in _forms(described) for described in typical_signals)
 
 
 def route(

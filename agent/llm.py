@@ -40,9 +40,9 @@ RECORD_CLASSIFICATION_TOOL: dict[str, Any] = {
                 "type": ["string", "null"],
                 "pattern": TAG_PATTERN,
                 "description": (
-                    "Lower-case identity label, e.g. 'ism_902_928:lora' or 'fm_broadcast:wbfm'. "
-                    "Prefix with the band table id when an entry fits. null if you cannot "
-                    "propose any identity."
+                    "Lower-case identity label, e.g. 'ism_902_928:lora' or 'fm_broadcast:wbfm': "
+                    "a band table id, then a signal drawn from that entry's typical_signals. "
+                    "null if you cannot propose any identity."
                 ),
             },
             "confidence": {

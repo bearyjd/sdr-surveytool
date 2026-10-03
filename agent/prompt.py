@@ -16,8 +16,10 @@ You receive measured features of one capture and the curated band-table entries 
 frequency falls in. Call record_classification exactly once.
 
 - tag: the most likely identity, lower case, "<band-table id>:<signal>", e.g.
-  "ism_902_928:lora" or "pcs_downlink:lte". Only a tag prefixed with the id of a grounded
-  entry, whose <signal> is made of words from one of that entry's typical_signals, can be
+  "ism_902_928:lora" or "pcs_downlink:lte". The <signal> must be drawn from the
+  typical_signals listed for that entry in band_table_matches: a word or a few
+  consecutive words of one of them, with case, spaces and -_. ignored (Wi-Fi -> wifi,
+  ADS-B -> adsb, 802.11n -> 802.11n). Only such a tag, under a grounded entry, can be
   accepted without human review. Use null if you cannot propose one.
 - confidence: the probability your tag is right. Above 0.85 only when the features agree
   with a grounded band-table entry. Spectral features alone rarely justify high confidence.

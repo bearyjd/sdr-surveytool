@@ -1,8 +1,11 @@
 # tests/agent/test_routing.py
+import re
+
 import pytest
 
 from agent.analysis import EDGE_REGION_UNRELIABLE
-from agent.llm import Classification
+from agent.band_table import load_band_table
+from agent.llm import RECORD_CLASSIFICATION_TOOL, Classification
 from agent.routing import AUTO_CLASSIFY_CONFIDENCE, needs_review, route
 from schema.records import ClassificationStatus
 
@@ -78,3 +81,39 @@ def test_needs_review_has_null_tag_zero_confidence_and_bounded_reason():
     assert decision.status is ClassificationStatus.NEEDS_REVIEW
     assert (decision.tag, decision.confidence) == (None, 0.0)
     assert len(decision.reasoning) == 4000
+
+
+SHIPPED = {entry.id: entry.typical_signals for entry in load_band_table().entries}
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "fm_broadcast:wbfm", "fm_broadcast:wideband_fm", "ism_2400:wifi", "ism_2400:802.11n", "ism_2400:ble",
+        "adsb_1090:adsb", "adsb_1090:ppm", "frs_gmrs_462:nfm", "ham_2m:nfm", "uhf_tv:8vsb", "uhf_tv:ofdm",
+        "pcs_downlink:lte", "pcs_downlink:nr", "lte_b71_600_downlink:nr", "unii_5725_5850:802.11ac",
+        "marine_vhf:ais", "airband_vhf:am", "ism_902_928:lorawan",
+    ],
+)
+def test_natural_tags_ground_against_the_shipped_typical_signals(tag):
+    """The reviewer's list: lower case, with -, _, . and spaces stripped on
+    both sides, so wifi matches Wi-Fi, adsb ADS-B and 80211n 802.11n."""
+    band = tag.split(":")[0]
+    decision = route(_c(tag=tag, confidence=0.9), {band: SHIPPED[band]})
+    assert decision.status is ClassificationStatus.AUTO_CLASSIFIED, decision.reasoning
+
+
+@pytest.mark.parametrize("tag", ["ism_902_928:lte", "ism_902_928:and", "adsb_1090:1", "fm_broadcast:mhz"])
+def test_a_signal_the_band_is_not_known_for_still_needs_review(tag):
+    band = tag.split(":")[0]
+    assert route(_c(tag=tag, confidence=0.99), {band: SHIPPED[band]}).status is ClassificationStatus.NEEDS_REVIEW
+
+
+def test_the_tool_schemas_own_examples_auto_classify():
+    """The model copies the schema's examples; they must be tags that pass."""
+    description = RECORD_CLASSIFICATION_TOOL["input_schema"]["properties"]["tag"]["description"]
+    examples = re.findall(r"'([a-z0-9_]+:[a-z0-9_.-]+)'", description)
+    assert examples
+    for tag in examples:
+        band = tag.split(":")[0]
+        assert route(_c(tag=tag, confidence=0.9), {band: SHIPPED[band]}).status is ClassificationStatus.AUTO_CLASSIFIED
