@@ -210,7 +210,7 @@ def _write_snippet(snippet: CapturedSnippet, settings: CaptureSettings) -> str:
         snippet.iq,
         settings.staging_dir,
         snippet.sample_rate,
-        settings.center_freq_hz,
+        snippet.trigger.center_freq_hz,
         snippet.start_time,
         trigger_offset=snippet.trigger.sample_index - snippet.start_index,
     )
@@ -241,7 +241,7 @@ def _snippet_record(
     )
     event = SnippetCaptureEvent(
         timestamp=snippet.trigger.time,
-        center_freq_hz=settings.center_freq_hz,
+        center_freq_hz=snippet.trigger.center_freq_hz,  # as tuned, read back
         sample_rate=snippet.sample_rate,
         bandwidth_estimate_hz=bandwidth.hz,
         peak_power_dbfs=peak_power_dbfs(power),
@@ -456,7 +456,7 @@ def _dropped_detection_record(
 ) -> UnifiedRecord:
     event = SnippetCaptureEvent(
         timestamp=item.trigger.time,
-        center_freq_hz=settings.center_freq_hz,
+        center_freq_hz=item.trigger.center_freq_hz,
         sample_rate=item.sample_rate,
         bandwidth_estimate_hz=None,
         peak_power_dbfs=item.peak_power_dbfs,
@@ -559,16 +559,22 @@ def _open_session(
     # Open the device first: opening and tuning a bladeRF can take seconds, and
     # the anchor must be read as close as possible to sample 0, i.e. right
     # before start(), or every timestamp would be early by the open time.
-    source, actual_rate = _build_soapy_source(settings)
+    source, actual_rate, actual_freq = _build_soapy_source(settings)
     if actual_rate != settings.sample_rate:
         logger.warning(
             "SDR runs at %.9g samples/s, not the requested %.9g; timing uses the actual rate",
             actual_rate,
             settings.sample_rate,
         )
-        # Every sample count and the clock follow the rate the samples
-        # actually arrive at, or sample time drifts from wall time.
-        settings = replace(settings, sample_rate=actual_rate)
+    if actual_freq != settings.center_freq_hz:
+        logger.warning(
+            "SDR tuned to %.9g Hz, not the requested %.9g Hz; records use the tuned frequency",
+            actual_freq,
+            settings.center_freq_hz,
+        )
+    # Every sample count, the clock, the cooldown key and each snippet's
+    # labelled frequency follow what the SDR actually does, not the request.
+    settings = replace(settings, sample_rate=actual_rate, center_freq_hz=actual_freq)
     source.set_min_output_buffer(settings.samples(_SOURCE_BUFFER_SECONDS))
     clock = SampleClock(anchor=wall_clock(), sample_rate=actual_rate)
     cooldowns = _clamp_to_anchor(last_trigger_at, clock.anchor)
@@ -701,9 +707,9 @@ def _take_all(snippets: queue.Queue) -> Iterator[CapturedSnippet]:
             return
 
 
-def _build_soapy_source(settings: CaptureSettings) -> tuple[gr.basic_block, float]:
-    """gr-soapy source for the configured device, and the sample rate read
-    back from it (drivers round unsupported rates). Never called by tests (no
+def _build_soapy_source(settings: CaptureSettings) -> tuple[gr.basic_block, float, float]:
+    """gr-soapy source for the configured device, plus the sample rate and
+    center frequency read back from it (drivers round both). Never called by tests (no
     SDR hardware); API verified by introspection against GNU Radio 3.10.12 and
     its bundled soapy_bladerf_source.block.yml template. Without a device or
     driver module, soapy.source raises RuntimeError('SoapySDR::Device::make()
@@ -719,7 +725,7 @@ def _build_soapy_source(settings: CaptureSettings) -> tuple[gr.basic_block, floa
     # Manual gain: a dBFS trigger threshold is only meaningful at fixed gain.
     source.set_gain_mode(0, False)
     source.set_gain(0, settings.gain_db)
-    return source, source.get_sample_rate(0)
+    return source, source.get_sample_rate(0), source.get_frequency(0)
 
 
 def _parse_args(argv: list[str] | None = None) -> tuple[CaptureSettings, argparse.Namespace]:

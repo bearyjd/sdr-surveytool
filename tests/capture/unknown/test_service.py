@@ -15,6 +15,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import sigmf
+from sigmf import sigmffile
+
 from capture.unknown import service
 from capture.unknown.energy_trigger import TriggerEvent
 from capture.unknown.sample_clock import SampleClock
@@ -40,7 +43,11 @@ def _settings(staging_dir: Path, **overrides) -> CaptureSettings:
 
 
 def _snippet(
-    trigger_index: int = 60_000, pre: int = 10_000, post: int = 90_000, sample_rate: float = FS
+    trigger_index: int = 60_000,
+    pre: int = 10_000,
+    post: int = 90_000,
+    sample_rate: float = FS,
+    center_freq_hz: float = 915e6,
 ) -> CapturedSnippet:
     n = pre + post
     iq = np.full(n, 0.01, dtype=np.complex64)
@@ -55,7 +62,7 @@ def _snippet(
         trigger=TriggerEvent(
             sample_index=trigger_index,
             time=ANCHOR + timedelta(seconds=trigger_index / sample_rate),
-            center_freq_hz=915e6,
+            center_freq_hz=center_freq_hz,
         ),
         sample_rate=sample_rate,
     )
@@ -212,6 +219,14 @@ def test_record_flags_an_unreliable_bandwidth_estimate(tmp_path, monkeypatch):
     record = process_snippet(_snippet(), _settings(tmp_path), "s1", "op1")
     assert record.identifier.bandwidth_estimate == 95_000.0
     assert record.metadata.quality_flags["bandwidth_estimate_unreliable"] is True
+
+
+def test_record_and_sigmf_carry_the_frequency_the_sdr_actually_tuned(tmp_path):
+    tuned = 915_001_250.0
+    record = process_snippet(_snippet(center_freq_hz=tuned), _settings(tmp_path), "s1", "op1")
+    assert record.identifier.center_freq == tuned
+    recording = sigmffile.fromfile(record.metadata.iq_snippet_path)
+    assert recording.get_captures()[0][sigmf.FREQUENCY_KEY] == tuned
 
 
 def test_snippet_duration_reflects_samples_actually_captured(tmp_path):

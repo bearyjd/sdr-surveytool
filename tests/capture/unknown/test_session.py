@@ -59,7 +59,7 @@ def test_open_session_streams_snippets_then_stalls_and_tears_down(tmp_path, monk
 
     def fake_source(settings):
         opened_at.append(datetime.now(timezone.utc))
-        return blocks.vector_source_c(_iq_with_burst_at(50_000), False), FS
+        return blocks.vector_source_c(_iq_with_burst_at(50_000), False), FS, 915e6
 
     monkeypatch.setattr(service, "_build_soapy_source", fake_source)
     settings = _settings(tmp_path)
@@ -83,7 +83,7 @@ def test_open_session_tears_down_a_flowgraph_whose_start_fails(tmp_path, monkeyp
     monkeypatch.setattr(
         service,
         "_build_soapy_source",
-        lambda settings: (blocks.vector_source_c(np.zeros(10, np.complex64), False), FS),
+        lambda settings: (blocks.vector_source_c(np.zeros(10, np.complex64), False), FS, 915e6),
     )
 
     def failing_start(self):
@@ -105,7 +105,7 @@ def test_source_gets_100ms_of_output_buffer_before_start(tmp_path, monkeypatch):
 
     def fake_source(settings):
         sources.append(blocks.vector_source_c(np.zeros(1_000, np.complex64), False))
-        return sources[-1], FS
+        return sources[-1], FS, 915e6
 
     real_start = gr.top_block.start
 
@@ -130,7 +130,7 @@ def test_session_times_samples_at_the_rate_the_sdr_actually_runs(tmp_path, monke
 
     def fake_source(settings):
         opened_at.append(datetime.now(timezone.utc))
-        return blocks.vector_source_c(_iq_with_burst_at(50_000), False), actual
+        return blocks.vector_source_c(_iq_with_burst_at(50_000), False), actual, 915e6
 
     monkeypatch.setattr(service, "_build_soapy_source", fake_source)
     with caplog.at_level(logging.WARNING):
@@ -152,7 +152,7 @@ def test_cooldowns_from_the_future_are_clamped_after_a_backward_clock_step(tmp_p
     monkeypatch.setattr(
         service,
         "_build_soapy_source",
-        lambda settings: (blocks.vector_source_c(_iq_with_burst_at(150_000, n=300_000), False), FS),
+        lambda settings: (blocks.vector_source_c(_iq_with_burst_at(150_000, n=300_000), False), FS, 915e6),
     )
     settings = _settings(tmp_path, cooldown_seconds=1.0)
     stored = {915e6: anchor + timedelta(minutes=10)}  # recorded before the clock stepped back
@@ -176,7 +176,7 @@ def test_a_trigger_whose_capture_never_completed_still_sets_the_cooldown(tmp_pat
     monkeypatch.setattr(
         service,
         "_build_soapy_source",
-        lambda settings: (blocks.vector_source_c(_iq_with_burst_at(190_000, n=200_000), False), FS),
+        lambda settings: (blocks.vector_source_c(_iq_with_burst_at(190_000, n=200_000), False), FS, 915e6),
     )
     cooldowns: dict = {}
     with pytest.raises(RuntimeError, match="stalled"):
@@ -185,3 +185,21 @@ def test_a_trigger_whose_capture_never_completed_still_sets_the_cooldown(tmp_pat
 
     (when,) = cooldowns.values()
     assert anchor + timedelta(seconds=1.9) <= when < anchor + timedelta(seconds=1.901)
+
+
+def test_session_keys_and_labels_snippets_by_the_frequency_the_sdr_tuned(tmp_path, monkeypatch, caplog):
+    """Drivers round the tuned frequency too: the cooldown key, the record's
+    center_freq and the SigMF meta must use the frequency read back."""
+    tuned = 915_001_250.0
+    monkeypatch.setattr(
+        service,
+        "_build_soapy_source",
+        lambda settings: (blocks.vector_source_c(_iq_with_burst_at(50_000), False), FS, tuned),
+    )
+    cooldowns: dict = {}
+    with caplog.at_level(logging.WARNING):
+        with service._open_session(_settings(tmp_path), cooldowns, Counter()) as snippets:
+            snippet = next(snippets)
+    assert snippet.trigger.center_freq_hz == tuned
+    assert list(cooldowns) == [tuned]
+    assert "tuned" in caplog.text
