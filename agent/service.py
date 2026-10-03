@@ -299,12 +299,7 @@ class ClassificationAgent:
         if result.classification is None:
             self._hold_bad_output(record.id, needs_review(f"Model output failed validation: {result.failure}"))
             return None
-        decision = route(
-            result.classification,
-            analysis.grounded_band_ids,
-            analysis.modulation_label,
-            analysis.reduced_confidence,
-        )
+        decision = route(result.classification, analysis.grounded_band_ids, analysis.reduced_confidence)
         self._remember(record.id, decision)  # before releasing held answers can fail
         self._release_bad_outputs()
         return decision

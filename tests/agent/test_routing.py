@@ -18,30 +18,29 @@ def test_threshold_is_085():
 
 
 def test_confident_tag_under_a_grounded_band_is_auto_classified_verbatim():
-    decision = route(_c(confidence=0.85), GROUNDED, None)
+    decision = route(_c(confidence=0.85), GROUNDED)
     assert decision.status is ClassificationStatus.AUTO_CLASSIFIED
     assert (decision.tag, decision.confidence, decision.reasoning) == ("ism_902_928:lora", 0.85, "Because.")
 
 
-def test_a_modulation_prediction_grounds_a_tag_ending_in_its_label():
-    decision = route(_c(tag="unknown_band:lora", confidence=0.9), frozenset(), "lora")
-    assert decision.status is ClassificationStatus.AUTO_CLASSIFIED
-
-
 @pytest.mark.parametrize(
-    "classification, grounded, modulation, why",
+    "classification, grounded, why",
     [
-        (_c(confidence=0.8499), GROUNDED, None, "below 0.85"),
-        (_c(confidence=1.0), frozenset(), None, "no grounded band-table match"),
-        (_c(tag=None, confidence=1.0), GROUNDED, None, "proposed no tag"),
+        (_c(confidence=0.8499), GROUNDED, "below 0.85"),
+        (_c(confidence=1.0), frozenset(), "'ism_902_928' is not a grounded"),
+        (_c(tag=None, confidence=1.0), GROUNDED, "proposed no tag"),
         # A confident tag naming a band the signal is not grounded in.
-        (_c(tag="pcs_downlink:lte", confidence=0.99), GROUNDED, None, "'pcs_downlink' is not a grounded"),
-        (_c(tag="lora", confidence=0.99), GROUNDED, None, "'lora' is not a grounded"),
-        (_c(tag="unknown_band:fsk", confidence=0.99), frozenset(), "lora", "'unknown_band' is not a grounded"),
+        (_c(tag="pcs_downlink:lte", confidence=0.99), GROUNDED, "'pcs_downlink' is not a grounded"),
+        # Bare or empty-suffixed tags carry no signal identity.
+        (_c(tag="ism_902_928", confidence=0.99), GROUNDED, "is not <band-id>:<signal>"),
+        (_c(tag="ism_902_928:", confidence=0.99), GROUNDED, "is not <band-id>:<signal>"),
+        (_c(tag="lora", confidence=0.99), GROUNDED, "is not <band-id>:<signal>"),
+        # In v1 a modulation label never grounds a tag by itself.
+        (_c(tag="unknown_band:lora", confidence=0.99), frozenset(), "'unknown_band' is not a grounded"),
     ],
 )
-def test_everything_else_needs_review_keeping_the_models_answer(classification, grounded, modulation, why):
-    decision = route(classification, grounded, modulation)
+def test_everything_else_needs_review_keeping_the_models_answer(classification, grounded, why):
+    decision = route(classification, grounded)
     assert decision.status is ClassificationStatus.NEEDS_REVIEW
     assert (decision.tag, decision.confidence) == (classification.tag, classification.confidence)
     assert decision.reasoning.startswith("Because.") and why in decision.reasoning
@@ -50,16 +49,15 @@ def test_everything_else_needs_review_keeping_the_models_answer(classification, 
 @pytest.mark.parametrize("reasons", [(EDGE_REGION_UNRELIABLE,), ("non_finite_samples", "bandwidth_unreliable")])
 def test_any_reduced_confidence_reason_caps_at_needs_review(reasons):
     """A self-floor primary in the band-edge zone may be the receiver's
-    roll-off, not a signal: neither a grounded band nor a matching
-    modulation label can auto-classify it, nor any other reason's record."""
-    for grounded, modulation in ((GROUNDED, None), (frozenset(), "lora")):
-        decision = route(_c(confidence=0.99), grounded, modulation, reasons)
-        assert decision.status is ClassificationStatus.NEEDS_REVIEW
-        assert f"reduced confidence ({', '.join(reasons)})" in decision.reasoning
+    roll-off, not a signal: even a grounded band cannot auto-classify it,
+    nor any other reason's record."""
+    decision = route(_c(confidence=0.99), GROUNDED, reasons)
+    assert decision.status is ClassificationStatus.NEEDS_REVIEW
+    assert f"reduced confidence ({', '.join(reasons)})" in decision.reasoning
 
 
 def test_routed_reasoning_fits_the_db_limit():
-    decision = route(_c(confidence=0.1, reasoning="x" * 2000), frozenset(), None)
+    decision = route(_c(confidence=0.1, reasoning="x" * 2000), frozenset())
     assert len(decision.reasoning) <= 4000
 
 

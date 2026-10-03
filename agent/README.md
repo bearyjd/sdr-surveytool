@@ -5,8 +5,10 @@ record's SigMF snippet, splits the spectrum into occupied regions, measures the 
 one (bandwidth, center, duty cycle, bursts, PAPR, flatness, symbol rate), matches it
 against a small curated US band table with eCFR citations, and asks Claude for one
 forced `record_classification` tool call. Routing writes `auto_classified` only when the
-confidence is >= 0.85 and the tag's band prefix (`ism_902_928` in `ism_902_928:lora`) is
-a band-table entry the signal is grounded in; everything else goes to `needs_review`.
+tag has the form `<band-id>:<signal>`, the confidence is >= 0.85, and the band id
+(`ism_902_928` in `ism_902_928:lora`) is a band-table entry the signal is grounded in;
+everything else goes to `needs_review`. In v1 only the band table grounds: a modulation
+classifier's label is shown to the model but never grounds a tag by itself.
 The noise reference is the snippet's pre-trigger, below the trigger threshold step 4
 records in the SigMF. Any `reduced_confidence` reason keeps every band match ungrounded
 and caps routing at `needs_review`: NaN or inf samples, an unreliable bandwidth, a

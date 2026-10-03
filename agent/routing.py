@@ -1,10 +1,11 @@
 # agent/routing.py
-"""Confidence-based routing (pure). auto_classified needs a tag, confidence
->= 0.85, no reduced-confidence reason (agent.analysis; e.g.
-edge_region_unreliable), AND grounding of that very tag: its band prefix
-(the part before the first ':') is the id of a grounded band-table entry, or
-its last part is the modulation classifier's label. Everything else is
-needs_review, which is terminal for the agent."""
+"""Confidence-based routing (pure). auto_classified needs a tag of the form
+<band-id>:<signal> (a non-empty signal), confidence >= 0.85, no
+reduced-confidence reason (agent.analysis; e.g. edge_region_unreliable), AND
+grounding of that very tag: its band id is a grounded band-table entry. In
+v1 only the band table grounds; a modulation classifier's label never does
+by itself. Everything else is needs_review, which is terminal for the
+agent."""
 
 from __future__ import annotations
 
@@ -28,21 +29,21 @@ class Decision:
 def route(
     classification: Classification,
     grounded_band_ids: frozenset[str],
-    modulation_label: str | None,
     reduced_confidence: tuple[str, ...] = (),
 ) -> Decision:
     tag = classification.tag
+    band, _, signal = (tag or "").partition(":")
     if tag is None:
         why = "the model proposed no tag"
     elif reduced_confidence:
         why = f"reduced confidence ({', '.join(reduced_confidence)})"
     elif classification.confidence < AUTO_CLASSIFY_CONFIDENCE:
         why = f"confidence {classification.confidence:.2f} is below {AUTO_CLASSIFY_CONFIDENCE:.2f}"
-    elif not grounded_band_ids and modulation_label is None:
-        why = "no grounded band-table match and no modulation prediction"
-    elif tag.split(":")[0] not in grounded_band_ids and tag.split(":")[-1] != modulation_label:
+    elif not signal:
+        why = f"the tag {tag!r} is not <band-id>:<signal>"
+    elif band not in grounded_band_ids:
         why = (
-            f"the tag's band prefix {tag.split(':')[0]!r} is not a grounded band-table entry "
+            f"the tag's band prefix {band!r} is not a grounded band-table entry "
             f"({', '.join(sorted(grounded_band_ids)) or 'none'})"
         )
     else:
