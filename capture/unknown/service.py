@@ -346,6 +346,28 @@ def _discard_staged(data_path: str | None) -> None:
         staged.unlink(missing_ok=True)
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _clamp_to_anchor(
+    last_trigger_at: Mapping[float, datetime], anchor: datetime
+) -> dict[float, datetime]:
+    """After a backward wall-clock step (NTP/GPS), a trigger time stored by an
+    earlier session can lie in the new session's future, which would
+    suppress detection for cooldown + the step. Clamp those to the anchor."""
+    future = [when for when in last_trigger_at.values() if when > anchor]
+    if future:
+        logger.warning(
+            "Wall clock stepped back: clamping %d cooldown(s) up to %s down to the new "
+            "anchor %s",
+            len(future),
+            max(future).isoformat(),
+            anchor.isoformat(),
+        )
+    return {freq: min(when, anchor) for freq, when in last_trigger_at.items()}
+
+
 def _offer_or_drop(
     snippets: queue.Queue, drops: Counter[str]
 ) -> Callable[[CapturedSnippet], None]:
@@ -373,6 +395,7 @@ def _open_session(
     settings: CaptureSettings,
     last_trigger_at: Mapping[float, datetime],
     drops: Counter[str],
+    wall_clock: Callable[[], datetime] = _utc_now,
 ) -> Iterator[Iterator[CapturedSnippet]]:
     """Open the SDR, start the flowgraph, and yield an iterator of completed
     snippets; always stops the flowgraph on exit. Needs GNU Radio; its tests
@@ -396,7 +419,8 @@ def _open_session(
         # actually arrive at, or sample time drifts from wall time.
         settings = replace(settings, sample_rate=actual_rate)
     source.set_min_output_buffer(settings.samples(_SOURCE_BUFFER_SECONDS))
-    clock = SampleClock(anchor=datetime.now(timezone.utc), sample_rate=actual_rate)
+    clock = SampleClock(anchor=wall_clock(), sample_rate=actual_rate)
+    last_trigger_at = _clamp_to_anchor(last_trigger_at, clock.anchor)
     assembler = SnippetAssembler(
         clock=clock,
         center_freq_hz=settings.center_freq_hz,
@@ -424,6 +448,7 @@ def _open_session(
             clock=clock,
             stall_seconds=settings.stall_seconds,
             max_drift_seconds=settings.max_clock_drift_seconds,
+            wall_clock=wall_clock,
         )
     finally:
         flowgraph.top_block.stop()
@@ -432,10 +457,6 @@ def _open_session(
 
 class _ClockDrift(RuntimeError):
     """Sample time diverged from wall time; the session must be rebuilt."""
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 class _TapHealth(Protocol):

@@ -142,3 +142,26 @@ def test_session_times_samples_at_the_rate_the_sdr_actually_runs(tmp_path, monke
     assert len(snippet.iq) == round(0.1 * actual) + round(0.9 * actual)
     anchor = snippet.trigger.time - timedelta(seconds=snippet.trigger.sample_index / actual)
     assert opened_at[0] <= anchor <= opened_at[0] + timedelta(seconds=5)
+
+
+def test_cooldowns_from_the_future_are_clamped_after_a_backward_clock_step(tmp_path, monkeypatch, caplog):
+    """Cooldowns persist across sessions as absolute UTC. After the wall clock
+    steps back, a stored trigger time can lie in the new session's future,
+    which would suppress detection for cooldown + the step."""
+    anchor = datetime(2026, 10, 3, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        service,
+        "_build_soapy_source",
+        lambda settings: (blocks.vector_source_c(_iq_with_burst_at(150_000, n=300_000), False), FS),
+    )
+    settings = _settings(tmp_path, cooldown_seconds=1.0)
+    stored = {915e6: anchor + timedelta(minutes=10)}  # recorded before the clock stepped back
+
+    with caplog.at_level(logging.WARNING):
+        with service._open_session(settings, stored, Counter(), wall_clock=lambda: anchor) as snippets:
+            snippet = next(snippets)
+
+    # Clamped to the anchor, the 1 s cooldown expired before the 1.5 s burst.
+    assert snippet.trigger.time == anchor + timedelta(seconds=snippet.trigger.sample_index / FS)
+    assert 150_000 <= snippet.trigger.sample_index < 150_100
+    assert "stepped back" in caplog.text
