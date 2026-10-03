@@ -26,7 +26,8 @@ frequency falls in. Call record_classification exactly once.
   no_quiet_noise_reference means the noise floor was estimated from the capture itself
   (noise_reference "self"), which is blind to the receiver's roll-off;
   edge_region_unreliable means that, in that case, the primary emitter reaches the outer
-  band edges, where the receiver's noise roll-off can pose as a signal.
+  band edges, where the receiver's noise roll-off can pose as a signal; low_snr means the
+  primary emitter is less than 10 dB above the noise.
   Other emitters with present_before_trigger true were already on before the capture
   triggered; the primary emitter is the one that triggered it.
 - reasoning: the evidence, and any alternative identities you considered.

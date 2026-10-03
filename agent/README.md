@@ -9,8 +9,9 @@ confidence is >= 0.85 and the tag's band prefix (`ism_902_928` in `ism_902_928:l
 a band-table entry the signal is grounded in; everything else goes to `needs_review`.
 The noise reference is the snippet's pre-trigger, below the trigger threshold step 4
 records in the SigMF. Any `reduced_confidence` reason keeps every band match ungrounded
-and caps routing at `needs_review`: NaN or inf samples, an unreliable bandwidth, or no
-quiet pre-trigger reference at all (`no_quiet_noise_reference`). The last covers every
+and caps routing at `needs_review`: NaN or inf samples, an unreliable bandwidth, a
+primary less than 10 dB above the noise (`low_snr`), or no quiet pre-trigger reference
+at all (`no_quiet_noise_reference`). The last covers every
 always-on emitter, such as an LTE downlink, which fills its own pre-trigger: by default
 those records always go to review.
 

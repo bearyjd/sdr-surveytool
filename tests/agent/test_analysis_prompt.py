@@ -119,6 +119,21 @@ def test_the_recorded_trigger_threshold_reaches_segmentation():
     assert fallback.signal_center_hz == pytest.approx(914.75e6, abs=2e3)
 
 
+@pytest.mark.parametrize("in_band_snr_db, grounded", [(9.0, False), (12.0, True)])
+def test_a_low_snr_primary_grounds_nothing(in_band_snr_db, grounded):
+    """The reviewer's 1 MS/s probe: a 125 kHz burst at 915.2 MHz only 9 dB
+    above the noise reads a plausible OBW and grounded in 902-928 MHz.
+    Below 10 dB region SNR its measurements are too noisy to vouch for."""
+    rng = np.random.default_rng(0)
+    burst = synthetic.gate(
+        synthetic.band_limited(rng, N, FS, 125e3, 200e3, 1.25e-6 * 10 ** (in_band_snr_db / 10)), FS, [(0.05, 0.1)]
+    )
+    analysis = analyse_snippet(_snippet(burst + synthetic.noise(rng, N, 1e-5)), BANDS, UnavailableClassifier())
+    assert analysis.noise_reference == "pre_trigger"
+    assert ("low_snr" in analysis.reduced_confidence) is not grounded
+    assert analysis.grounded_band_ids == ({"ism_902_928"} if grounded else frozenset())
+
+
 def test_non_finite_samples_reduce_confidence():
     analysis = analyse_snippet(_snippet(_two_emitters(), non_finite=3), BANDS, UnavailableClassifier())
     assert analysis.reduced_confidence == ("non_finite_samples",)

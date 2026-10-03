@@ -40,6 +40,10 @@ from dsp.segmentation import (
 
 NO_QUIET_NOISE_REFERENCE = "no_quiet_noise_reference"
 EDGE_REGION_UNRELIABLE = "edge_region_unreliable"
+LOW_SNR = "low_snr"
+# Below this region SNR the OBW and center are too noisy to ground a band:
+# a 125 kHz burst 9 dB above the noise read 9.0 dB and grounded in 902-928 MHz.
+_MIN_GROUNDING_SNR_DB = 10.0
 
 
 @dataclass(frozen=True)
@@ -135,6 +139,8 @@ def _reduced_confidence(
         reasons.append("non_finite_samples")
     if primary is not None and not primary.bandwidth_reliable:
         reasons.append("bandwidth_unreliable")
+    if primary is not None and primary.snr_db < _MIN_GROUNDING_SNR_DB:
+        reasons.append(LOW_SNR)
     return tuple(reasons)
 
 
