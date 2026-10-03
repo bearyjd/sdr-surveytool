@@ -156,8 +156,8 @@ never completed.
 Startup also refuses a configuration whose snippet buffers could exceed
 `--max-snippet-memory-bytes` (default 2 GiB, sized for an 8 GB Jetson). The
 estimate is 12 B/sample for 2 queued, 1 processing and 1 assembling snippet, plus
-2 × 12 B × pre for the trigger history and 10 B/sample of measurement transients.
-The defaults need 1.21 GB; 56 MS/s with 1 s snippets needs 3.38 GB.
+2 × 12 B × pre for the trigger history and 20 B/sample of measurement transients.
+The defaults need 1.41 GB; 56 MS/s with 1 s snippets needs 3.94 GB.
 `--sample-rate` defaults to 20e6. The bladeRF reaches ~56e6, but the Python chain
 sustained only ~58 MS/s on a fast x86 desktop and has not been profiled on the Jetson.
 A 1 s snippet is 160 MB on disk at 20 MS/s (448 MB at 56 MS/s). In memory it is

@@ -1,6 +1,7 @@
 # tests/capture/unknown/test_service.py
 import gc
 import logging
+import math
 import os
 import queue
 import signal
@@ -19,7 +20,7 @@ from capture.unknown.energy_trigger import TriggerEvent
 from capture.unknown.sample_clock import SampleClock
 from capture.unknown.service import CaptureSettings, process_snippet
 from capture.unknown.snippet_assembler import CapturedSnippet
-from schema.records import ClassificationStatus, Modality
+from schema.records import ClassificationStatus, Modality, UnifiedRecord
 from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES
 
 FS = 100_000.0
@@ -143,14 +144,14 @@ def test_the_largest_configurable_snippet_fits_the_store_size_bound():
 def test_peak_snippet_memory_estimate_follows_the_real_buffers(tmp_path):
     """12 B/sample (cf32 iq + float32 power) for 2 queued + 1 processing + 1
     assembling snippet, 2 x 12 B x pre for the history and its copy when a
-    capture begins, and 10 B/sample of measurement transients."""
+    capture begins, and 20 B/sample of measurement transients."""
     settings = _settings(tmp_path, sample_rate=20e6)  # 0.1 s pre + 0.9 s post
-    assert settings.estimated_peak_memory_bytes == 12 * 20_000_000 * 4 + 24 * 2_000_000 + 10 * 20_000_000
+    assert settings.estimated_peak_memory_bytes == 12 * 20_000_000 * 4 + 24 * 2_000_000 + 20 * 20_000_000
     assert settings.estimated_peak_memory_bytes <= 2 * 1024**3  # the defaults fit a Jetson
 
 
 def test_settings_fail_fast_when_snippets_would_not_fit_the_memory_budget(tmp_path):
-    with pytest.raises(ValueError, match="3,382,400,000"):
+    with pytest.raises(ValueError, match="3,942,400,000"):
         _settings(tmp_path, sample_rate=56e6)
     assert _settings(tmp_path, sample_rate=56e6, max_snippet_memory_bytes=4 * 1024**3).sample_rate == 56e6
 
@@ -300,6 +301,65 @@ def test_a_write_failure_still_emits_the_measured_detection(tmp_path, monkeypatc
     assert record.signal.peak_power == pytest.approx(-20.0, abs=0.01)
     assert list(staging.iterdir()) == []
     assert drops == Counter({"processing_error": 1})
+
+
+def _with_nan_burst(snippet: CapturedSnippet, start: int, count: int) -> CapturedSnippet:
+    """DMA or driver corruption: a run of NaN samples (and the moving-average
+    power they poison)."""
+    iq, power = snippet.iq.copy(), snippet.power.copy()
+    iq[start : start + count] = np.nan + 1j * np.nan
+    power[start : start + count] = np.nan
+    return CapturedSnippet(
+        iq=iq,
+        power=power,
+        start_index=snippet.start_index,
+        start_time=snippet.start_time,
+        trigger=snippet.trigger,
+        sample_rate=snippet.sample_rate,
+    )
+
+
+def test_non_finite_samples_are_left_out_of_measurements_and_flagged(tmp_path):
+    """NaN propagated into power and SNR, serialized as JSON null, and failed
+    ingest's validation: the whole detection vanished."""
+    staging = tmp_path / "staging"
+    staging.mkdir(mode=0o700)
+    emitter = _FakeEmitter("/unused.sock")
+    snippet = _with_nan_burst(_snippet(), start=12_000, count=500)
+    service._stage_and_emit(snippet, _settings(staging, min_free_bytes=0), emitter, "s1", "op1", Counter())
+
+    (record,) = emitter.records
+    assert record.metadata.quality_flags["non_finite_samples"] == 500
+    assert record.signal.peak_power == pytest.approx(-20.0, abs=0.01)
+    assert record.signal.rssi == pytest.approx(-20.0, abs=0.01)
+    assert math.isfinite(record.identifier.bandwidth_estimate)
+    assert record.metadata.iq_snippet_path is not None  # the raw IQ is still kept
+    assert UnifiedRecord.model_validate_json(record.model_dump_json()) == record
+
+
+def test_a_snippet_with_no_finite_samples_is_dropped_not_emitted(tmp_path, caplog):
+    staging = tmp_path / "staging"
+    staging.mkdir(mode=0o700)
+    emitter = _FakeEmitter("/unused.sock")
+    drops: Counter = Counter()
+    snippet = _with_nan_burst(_snippet(), start=0, count=100_000)
+    with caplog.at_level(logging.ERROR):
+        service._stage_and_emit(snippet, _settings(staging, min_free_bytes=0), emitter, "s1", "op1", drops)
+    assert emitter.records == []
+    assert list(staging.iterdir()) == []
+    assert drops == Counter({"non_finite": 1})
+    assert "100000 of 100000" in caplog.text
+
+
+def test_queue_full_summary_ignores_non_finite_power():
+    snippets: queue.Queue = queue.Queue(maxsize=1)
+    dropped: deque = deque(maxlen=4)
+    offer = service._offer_or_drop(snippets, Counter(), dropped, threshold_dbfs=-30.0)
+    offer(_snippet())
+    offer(_with_nan_burst(_snippet(), start=12_000, count=500))
+    (summary,) = dropped
+    assert summary.peak_power_dbfs == pytest.approx(-20.0, abs=0.01)
+    assert summary.mean_power_dbfs == pytest.approx(-20.0, abs=0.01)
 
 
 def test_missing_staging_dir_drops_only_the_snippet_not_the_session(tmp_path, caplog):

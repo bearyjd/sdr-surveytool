@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+import numpy as np
+
 from capture.common.emitter import RecordEmitter
 from capture.unknown.energy_trigger import TriggerConfig, TriggerEvent, record_trigger
 from capture.unknown.normalizer import SnippetCaptureEvent, normalize_snippet_event
@@ -154,12 +156,14 @@ class CaptureSettings:
         """Worst-case snippet memory, from the actual buffers: 12 B/sample
         (cf32 iq + float32 power) for each queued snippet, the one being
         processed and the one being assembled; the pre-trigger history plus
-        its concatenated copy when a capture begins; and up to 10 B/sample of
-        measurement transients (a boolean mask and the above-threshold copy,
-        on the service thread and, for queue-full summaries, the GR thread)."""
+        its concatenated copy when a capture begins; and up to 20 B/sample of
+        measurement transients: finite-sample masks (2 B), a cleaned copy
+        of a corrupt snippet (8 B iq + 4 B power), and the above-threshold
+        mask and copy (5 B, on the service thread and, for queue-full
+        summaries, the GR thread)."""
         pre = self.samples(self.pre_trigger_seconds)
         snippet = pre + self.samples(self.post_trigger_seconds)
-        return 12 * snippet * (_SNIPPET_QUEUE_MAXSIZE + 2) + 2 * 12 * pre + 10 * snippet
+        return 12 * snippet * (_SNIPPET_QUEUE_MAXSIZE + 2) + 2 * 12 * pre + 20 * snippet
 
     @property
     def threshold_dbfs(self) -> float:
@@ -225,28 +229,54 @@ def _snippet_record(
     survey_id: str,
     operator_id: str,
 ) -> UnifiedRecord:
+    iq, power, non_finite = _finite_parts(snippet)
     # The pre-trigger samples are below threshold by construction: the
     # per-bin noise reference for the burst that follows the trigger.
     pre_trigger = snippet.trigger.sample_index - snippet.start_index
     bandwidth: OccupiedBandwidth = occupied_bandwidth(
-        snippet.iq[pre_trigger:],
+        iq[pre_trigger:],
         snippet.sample_rate,
         settings.threshold_dbfs,
-        reference_iq=snippet.iq[:pre_trigger],
+        reference_iq=iq[:pre_trigger],
     )
     event = SnippetCaptureEvent(
         timestamp=snippet.trigger.time,
         center_freq_hz=settings.center_freq_hz,
         sample_rate=snippet.sample_rate,
         bandwidth_estimate_hz=bandwidth.hz,
-        peak_power_dbfs=peak_power_dbfs(snippet.power),
-        mean_power_dbfs=mean_burst_power_dbfs(snippet.power, settings.threshold_dbfs),
+        peak_power_dbfs=peak_power_dbfs(power),
+        mean_power_dbfs=mean_burst_power_dbfs(power, settings.threshold_dbfs),
         noise_floor_dbfs=settings.noise_floor_dbfs,
         snippet_path=snippet_path,
         snippet_duration_ms=round(len(snippet.iq) * 1000 / snippet.sample_rate),
         bandwidth_estimate_reliable=bandwidth.reliable,
+        non_finite_samples=non_finite,
     )
     return normalize_snippet_event(event, survey_id, operator_id)
+
+
+class _NoFiniteSamples(ValueError):
+    """Every sample of a snippet is NaN/inf: nothing can be measured."""
+
+
+def _finite_parts(snippet: CapturedSnippet) -> tuple[np.ndarray, np.ndarray, int]:
+    """IQ with NaN/inf samples zeroed (keeping frame alignment for the PSD),
+    the finite moving-average power values, and how many IQ samples were
+    non-finite (DMA or driver corruption). Raises _NoFiniteSamples when
+    nothing finite is left to measure."""
+    finite_iq = np.isfinite(snippet.iq)
+    finite_power = np.isfinite(snippet.power)
+    non_finite = int(finite_iq.size - np.count_nonzero(finite_iq))
+    if non_finite == 0 and finite_power.all():
+        return snippet.iq, snippet.power, 0
+    if non_finite == finite_iq.size or not finite_power.any():
+        raise _NoFiniteSamples(
+            f"{non_finite} of {finite_iq.size} IQ samples and "
+            f"{finite_power.size - np.count_nonzero(finite_power)} of {finite_power.size} "
+            "power values are NaN/inf"
+        )
+    cleaned = np.where(finite_iq, snippet.iq, 0).astype(np.complex64, copy=False)
+    return cleaned, snippet.power[finite_power], non_finite
 
 
 def run(
@@ -281,12 +311,7 @@ def run(
                     for item in snippets:
                         last_trigger_at.update(record_trigger(last_trigger_at, item.trigger))
                         if isinstance(item, _DroppedDetection):
-                            _emit_without_snippet(
-                                _dropped_detection_record(item, settings, survey_id, operator_id),
-                                emitter,
-                                "queue_full",
-                                item.trigger.sample_index,
-                            )
+                            _emit_dropped_detection(item, settings, emitter, survey_id, operator_id)
                         else:
                             _stage_and_emit(item, settings, emitter, survey_id, operator_id, drops)
                         # Up to ~670 MB: don't hold it while waiting for the next.
@@ -327,6 +352,12 @@ def _stage_and_emit(
     sample_index = snippet.trigger.sample_index
     try:
         measured = _snippet_record(snippet, settings, None, survey_id, operator_id)
+    except _NoFiniteSamples as nothing_finite:
+        drops["non_finite"] += 1
+        logger.error(
+            "Dropping snippet triggered at sample %d: %s", sample_index, nothing_finite
+        )
+        return
     except Exception:
         drops["processing_error"] += 1
         logger.exception("Failed to measure snippet triggered at sample %d; dropping it", sample_index)
@@ -402,6 +433,24 @@ def _emit_without_snippet(
         )
 
 
+def _emit_dropped_detection(
+    item: _DroppedDetection,
+    settings: CaptureSettings,
+    emitter: RecordEmitter,
+    survey_id: str,
+    operator_id: str,
+) -> None:
+    try:
+        record = _dropped_detection_record(item, settings, survey_id, operator_id)
+    except Exception:
+        logger.exception(
+            "Cannot build a record for the queue-full detection at sample %d",
+            item.trigger.sample_index,
+        )
+        return
+    _emit_without_snippet(record, emitter, "queue_full", item.trigger.sample_index)
+
+
 def _dropped_detection_record(
     item: _DroppedDetection, settings: CaptureSettings, survey_id: str, operator_id: str
 ) -> UnifiedRecord:
@@ -465,17 +514,22 @@ def _offer_or_drop(
             snippets.put_nowait(snippet)
         except queue.Full:
             drops["queue_full"] += 1
-            if len(dropped) == dropped.maxlen:
+            power = snippet.power
+            finite = np.isfinite(power)
+            if not finite.all():
+                power = power[finite]  # NaN/inf (corrupt samples) can't be measured
+            if power.size == 0 or len(dropped) == dropped.maxlen:
                 drops["queue_full_summary_lost"] += 1
-            dropped.append(
-                _DroppedDetection(
-                    trigger=snippet.trigger,
-                    sample_rate=snippet.sample_rate,
-                    peak_power_dbfs=peak_power_dbfs(snippet.power),
-                    mean_power_dbfs=mean_burst_power_dbfs(snippet.power, threshold_dbfs),
-                    duration_ms=round(len(snippet.iq) * 1000 / snippet.sample_rate),
+            if power.size:
+                dropped.append(
+                    _DroppedDetection(
+                        trigger=snippet.trigger,
+                        sample_rate=snippet.sample_rate,
+                        peak_power_dbfs=peak_power_dbfs(power),
+                        mean_power_dbfs=mean_burst_power_dbfs(power, threshold_dbfs),
+                        duration_ms=round(len(snippet.iq) * 1000 / snippet.sample_rate),
+                    )
                 )
-            )
             logger.warning(
                 "Snippet queue full; dropping snippet triggered at sample %d "
                 "(%d dropped for a full queue so far)",

@@ -62,3 +62,16 @@ def test_unreliable_bandwidth_estimate_is_flagged_not_silently_reported():
         replace(EVENT, bandwidth_estimate_reliable=False), survey_id="s1", operator_id="op1"
     )
     assert record.metadata.quality_flags == {"power_units": "dBFS", "bandwidth_estimate_unreliable": True}
+
+
+@pytest.mark.parametrize("field", ["peak_power_dbfs", "mean_power_dbfs", "bandwidth_estimate_hz", "center_freq_hz"])
+def test_non_finite_measurements_are_refused_before_they_reach_ingest(field):
+    """NaN/inf would serialize as JSON null and fail ingest's validation,
+    silently losing the record; refuse loudly instead."""
+    with pytest.raises(ValueError, match="non-finite"):
+        normalize_snippet_event(replace(EVENT, **{field: float("nan")}), survey_id="s1", operator_id="op1")
+
+
+def test_non_finite_sample_count_is_flagged():
+    record = normalize_snippet_event(replace(EVENT, non_finite_samples=7), survey_id="s1", operator_id="op1")
+    assert record.metadata.quality_flags["non_finite_samples"] == 7
