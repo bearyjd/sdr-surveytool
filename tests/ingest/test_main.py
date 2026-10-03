@@ -23,10 +23,18 @@ def test_gps_fix_quality_passthrough():
     assert args.gps_lon == -122.3
 
 
-def test_snippet_directories_default_under_data():
+def test_snippet_directories_default_to_absolute_paths_under_var_lib():
     args = _parse_args(["--gps-fix-quality", "0"])
-    assert args.snippet_staging_dir == "data/snippet-staging"
-    assert args.snippet_store_dir == "data/snippets"
+    assert args.snippet_staging_dir == "/var/lib/sdr-surveytool/snippet-staging"
+    assert args.snippet_store_dir == "/var/lib/sdr-surveytool/snippets"
+
+
+@pytest.mark.parametrize("flag", ["--snippet-staging-dir", "--snippet-store-dir"])
+def test_relative_snippet_directories_are_rejected(flag):
+    """Capture and ingest resolve relative paths against their own working
+    directories; if those differ every snippet is rejected as outside_staging."""
+    with pytest.raises(SystemExit):
+        _parse_args(["--gps-fix-quality", "0", flag, "data/snippets"])
 
 
 def test_snippet_directories_passthrough():
@@ -41,22 +49,26 @@ def test_snippet_directories_passthrough():
     assert args.snippet_store_dir == "/srv/snippets"
 
 
-def test_snippet_store_dirs_are_resolved_secured_and_logged_at_startup(tmp_path, monkeypatch, caplog):
-    """The relative defaults resolve against the working directory, which can
-    differ between the capture and ingest processes: log the absolute dirs."""
-    monkeypatch.chdir(tmp_path)
+def _dir_args(tmp_path, *extra):
+    return _parse_args(
+        [
+            "--gps-fix-quality", "0",
+            "--snippet-staging-dir", str(tmp_path / "staging"),
+            "--snippet-store-dir", str(tmp_path / "snippets"),
+            *extra,
+        ]
+    )
+
+
+def test_snippet_store_dirs_are_secured_and_logged_at_startup(tmp_path, caplog):
     with caplog.at_level(logging.INFO):
-        store = _open_snippet_store(_parse_args(["--gps-fix-quality", "0"]))
-    assert store.staging_dir == (tmp_path / "data" / "snippet-staging").resolve()
-    assert store.root_dir == (tmp_path / "data" / "snippets").resolve()
+        store = _open_snippet_store(_dir_args(tmp_path))
+    assert store.staging_dir == (tmp_path / "staging").resolve()
+    assert store.root_dir == (tmp_path / "snippets").resolve()
     assert str(store.staging_dir) in caplog.text
     assert str(store.root_dir) in caplog.text
 
 
-def test_snippet_size_bound_defaults_to_the_largest_capture_and_passes_through(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    assert _open_snippet_store(_parse_args(["--gps-fix-quality", "0"])).max_snippet_bytes == (
-        DEFAULT_MAX_SNIPPET_BYTES
-    )
-    store = _open_snippet_store(_parse_args(["--gps-fix-quality", "0", "--max-snippet-bytes", "1024"]))
-    assert store.max_snippet_bytes == 1024
+def test_snippet_size_bound_defaults_to_the_largest_capture_and_passes_through(tmp_path):
+    assert _open_snippet_store(_dir_args(tmp_path)).max_snippet_bytes == DEFAULT_MAX_SNIPPET_BYTES
+    assert _open_snippet_store(_dir_args(tmp_path, "--max-snippet-bytes", "1024")).max_snippet_bytes == 1024

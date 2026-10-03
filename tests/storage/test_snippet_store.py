@@ -470,11 +470,20 @@ def test_rejection_messages_quote_untrusted_names(dirs):
     assert "\n" not in str(error)
 
 
-def test_ensure_private_dir_creates_an_owner_only_dir_and_returns_it_absolute(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    directory = ensure_private_dir("data/staging")
+def test_ensure_private_dir_creates_an_owner_only_dir_and_returns_it_resolved(tmp_path):
+    directory = ensure_private_dir(str(tmp_path / "data" / "staging"))
     assert directory == (tmp_path / "data" / "staging").resolve()
     assert directory.stat().st_mode & 0o077 == 0
+
+
+def test_ensure_private_dir_rejects_a_relative_path(tmp_path, monkeypatch):
+    """Capture and ingest resolve relative paths against their own working
+    directories; if those differ, every snippet is rejected as
+    outside_staging and detections persist without IQ."""
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="absolute"):
+        ensure_private_dir("data/staging")
+    assert not (tmp_path / "data").exists()
 
 
 def test_ensure_private_dir_rejects_group_or_world_access(tmp_path):
@@ -492,13 +501,18 @@ def test_ensure_private_dir_rejects_a_directory_owned_by_another_user(tmp_path, 
         ensure_private_dir(tmp_path / "staging")
 
 
-def test_store_resolves_creates_and_secures_both_dirs(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    store = LocalSnippetStore("staging", "snippets")
+def test_store_creates_and_secures_both_dirs(tmp_path):
+    store = LocalSnippetStore(tmp_path / "staging", tmp_path / "snippets")
     assert store.staging_dir == (tmp_path / "staging").resolve()
     assert store.root_dir == (tmp_path / "snippets").resolve()
     for directory in (store.staging_dir, store.root_dir):
         assert directory.stat().st_mode & 0o077 == 0
+
+
+def test_store_rejects_relative_dirs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="absolute"):
+        LocalSnippetStore("staging", tmp_path / "snippets")
 
 
 def test_store_refuses_a_world_readable_staging_dir(tmp_path):

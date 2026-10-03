@@ -35,6 +35,21 @@ _ADOPT_ATTEMPTS = 3
 _RETRY_SLEEP_SECONDS = 0.05
 
 
+def require_absolute(path: Path | str) -> Path:
+    """Snippet directories must be absolute: capture and ingest resolve a
+    relative path against their own working directories, and if those
+    differ every snippet is rejected as outside_staging (its detection then
+    persists without IQ)."""
+    directory = Path(path)
+    if not directory.is_absolute():
+        raise ValueError(
+            f"Snippet directory {str(path)!r} must be an absolute path (capture and ingest "
+            "would otherwise resolve it against different working directories); use e.g. "
+            "/var/lib/sdr-surveytool/snippet-staging"
+        )
+    return directory
+
+
 def ensure_private_dir(path: Path | str) -> Path:
     """Create `path` (mode 0o700) if missing and return it absolute and resolved.
 
@@ -43,7 +58,7 @@ def ensure_private_dir(path: Path | str) -> Path:
     owned by this process's effective uid with no group/other access. Both
     sides call this at startup so they enforce one rule.
     """
-    directory = Path(path)
+    directory = require_absolute(path)
     directory.mkdir(mode=_PRIVATE_DIR_MODE, parents=True, exist_ok=True)
     resolved = directory.resolve()
     info = os.stat(resolved)

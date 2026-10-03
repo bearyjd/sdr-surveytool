@@ -12,7 +12,7 @@ from ingest.gps_fix import GpsFix, StaticGpsFixProvider
 from ingest.queue_server import QueueServer
 from ingest.service import IngestService
 from storage.db import init_db, make_engine, make_session_factory
-from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES, LocalSnippetStore
+from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES, LocalSnippetStore, require_absolute
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +37,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--snippet-staging-dir",
-        default="data/snippet-staging",
-        help="Directory capture processes stage SigMF snippets in. Must match "
-        "the capture side's --staging-dir; snippet paths outside it are rejected.",
+        default="/var/lib/sdr-surveytool/snippet-staging",
+        help="Absolute directory capture processes stage SigMF snippets in. Must "
+        "match the capture side's --staging-dir; snippet paths outside it are rejected.",
     )
     parser.add_argument(
         "--snippet-store-dir",
-        default="data/snippets",
-        help="Directory ingest moves adopted SigMF snippets into.",
+        default="/var/lib/sdr-surveytool/snippets",
+        help="Absolute directory ingest moves adopted SigMF snippets into.",
     )
     parser.add_argument(
         "--max-snippet-bytes",
@@ -71,6 +71,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "explicitly to mark records as fix-less rather than fabricating one.",
     )
     args = parser.parse_args(argv)
+    for directory in (args.snippet_staging_dir, args.snippet_store_dir):
+        try:
+            require_absolute(directory)
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.gps_fix_quality is None:
         parser.error(
             "--gps-fix-quality is required until a real GPS provider exists "

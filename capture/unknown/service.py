@@ -31,7 +31,7 @@ from dsp.spectral import (
     peak_power_dbfs,
 )
 from schema.records import UnifiedRecord
-from storage.snippet_store import ensure_private_dir
+from storage.snippet_store import ensure_private_dir, require_absolute
 
 if TYPE_CHECKING:
     from gnuradio import gr
@@ -104,7 +104,8 @@ class CaptureSettings:
     max_snippet_memory_bytes: int = 2 * 1024**3
 
     def __post_init__(self) -> None:
-        # First: NaN passes every ordering check below (comparisons are False).
+        require_absolute(self.staging_dir)
+        # NaN passes every ordering check below (comparisons are False).
         for name in _FLOAT_SETTINGS:
             if not math.isfinite(getattr(self, name)):
                 raise ValueError(f"{name} must be finite, got {getattr(self, name)!r}")
@@ -780,9 +781,9 @@ def _add_trigger_args(parser: argparse.ArgumentParser) -> None:
 def _add_safety_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--staging-dir",
-        default="data/snippet-staging",
-        help="Must match ingest's --snippet-staging-dir, on the same filesystem "
-        "as its --snippet-store-dir, owned by the uid both services run as.",
+        default="/var/lib/sdr-surveytool/snippet-staging",
+        help="Absolute; must match ingest's --snippet-staging-dir, on the same "
+        "filesystem as its --snippet-store-dir, owned by the uid both services run as.",
     )
     parser.add_argument(
         "--min-free-bytes",

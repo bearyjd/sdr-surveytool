@@ -663,8 +663,14 @@ def test_run_emits_a_queue_full_detection_and_keeps_its_cooldown(tmp_path, monke
     assert sessions[1] == {915e6: trigger.time}
 
 
-def test_run_resolves_secures_and_logs_staging_dir_at_startup(tmp_path, monkeypatch, caplog):
-    monkeypatch.chdir(tmp_path)
+def test_settings_reject_a_relative_staging_dir(tmp_path):
+    """Capture and ingest resolve relative paths against their own working
+    directories; if those differ every snippet is rejected as outside_staging."""
+    with pytest.raises(ValueError, match="absolute"):
+        _settings(Path("data/snippet-staging"))
+
+
+def test_run_secures_and_logs_the_staging_dir_at_startup(tmp_path, monkeypatch, caplog):
     seen = []
 
     @contextmanager
@@ -676,9 +682,9 @@ def test_run_resolves_secures_and_logs_staging_dir_at_startup(tmp_path, monkeypa
     monkeypatch.setattr(service, "_open_session", fake_open_session)
     monkeypatch.setattr(service, "RecordEmitter", _FakeEmitter)
     with caplog.at_level(logging.INFO), pytest.raises(KeyboardInterrupt):
-        service.run(_settings(Path("rel-staging")), "/unused.sock", "s1", "op1")
+        service.run(_settings(tmp_path / "staging"), "/unused.sock", "s1", "op1")
 
-    staging = (tmp_path / "rel-staging").resolve()
+    staging = (tmp_path / "staging").resolve()
     assert seen == [staging]
     assert staging.stat().st_mode & 0o077 == 0
     assert str(staging) in caplog.text
@@ -740,11 +746,24 @@ def test_cli_requires_noise_floor_and_builds_settings():
     assert settings.center_freq_hz == 915e6
     assert settings.sample_rate == 20e6
     assert settings.threshold_dbfs == -50.0
-    assert settings.staging_dir == Path("data/snippet-staging")
+    assert settings.staging_dir == Path("/var/lib/sdr-surveytool/snippet-staging")
     assert settings.min_free_bytes == 2 * 1024**3
     assert settings.max_clock_drift_seconds == 2.0
     assert settings.max_snippet_memory_bytes == 2 * 1024**3
     assert args.socket_path == "/tmp/sdr-ingest.sock"
+
+
+def test_cli_rejects_a_relative_staging_dir_with_usage_error():
+    with pytest.raises(SystemExit):
+        service._parse_args(
+            [
+                "--survey-id", "s",
+                "--operator-id", "o",
+                "--center-freq", "915e6",
+                "--noise-floor-dbfs", "-60",
+                "--staging-dir", "data/snippet-staging",
+            ]
+        )
 
 
 def test_cli_rejects_invalid_settings_with_usage_error():
