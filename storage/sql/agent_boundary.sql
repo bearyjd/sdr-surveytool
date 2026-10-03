@@ -44,6 +44,17 @@ BEGIN
                               pg_catalog.current_database());
 END
 $temp$;
+-- Large objects are a write path that needs no table privilege, and PUBLIC
+-- can execute these by default. (lo_import is superuser-only already.)
+REVOKE EXECUTE ON FUNCTION
+    pg_catalog.lo_create(oid),
+    pg_catalog.lo_creat(integer),
+    pg_catalog.lo_from_bytea(oid, bytea),
+    pg_catalog.lo_import(text),
+    pg_catalog.lo_import(text, oid),
+    pg_catalog.lo_open(oid, integer),
+    pg_catalog.lo_put(oid, bigint, bytea)
+    FROM PUBLIC;
 
 -- The owner role holds exactly what the view and classify_unknown need.
 GRANT SELECT, UPDATE (metadata) ON TABLE public.survey_records TO {{owner_role}};

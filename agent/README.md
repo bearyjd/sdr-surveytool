@@ -61,7 +61,15 @@ to the cellular/WiFi/BT decode modules.
   **any** database, and no other executable SECURITY DEFINER function. The installer only
   touches the survey database, so operators must revoke TEMPORARY and CONNECT from PUBLIC
   (and from the login) on every other database in the cluster, `postgres` included:
-  `REVOKE TEMPORARY, CONNECT ON DATABASE postgres FROM PUBLIC;`.
+  `REVOKE TEMPORARY, CONNECT ON DATABASE postgres FROM PUBLIC;`. The installer also revokes
+  the large-object writers (`lo_create`, `lo_creat`, `lo_from_bytea`, `lo_import`,
+  `lo_open`, `lo_put`) from PUBLIC, the one write path that needs no table privilege, and
+  the self-check refuses a login that can still execute one.
+- **What PostgreSQL cannot prevent.** Any role may change its own password and its own
+  session defaults (`ALTER ROLE <itself> ... SET`). The self-check refuses role settings
+  at the next start, but cannot see a password change. Alert on changes to `pg_authid`
+  and `pg_db_role_setting` for the agent login, and give the login a `CONNECTION LIMIT`
+  (2: the agent and its advisory-lock session).
 - **The LLM.** The model has exactly one tool, the forced output tool, and sees only
   numeric features and band-table entries: no SigMF free text, location, survey or
   operator IDs.

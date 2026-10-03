@@ -290,6 +290,30 @@ def test_agent_cannot_create_objects_to_probe_the_view(boundary, statement):
         agent.dispose()
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "SELECT lo_create(0)",
+        "SELECT lo_creat(-1)",
+        "SELECT lo_from_bytea(0, 'x'::bytea)",
+        "SELECT lo_open(1, 131072)",
+        "SELECT lo_put(1, 0, 'x'::bytea)",
+        "SELECT lo_import('/etc/hostname')",
+        "SELECT lo_import('/etc/hostname', 0)",
+    ],
+)
+def test_agent_cannot_write_large_objects(boundary, statement):
+    """Large objects are a write path that needs no table privilege:
+    PUBLIC can execute these functions until the boundary revokes them."""
+    agent = _engine(boundary.agent_url)
+    try:
+        with pytest.raises(DBAPIError) as excinfo, agent.begin() as conn:
+            conn.execute(text(statement))
+        assert _sqlstate(excinfo) == INSUFFICIENT_PRIVILEGE
+    finally:
+        agent.dispose()
+
+
 def test_leaky_function_sees_only_rows_the_view_shows(boundary):
     """The agent cannot create a function (previous test), so an
     administrator plants the classic leaky probe for it: near-zero cost, so
@@ -587,6 +611,11 @@ BYPASSES = {
     ),
     "role setting": (["ALTER ROLE {login} SET work_mem = '64MB'"], [], "{login} has role settings (work_mem=64MB)"),
     "create on public": (["GRANT CREATE ON SCHEMA public TO {login}"], [], "can create objects in schema public"),
+    "large-object writer": (
+        ["GRANT EXECUTE ON FUNCTION lo_from_bytea(oid, bytea) TO {login}"],
+        ["REVOKE EXECUTE ON FUNCTION lo_from_bytea(oid, bytea) FROM {login}"],
+        "can execute large-object writer lo_from_bytea(oid,bytea)",
+    ),
     "create on another schema": (
         ["CREATE SCHEMA sdr_extra_{suffix}", "GRANT CREATE ON SCHEMA sdr_extra_{suffix} TO {login}"],
         ["DROP SCHEMA IF EXISTS sdr_extra_{suffix} CASCADE"],

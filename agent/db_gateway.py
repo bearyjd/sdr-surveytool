@@ -46,26 +46,28 @@ _MAX_PATH_CHARS = 4096
 # must run as the login itself, with no role settings. The login may be a
 # member of nothing but itself and the agent role; neither may carry a
 # dangerous attribute, any privilege on survey_records, the right to create
-# objects anywhere, or TEMPORARY on any database; and the only SECURITY
-# DEFINER function it may execute (outside extensions) is classify_unknown.
-# Each query returns one row per problem, as text.
+# objects anywhere, TEMPORARY on any database, or a large-object writer;
+# and the only SECURITY DEFINER function it may execute (outside
+# extensions) is classify_unknown.
+# Each query returns one row per problem: a priority (attributes and role
+# tricks first, memberships last) and the problem as text.
 _PROBLEMS = text(
     """
-    SELECT 'the session runs as ' || current_user || ', not as the login ' || session_user
+    SELECT 0, 'the session runs as ' || current_user || ', not as the login ' || session_user
      WHERE current_user <> session_user
     UNION ALL
-    SELECT session_user || ' has role settings ('
+    SELECT 0, session_user || ' has role settings ('
            || pg_catalog.array_to_string(s.setconfig, ', ') || ')'
       FROM pg_catalog.pg_db_role_setting AS s
       JOIN pg_catalog.pg_roles AS r ON r.oid = s.setrole
      WHERE r.rolname = session_user
     UNION ALL
-    SELECT 'member of ' || r.rolname
+    SELECT 5, 'member of ' || r.rolname
       FROM pg_catalog.pg_roles AS r
      WHERE pg_catalog.pg_has_role(session_user, r.oid, 'MEMBER')
        AND r.rolname NOT IN (session_user, :agent_role)
     UNION ALL
-    SELECT r.rolname || ' has '
+    SELECT 1, r.rolname || ' has '
            || concat_ws(', ',
                         CASE WHEN r.rolsuper THEN 'SUPERUSER' END,
                         CASE WHEN r.rolreplication THEN 'REPLICATION' END,
@@ -76,7 +78,7 @@ _PROBLEMS = text(
      WHERE r.rolname IN (session_user, :agent_role)
        AND (r.rolsuper OR r.rolreplication OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb)
     UNION ALL
-    SELECT r.rolname || ' has a privilege on survey_records'
+    SELECT 2, r.rolname || ' has a privilege on survey_records'
       FROM pg_catalog.pg_roles AS r
      WHERE r.rolname IN (session_user, :agent_role)
        AND (pg_catalog.has_table_privilege(
@@ -86,22 +88,32 @@ _PROBLEMS = text(
                 r.oid, pg_catalog.to_regclass('public.survey_records'),
                 'SELECT, INSERT, UPDATE, REFERENCES'))
     UNION ALL
-    SELECT r.rolname || ' can create objects in schema ' || n.nspname
+    SELECT 3, r.rolname || ' can create objects in schema ' || n.nspname
       FROM pg_catalog.pg_roles AS r, pg_catalog.pg_namespace AS n
      WHERE r.rolname IN (session_user, :agent_role)
        AND pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE')
     UNION ALL
-    SELECT r.rolname || ' has CREATE on database ' || pg_catalog.current_database()
+    SELECT 3, r.rolname || ' has CREATE on database ' || pg_catalog.current_database()
       FROM pg_catalog.pg_roles AS r
      WHERE r.rolname IN (session_user, :agent_role)
        AND pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'CREATE')
     UNION ALL
-    SELECT r.rolname || ' has TEMPORARY on database ' || d.datname
+    SELECT 3, r.rolname || ' has TEMPORARY on database ' || d.datname
       FROM pg_catalog.pg_roles AS r, pg_catalog.pg_database AS d
      WHERE r.rolname IN (session_user, :agent_role)
        AND pg_catalog.has_database_privilege(r.oid, d.oid, 'TEMPORARY')
     UNION ALL
-    SELECT 'can execute SECURITY DEFINER function ' || p.oid::pg_catalog.regprocedure::text
+    SELECT 4, 'can execute large-object writer ' || w.fn::pg_catalog.regprocedure::text
+      FROM (VALUES (pg_catalog.to_regprocedure('pg_catalog.lo_create(oid)')),
+                   (pg_catalog.to_regprocedure('pg_catalog.lo_creat(integer)')),
+                   (pg_catalog.to_regprocedure('pg_catalog.lo_from_bytea(oid, bytea)')),
+                   (pg_catalog.to_regprocedure('pg_catalog.lo_import(text)')),
+                   (pg_catalog.to_regprocedure('pg_catalog.lo_import(text, oid)')),
+                   (pg_catalog.to_regprocedure('pg_catalog.lo_open(oid, integer)')),
+                   (pg_catalog.to_regprocedure('pg_catalog.lo_put(oid, bigint, bytea)'))) AS w (fn)
+     WHERE pg_catalog.has_function_privilege(session_user, w.fn, 'EXECUTE')
+    UNION ALL
+    SELECT 4, 'can execute SECURITY DEFINER function ' || p.oid::pg_catalog.regprocedure::text
       FROM pg_catalog.pg_proc AS p
      WHERE p.prosecdef
        AND pg_catalog.has_function_privilege(session_user, p.oid, 'EXECUTE')
@@ -294,13 +306,12 @@ def verify_boundary(engine: Engine, agent_role: str) -> None:
     """Raise BoundaryViolation unless the connected role is confined."""
     params = {"agent_role": agent_role, "classify": _CLASSIFY}
     with engine.connect() as conn:
-        problems = conn.execute(_PROBLEMS, params).scalars().all()
+        problems = [problem for _, problem in sorted(conn.execute(_PROBLEMS, params).tuples().all())]
         access = conn.execute(_BOUNDARY_ACCESS, params).first()
     if problems:
         raise BoundaryViolation(
             "Refusing to run: the database role is not confined to the agent boundary: "
-            # Attributes and privileges first: they matter more than memberships.
-            + "; ".join(sorted(problems, key=lambda problem: (problem.startswith("member of "), problem))[:10])
+            + "; ".join(problems[:10])
             + f". Connect as a login role that is only IN ROLE {agent_role}, with no role "
             "settings and no TEMPORARY on any database (agent/README.md), and re-run "
             "sdr-agent-boundary."
