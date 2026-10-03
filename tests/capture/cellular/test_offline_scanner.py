@@ -1,3 +1,4 @@
+import logging
 import subprocess
 
 import pytest
@@ -190,6 +191,30 @@ def test_parse_cellsearch_output_leaves_mib_fields_none_without_summary_row():
     assert {key: cells[1][key] for key in EXPECTED_MIB_FIELDS} == dict.fromkeys(
         EXPECTED_MIB_FIELDS
     )
+
+
+def test_parse_cellsearch_output_warns_when_table_lacks_a_detected_cell(caplog):
+    """The table was printed but has no row for cell 86 (output cut off
+    mid-table): one warning naming the cell, passed as structured args
+    rather than interpolated text."""
+    truncated = MULTI_CELL_STDOUT[: MULTI_CELL_STDOUT.index("FDD  86 2")]
+    with caplog.at_level(logging.WARNING, logger="capture.cellular.offline_scanner"):
+        parse_cellsearch_output(truncated)
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
+    assert caplog.records[0].args == (86, "FDD", 1860.0)
+
+
+def test_parse_cellsearch_output_does_not_warn_when_table_absent_or_complete(caplog):
+    """No table at all (output cut off before it) leaves MIB fields None
+    silently; a complete table logs nothing."""
+    before_table = MULTI_CELL_STDOUT[
+        : MULTI_CELL_STDOUT.index("Detected the following cells:")
+    ]
+    with caplog.at_level(logging.WARNING, logger="capture.cellular.offline_scanner"):
+        cells = parse_cellsearch_output(before_table)
+        parse_cellsearch_output(MULTI_CELL_STDOUT)
+    assert [cell["n_rb_dl"] for cell in cells] == [None, None]
+    assert caplog.records == []
 
 
 # Synthetic variants of real output. Every real capture available decodes to

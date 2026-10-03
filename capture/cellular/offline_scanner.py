@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
+
+logger = logging.getLogger(__name__)
 
 _CELL_BLOCK = re.compile(
     r"Detected a (?P<duplex>FDD|TDD) cell! At freqeuncy (?P<freq_mhz>[\d.]+)MHz.*?"
@@ -12,6 +15,8 @@ _CELL_BLOCK = re.compile(
     r"residual frequency offset:\s*(?P<freq_offset_hz>-?[\d.]+)\s*Hz",
     re.DOTALL,
 )
+
+_SUMMARY_HEADER = "Detected the following cells:"
 
 # One row of the "Detected the following cells:" summary table CellSearch
 # prints last (columns: DPX CID A fc freq-offset RXPWR C nRB P PR
@@ -67,11 +72,10 @@ def _parse_summary_rows(stdout: str) -> list[dict]:
     return rows
 
 
-def _mib_fields_for(cell: dict, rows: list[dict]) -> dict:
-    """MIB fields from the summary row for the same cell: same duplex mode
-    and cell ID, and the nearest frequency within _SAME_CELL_MHZ. All None
-    if there is no such row, e.g. when the output was cut off before the
-    table."""
+def _matching_row(cell: dict, rows: list[dict]) -> dict | None:
+    """The summary row for the same cell: same duplex mode and cell ID, and
+    the nearest frequency within _SAME_CELL_MHZ. None if there is no such
+    row, e.g. when the output was cut off before or inside the table."""
     candidates = [
         row
         for row in rows
@@ -79,10 +83,11 @@ def _mib_fields_for(cell: dict, rows: list[dict]) -> dict:
         and row["cell_id"] == cell["cell_id"]
         and abs(row["freq_mhz"] - cell["freq_mhz"]) < _SAME_CELL_MHZ
     ]
-    if not candidates:
-        return dict.fromkeys(_MIB_KEYS)
-    row = min(candidates, key=lambda row: abs(row["freq_mhz"] - cell["freq_mhz"]))
-    return {key: row[key] for key in _MIB_KEYS}
+    return min(
+        candidates,
+        key=lambda row: abs(row["freq_mhz"] - cell["freq_mhz"]),
+        default=None,
+    )
 
 
 def parse_cellsearch_output(stdout: str) -> list[dict]:
@@ -91,10 +96,13 @@ def parse_cellsearch_output(stdout: str) -> list[dict]:
     MIB fields (antenna ports, CP type, n_RB and derived bandwidth, PHICH
     duration and resource) from its final summary table. CellSearch only
     reports a cell after a CRC-checked MIB decode, but it never prints the
-    SFN, and it reports no RSRP/RSRQ/SINR or SIB fields (so no PLMN). Note
-    "freqeuncy" reproduces a real typo in CellSearch's own output text, not
-    a mistake here."""
+    SFN, and it reports no RSRP/RSRQ/SINR or SIB fields (so no PLMN). A
+    cell with no matching table row gets None MIB fields; if the table was
+    printed at all, that is also logged as a warning. Note "freqeuncy"
+    reproduces a real typo in CellSearch's own output text, not a mistake
+    here."""
     rows = _parse_summary_rows(stdout)
+    table_printed = _SUMMARY_HEADER in stdout
     cells = []
     for match in _CELL_BLOCK.finditer(stdout):
         cell = {
@@ -105,7 +113,20 @@ def parse_cellsearch_output(stdout: str) -> list[dict]:
             "rx_power_db": float(match.group("rx_power_db")),
             "freq_offset_hz": float(match.group("freq_offset_hz")),
         }
-        cells.append({**cell, **_mib_fields_for(cell, rows)})
+        row = _matching_row(cell, rows)
+        if row is None:
+            if table_printed:
+                logger.warning(
+                    "CellSearch summary table has no row for detected cell %r "
+                    "(%r, %r MHz); its MIB fields are left as None",
+                    cell["cell_id"],
+                    cell["duplex"],
+                    cell["freq_mhz"],
+                )
+            mib_fields = dict.fromkeys(_MIB_KEYS)
+        else:
+            mib_fields = {key: row[key] for key in _MIB_KEYS}
+        cells.append({**cell, **mib_fields})
     return cells
 
 
