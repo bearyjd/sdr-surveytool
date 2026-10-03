@@ -23,6 +23,14 @@ from agent.db_gateway import (
 from schema.records import ClassificationStatus
 
 
+@pytest.fixture(autouse=True)
+def _no_libpq_environment(monkeypatch):
+    """libpq reads these when the URL leaves a parameter out; the runner's
+    own must not decide what these tests see."""
+    for name in ("PGHOST", "PGHOSTADDR", "PGSSLMODE", "PGSERVICE"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.mark.parametrize("url", ["sqlite:///survey.db", "sqlite:///:memory:", "mysql://u:p@localhost/db"])
 def test_refuses_non_postgres_urls(url):
     with pytest.raises(ValueError, match="PostgreSQL"):
@@ -128,6 +136,69 @@ def test_tls_settings_that_are_accepted(url, monkeypatch):
 def test_pgsslmode_counts_when_the_url_sets_none(monkeypatch):
     monkeypatch.setenv("PGSSLMODE", "verify-full")
     require_tls_for_remote(make_url("postgresql://agent@db.example.com/surveytool"))
+
+
+@pytest.mark.parametrize(
+    ("url", "env"),
+    [
+        # hostaddr is where libpq connects; host is then only the name it checks.
+        ("postgresql://agent@localhost/surveytool?hostaddr=10.0.0.5", {}),
+        ("postgresql://agent@localhost/surveytool", {"PGHOSTADDR": "10.0.0.5"}),
+        # A query host overrides the URL's own host.
+        ("postgresql://agent@localhost/surveytool?host=db.example.com", {}),
+        # libpq tries every host of a list.
+        ("postgresql://agent@/surveytool?host=/var/run/postgresql,db.example.com", {}),
+        ("postgresql://agent@/surveytool?host=/var/run/postgresql&host=db.example.com:5432", {}),
+        # A URL without a host connects to PGHOST.
+        ("postgresql://agent@/surveytool", {"PGHOST": "db.example.com"}),
+        ("postgresql://agent@/surveytool", {"PGHOSTADDR": "10.0.0.5"}),
+        # The URL's sslmode wins over PGSSLMODE.
+        ("postgresql://agent@db.example.com/surveytool?sslmode=disable", {"PGSSLMODE": "verify-full"}),
+    ],
+)
+def test_tls_is_judged_on_the_parameters_libpq_connects_with(url, env, monkeypatch):
+    """Codex: the check looked at the URL's host alone, while libpq connects
+    to hostaddr, to every host of a list, and to PGHOST/PGHOSTADDR when the
+    URL names none."""
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match="is not local: set sslmode=verify-full"):
+        require_tls_for_remote(make_url(url))
+
+
+@pytest.mark.parametrize(
+    ("url", "env"),
+    [
+        ("postgresql://agent@localhost/surveytool?service=surveytool", {}),
+        ("postgresql://agent@localhost/surveytool?sslmode=verify-full", {"PGSERVICE": "surveytool"}),
+    ],
+)
+def test_a_connection_service_is_refused(url, env, monkeypatch):
+    """A pg_service.conf entry can set host, hostaddr and sslmode behind the
+    URL's back, wherever PGSERVICEFILE or PGSYSCONFDIR point."""
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match="service"):
+        require_tls_for_remote(make_url(url))
+
+
+@pytest.mark.parametrize(
+    ("url", "env"),
+    [
+        ("postgresql://agent@/surveytool", {"PGHOST": "/var/run/postgresql"}),
+        ("postgresql://agent@localhost/surveytool?hostaddr=127.0.0.1", {}),
+        ("postgresql://agent@/surveytool?host=/var/run/postgresql,localhost", {}),
+        ("postgresql://agent@/surveytool?host=@pgsock", {}),
+        ("postgresql://agent@db.example.com/surveytool?hostaddr=10.0.0.5&sslmode=verify-full", {}),
+        ("postgresql://agent@/surveytool?host=/var/run/postgresql,db.example.com&sslmode=require", {}),
+        ("postgresql://agent@/surveytool", {"PGHOST": "db.example.com", "PGSSLMODE": "verify-full"}),
+        ("postgresql://agent@db.example.com/surveytool?sslmode=require", {"PGSSLMODE": "disable"}),
+    ],
+)
+def test_effective_settings_that_are_accepted(url, env, monkeypatch):
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    require_tls_for_remote(make_url(url))
 
 
 def test_agent_startup_never_logs_the_database_password(monkeypatch, caplog, capsys, tmp_path):

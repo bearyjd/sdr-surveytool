@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from sqlalchemy import Connection, Engine, create_engine, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
@@ -480,28 +481,60 @@ def verify_boundary(engine: Engine, agent_role: str) -> None:
         )
 
 
-_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_LOCAL_ADDRESSES = {"127.0.0.1", "::1"}
+_LOCAL_HOSTS = {"localhost", *_LOCAL_ADDRESSES}
 # verify-full is recommended: require and verify-ca encrypt, but only
 # verify-full also checks the server's name, so a host that can redirect the
 # connection cannot impersonate the database.
 _TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
+# What libpq falls back to for a parameter the connection string leaves out.
+_LIBPQ_ENVIRONMENT = {"host": "PGHOST", "hostaddr": "PGHOSTADDR", "sslmode": "PGSSLMODE", "service": "PGSERVICE"}
+
+
+def _libpq_parameters(url: URL) -> dict[str, str]:
+    """The parameters libpq connects with: the URL as the psycopg dialect
+    translates it (a query host overriding the URL's, a host list joined),
+    then the PG* environment for those it leaves out."""
+    url = url.set(drivername="postgresql+psycopg")
+    _, connect_params = url.get_dialect()().create_connect_args(url)
+    parameters = conninfo_to_dict(make_conninfo("", **connect_params))
+    for key, variable in _LIBPQ_ENVIRONMENT.items():
+        if key not in parameters and os.environ.get(variable):
+            parameters[key] = os.environ[variable]
+    return {key: str(value) for key, value in parameters.items()}
+
+
+def _is_local_host(host: str) -> bool:
+    # Empty is libpq's default unix socket; "@" starts an abstract one.
+    return not host or host.startswith(("/", "@")) or host.lower() in _LOCAL_HOSTS
 
 
 def require_tls_for_remote(url: URL) -> None:
-    """Raise ValueError unless a non-local database is reached over TLS. A
-    unix socket, localhost, 127.0.0.1 and ::1 are local. The URL's sslmode
-    counts, else PGSSLMODE, else libpq's default, prefer (which silently
-    falls back to clear text)."""
-    host = url.host or url.query.get("host")
-    if isinstance(host, tuple):
-        host = host[0] if host else None
-    if not host or host.startswith("/") or host in _LOCAL_HOSTS:
+    """Raise ValueError unless every server libpq may connect to is local or
+    the connection requires TLS. Judged on the effective parameters (see
+    _libpq_parameters): every entry of the host and hostaddr lists must be
+    a unix socket, localhost, 127.0.0.1 or ::1 (hostaddr is where libpq
+    connects, host then only the name it checks), else sslmode must be
+    require or stronger; libpq's default, prefer, silently falls back to
+    clear text. A service (service= or PGSERVICE) is refused: its
+    pg_service.conf entry could set any of these behind the URL's back."""
+    parameters = _libpq_parameters(url)
+    if "service" in parameters:
+        raise ValueError(
+            "A connection service (service= or PGSERVICE) can set the host and sslmode outside "
+            "SURVEYTOOL_AGENT_DATABASE_URL; put them in the URL and unset PGSERVICE"
+        )
+    hosts = [host.strip() for host in parameters.get("host", "").split(",")]
+    addresses = [address.strip() for address in parameters.get("hostaddr", "").split(",")]
+    remote = [host for host in hosts if not _is_local_host(host)]
+    remote += [address for address in addresses if address and address not in _LOCAL_ADDRESSES]
+    if not remote:
         return
-    sslmode = url.query.get("sslmode") or os.environ.get("PGSSLMODE") or "prefer"
+    sslmode = parameters.get("sslmode", "prefer")
     if sslmode not in _TLS_SSLMODES:
         raise ValueError(
-            f"The database at {host} is not local: set sslmode=verify-full (recommended) or at "
-            f"least require in SURVEYTOOL_AGENT_DATABASE_URL, not {sslmode!r}"
+            f"The database at {', '.join(remote)} is not local: set sslmode=verify-full "
+            f"(recommended) or at least require in SURVEYTOOL_AGENT_DATABASE_URL, not {sslmode!r}"
         )
 
 
