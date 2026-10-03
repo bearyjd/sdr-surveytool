@@ -34,6 +34,11 @@ _POLL_SECONDS = 0.5
 # thread through a queue this small: a stalled consumer (slow disk, wedged
 # ingest socket) must not pile up ~670 MB snippets in memory.
 _SNIPPET_QUEUE_MAXSIZE = 2
+# The Python tap competes for the GIL, so give the SDR source ~100 ms of
+# output buffer: a briefly starved tap then catches up instead of the SDR
+# overflowing. Verified on GNU Radio 3.10.12 up to 5.6M items (100 ms at
+# 56 MS/s, 42.7 MiB of complex64).
+_SOURCE_BUFFER_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -252,6 +257,7 @@ def _open_session(
     # the anchor must be read as close as possible to sample 0, i.e. right
     # before start(), or every timestamp would be early by the open time.
     source = _build_soapy_source(settings)
+    source.set_min_output_buffer(settings.samples(_SOURCE_BUFFER_SECONDS))
     clock = SampleClock(anchor=datetime.now(timezone.utc), sample_rate=settings.sample_rate)
     assembler = SnippetAssembler(
         clock=clock,

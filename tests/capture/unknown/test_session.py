@@ -92,3 +92,27 @@ def test_open_session_tears_down_a_flowgraph_whose_start_fails(tmp_path, monkeyp
         with service._open_session(_settings(tmp_path), {}, Counter()):
             pass  # pragma: no cover
     assert top_block_calls == ["start", "stop", "wait"]
+
+
+def test_source_gets_100ms_of_output_buffer_before_start(tmp_path, monkeypatch):
+    """The Python tap competes for the GIL; ~100 ms of source buffer lets a
+    briefly starved tap catch up instead of overflowing the SDR."""
+    sources = []
+    seen_at_start = []
+
+    def fake_source(settings):
+        sources.append(blocks.vector_source_c(np.zeros(1_000, np.complex64), False))
+        return sources[-1]
+
+    real_start = gr.top_block.start
+
+    def recording_start(self, *args, **kwargs):
+        seen_at_start.append(sources[0].min_output_buffer(0))
+        return real_start(self, *args, **kwargs)
+
+    monkeypatch.setattr(service, "_build_soapy_source", fake_source)
+    monkeypatch.setattr(gr.top_block, "start", recording_start)
+    with service._open_session(_settings(tmp_path), {}, Counter()) as snippets:
+        with pytest.raises(RuntimeError, match="stalled"):
+            next(snippets)
+    assert seen_at_start == [10_000]  # 0.1 s at 100 kS/s
