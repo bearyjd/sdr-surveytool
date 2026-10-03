@@ -258,6 +258,17 @@ def test_parse_cellsearch_output_matches_same_cell_id_by_frequency():
     ]
 
 
+def test_parse_cellsearch_output_prefers_nearest_row_within_radius():
+    """Two same-ID rows both inside the 1 MHz radius: the closer one wins,
+    even when it is listed second."""
+    stdout = _synthetic_stdout(
+        [_block_at("1815.3")],
+        [_synthetic_row(fc="1814.9", n_rb=50), _synthetic_row(fc="1815.3")],
+    )
+    cells = parse_cellsearch_output(stdout)
+    assert cells[0]["n_rb_dl"] == 100
+
+
 def test_parse_cellsearch_output_ignores_row_one_mhz_or_more_away():
     stdout = _synthetic_stdout([_block_at("1815.3")], [_synthetic_row(fc="1816.3")])
     cells = parse_cellsearch_output(stdout)

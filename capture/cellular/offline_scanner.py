@@ -67,16 +67,19 @@ def _parse_summary_rows(stdout: str) -> list[dict]:
 
 
 def _mib_fields_for(cell: dict, rows: list[dict]) -> dict:
-    """MIB fields from the summary row for the same cell (same cell ID,
-    frequency within _SAME_CELL_MHZ). All None if there is no such row,
-    e.g. when the output was cut off before the table."""
-    for row in rows:
-        if (
-            row["cell_id"] == cell["cell_id"]
-            and abs(row["freq_mhz"] - cell["freq_mhz"]) < _SAME_CELL_MHZ
-        ):
-            return {key: row[key] for key in _MIB_KEYS}
-    return dict.fromkeys(_MIB_KEYS)
+    """MIB fields from the summary row for the same cell: same cell ID, and
+    the nearest frequency within _SAME_CELL_MHZ. All None if there is no
+    such row, e.g. when the output was cut off before the table."""
+    candidates = [
+        row
+        for row in rows
+        if row["cell_id"] == cell["cell_id"]
+        and abs(row["freq_mhz"] - cell["freq_mhz"]) < _SAME_CELL_MHZ
+    ]
+    if not candidates:
+        return dict.fromkeys(_MIB_KEYS)
+    row = min(candidates, key=lambda row: abs(row["freq_mhz"] - cell["freq_mhz"]))
+    return {key: row[key] for key in _MIB_KEYS}
 
 
 def parse_cellsearch_output(stdout: str) -> list[dict]:
