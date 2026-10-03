@@ -149,8 +149,8 @@ def _reduced_confidence(
         reasons.append("non_finite_samples")
     if snippet.truncated:
         reasons.append("truncated")  # only the first MAX_SECONDS / MAX_SAMPLES were analysed
-    if primary is not None and not primary.bandwidth_reliable:
-        reasons.append("bandwidth_unreliable")
+    if primary_region is not None and not primary_region.bandwidth_reliable:
+        reasons.append("bandwidth_unreliable")  # judged by segmentation, before channelizing
     if primary is not None and primary.snr_db < _MIN_GROUNDING_SNR_DB:
         reasons.append(LOW_SNR)
     if primary is not None and primary.obw_hz <= _UNRESOLVED_FINE_BINS * primary.fine_resolution_hz:

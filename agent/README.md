@@ -75,7 +75,10 @@ to the cellular/WiFi/BT decode modules.
   unusable or none of the newest pending snippets reads under `--snippet-store-dir`.
   The ingest socket is **not**
   mounted. Network egress is limited to the database and `api.anthropic.com`. Give it a
-  memory limit of about 1 GiB: the analysis peaks at ~610 MB at its 2^25-sample cap.
+  memory limit of about 1 GiB. The worst case is a snippet at the 2^25-sample read cap
+  whose primary region fills the band (nothing is decimated): the read plus the analysis
+  then peak at 584 MB RSS, the 256 MiB of IQ, one channelized copy of the same size, and
+  bounded batches (a narrow region at the same size: under 400 MB).
 - **The database.** The agent's login role (`IN ROLE surveytool_agent`, and in nothing
   else) has no privilege on `survey_records`; it reads the `agent_pending_unknown` view and
   writes only through the `classify_unknown` function (`storage/sql/agent_boundary.sql`,

@@ -3,6 +3,7 @@
 from a 20-seed sweep (worst case in the comment), with headroom."""
 
 import subprocess
+import tracemalloc
 import sys
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import numpy as np
 import pytest
 
 from dsp import synthetic
-from dsp.features import channelize, region_features
+from dsp.features import _PAPR_MAX_SAMPLES, channelize, region_features
 from dsp.segmentation import BATCH_SAMPLES, segment_spectrum
 
 FS = 1e6
@@ -167,3 +168,24 @@ def test_feature_modules_import_nothing_from_capture_or_gnuradio():
         "assert not bad, bad"
     )
     subprocess.run([sys.executable, "-c", probe], cwd=Path(__file__).resolve().parents[2], check=True)
+
+
+def test_a_full_band_region_stays_within_a_bounded_working_set():
+    """The reviewer's case: a region filling the band is not decimated, and
+    channelizing it kept every block's piece and then concatenated them
+    (twice the capture), before the PAPR copied the on-samples again. The
+    working set is now one capture-sized output, the PAPR's bounded
+    subsample (16 MiB at most) and a few MiB of batches (agent/README.md
+    has the measurement at the read cap)."""
+    rng = np.random.default_rng(40)
+    n = 1 << 22
+    iq = synthetic.band_limited(rng, n, FS, 0.95 * FS, 0.0, 1e-3) + synthetic.noise(rng, n, 1e-5)
+    segmentation = segment_spectrum(iq, FS)
+    tracemalloc.start()
+    try:
+        features = region_features(iq, segmentation, segmentation.primary)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert features.obw_hz == pytest.approx(0.95 * FS, rel=0.03)
+    assert peak <= iq.nbytes + 4 * _PAPR_MAX_SAMPLES + (8 << 20)  # was 2.6x the input

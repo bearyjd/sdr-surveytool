@@ -36,7 +36,8 @@ DATA_SUFFIX = ".sigmf-data"
 META_SUFFIX = ".sigmf-meta"
 MAX_SECONDS = 2.0
 # Absolute ceiling whatever the file claims its sample rate is: 256 MiB of
-# cf32. Measured peak RSS of the whole analysis at this size: ~610 MB.
+# cf32. Measured peak RSS of the read plus the whole analysis at this size,
+# worst case (a region filling the band, so nothing is decimated): 584 MB.
 MAX_SAMPLES = 1 << 25
 MIN_SAMPLES = 1024  # one coarse FFT frame (dsp.segmentation.NFFT)
 _MAX_META_BYTES = 1 << 20

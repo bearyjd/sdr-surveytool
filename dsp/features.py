@@ -36,6 +36,7 @@ _ON_THRESHOLD = 4.0  # duty cycle counts frames 6 dB above the region's noise
 _MIN_FRAME = 32  # samples per duty-cycle frame (power estimate within ~18%)
 _FRAME_SECONDS = 100e-6
 _PAPR_PERCENTILE = 99.9
+_PAPR_MAX_SAMPLES = 1 << 22  # the percentile reads an even subsample of at most this many
 _MIN_FLATNESS_BINS = 16  # a tone's 3-bin span would read as flat
 _ENVELOPE_NFFT = 4096
 _MIN_ENVELOPE_NFFT = 256  # shorter on-runs carry no usable line
@@ -74,9 +75,12 @@ def channelize(
     as one complex64 batch elsewhere): measured, a float32 FFT of this length
     leaves structured round-off spurs at multiples of rate/16 that the
     symbol-rate detector reads as lines (14 of 100 clean tones). The output,
-    and everything downstream, is complex64/float32. Returns (complex64 baseband aligned with `iq`, its sample
-    rate, the filter's noise-equivalent bandwidth in Hz). Power is preserved:
-    a signal inside the passband keeps its mean |x|^2."""
+    and everything downstream, is complex64/float32, written block by block
+    into one preallocated array: a region filling the band is not decimated,
+    so its output is as large as the capture, and must exist only once.
+    Returns (complex64 baseband aligned with `iq`, its sample rate, the
+    filter's noise-equivalent bandwidth in Hz). Power is preserved: a signal
+    inside the passband keeps its mean |x|^2."""
     block = CHANNEL_BLOCK
     kept = 1 << max(4, math.ceil(math.log2(block * min(1.0, _OVERSAMPLE * passband_hz / sample_rate))))
     out_rate = sample_rate * kept / block
@@ -84,7 +88,8 @@ def channelize(
     bins = np.arange(-kept // 2, kept // 2)
     taper = _passband(bins * sample_rate / block, passband_hz).astype(np.float32)
     hop, quarter = block // 2, kept // 4
-    pieces = []
+    baseband = np.empty(round(len(iq) * kept / block), dtype=np.complex64)
+    written = 0
     for index in range(math.ceil(len(iq) / hop)):
         # Block `index` is centred on input samples [index*hop, (index+1)*hop),
         # zero-padded where it runs off either end of the capture.
@@ -97,8 +102,9 @@ def channelize(
         # rotate it back to one continuous oscillator (hop = block / 2).
         rotation = -1.0 if (shift * index) % 2 else 1.0
         y = np.fft.ifft(np.fft.ifftshift(selected)) * (kept / block) * rotation
-        pieces.append(y[quarter : kept - quarter].astype(np.complex64, copy=False))
-    baseband = np.concatenate(pieces)[: round(len(iq) * kept / block)]
+        piece = y[quarter : kept - quarter][: len(baseband) - written]
+        baseband[written : written + len(piece)] = piece
+        written += len(piece)
     noise_bandwidth = float(np.sum(taper.astype(np.float64) ** 2)) * sample_rate / block
     return baseband, out_rate, noise_bandwidth
 
@@ -148,8 +154,6 @@ def baseband_features(
     powers = frame_powers(y, frame)
     on = powers > noise * _ON_THRESHOLD
     bursts = [stop - start for start, stop in runs(on)]
-    on_samples = np.repeat(on, frame)
-    on_power = np.abs(y[: len(on_samples)][on_samples]) ** 2 if on.any() else np.abs(y) ** 2
     # On-runs as sample ranges, one frame trimmed off each end (edge transients).
     on_runs = [((start + 1) * frame, (stop - 1) * frame) for start, stop in runs(on) if stop - start > 2]
 
@@ -173,7 +177,7 @@ def baseband_features(
         center_offset_hz=region.center_offset_hz
         + float(np.sum(freqs * excess) / excess.sum() if excess.sum() > 0 else 0.0),
         obw_hz=(high - low + 1) * rate / fine_nfft,
-        papr_db=float(10 * np.log10(np.percentile(on_power, _PAPR_PERCENTILE) / np.mean(on_power))),
+        papr_db=_papr_db(y, on, frame),
         duty_cycle=float(on.mean()),
         burst_count=len(bursts),
         mean_burst_s=float(np.mean(bursts) * frame / rate) if bursts else None,
@@ -184,6 +188,30 @@ def baseband_features(
         bandwidth_reliable=region.bandwidth_reliable,
         fine_resolution_hz=rate / fine_nfft,
     )
+
+
+def _papr_db(y: np.ndarray, on: np.ndarray, frame: int) -> float:
+    """The 99.9th-percentile |y|^2 over the mean, in the on-frames (all
+    frames if none is on), in bounded memory: the mean over every on-sample,
+    a batch at a time; the percentile over an even subsample of at most
+    _PAPR_MAX_SAMPLES of them (all of them, below that)."""
+    frames = y[: len(on) * frame].reshape(-1, frame)
+    chosen = np.flatnonzero(on) if on.any() else np.arange(len(on))
+    count = len(chosen) * frame
+    stride = max(1, math.ceil(count / _PAPR_MAX_SAMPLES))
+    sample = np.empty(math.ceil(count / stride), dtype=np.float32)
+    step = max(1, BATCH_SAMPLES // frame)
+    total, seen = 0.0, 0
+    for i in range(0, len(chosen), step):
+        power = np.abs(frames[chosen[i : i + step]]).ravel() ** 2
+        total += float(power.sum(dtype=np.float64))
+        # Every stride-th on-sample overall, continuing across batches.
+        picked = power[(-seen) % stride :: stride]
+        start = math.ceil(seen / stride)
+        sample[start : start + len(picked)] = picked
+        seen += power.size
+    peak = np.percentile(sample, _PAPR_PERCENTILE, overwrite_input=True)
+    return float(10 * np.log10(peak / (total / count)))
 
 
 def _symbol_rate(y: np.ndarray, rate: float, on_runs: list[tuple[int, int]]) -> float | None:
