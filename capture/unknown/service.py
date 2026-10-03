@@ -29,9 +29,6 @@ logger = logging.getLogger(__name__)
 # this ceiling, matching capture/wifi and capture/bluetooth.
 _INITIAL_BACKOFF_SECONDS = 1.0
 _MAX_BACKOFF_SECONDS = 60.0
-# No new samples for this long means the SDR stream is dead (unplugged,
-# wedged driver, or its source returned WORK_DONE): rebuild the session.
-_STALL_SECONDS = 5.0
 _POLL_SECONDS = 0.5
 # Completed snippets cross from the GNU Radio scheduler thread to the service
 # thread through a queue this small: a stalled consumer (slow disk, wedged
@@ -56,6 +53,9 @@ class CaptureSettings:
     # Staging, the snippet store and the database share one disk; below this
     # much free space snippets are dropped instead of written.
     min_free_bytes: int = 2 * 1024**3
+    # No new samples for this long means the SDR stream is dead (unplugged,
+    # wedged driver, or its source returned WORK_DONE): rebuild the session.
+    stall_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         if self.sample_rate <= 0 or self.center_freq_hz <= 0:
@@ -74,6 +74,8 @@ class CaptureSettings:
             )
         if self.min_free_bytes < 0:
             raise ValueError("min_free_bytes must be >= 0")
+        if self.stall_seconds <= 0:
+            raise ValueError("stall_seconds must be > 0")
         if self.samples(self.averaging_seconds) < 1 or self.samples(self.post_trigger_seconds) < 1:
             raise ValueError(
                 "averaging_seconds and post_trigger_seconds must each span at least one sample"
@@ -265,9 +267,10 @@ def _open_session(
         assembler,
         _offer_or_drop(snippets, drops),
     )
-    flowgraph.top_block.start()
     try:
-        yield _drain(snippets, flowgraph.tap)
+        # Inside the try: a start() that fails part-way still gets torn down.
+        flowgraph.top_block.start()
+        yield _drain(snippets, flowgraph.tap, stall_seconds=settings.stall_seconds)
     finally:
         flowgraph.top_block.stop()
         flowgraph.top_block.wait()
@@ -276,7 +279,7 @@ def _open_session(
 def _drain(
     snippets: queue.Queue,
     tap,
-    stall_seconds: float = _STALL_SECONDS,
+    stall_seconds: float,
     poll_seconds: float = _POLL_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> Iterator[CapturedSnippet]:
