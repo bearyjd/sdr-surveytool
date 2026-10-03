@@ -1025,6 +1025,27 @@ def test_a_row_holding_a_nul_escape_is_left_out_instead_of_failing_every_fetch(b
         gateway.close()
 
 
+@pytest.mark.parametrize("metadata", ['["unclassified"]', '"unclassified"', "42", "null"])
+def test_a_record_whose_metadata_is_not_an_object_is_never_pending(boundary, metadata):
+    """Codex M7: a scalar or array metadata read as unclassified (->> gives
+    NULL), and jsonb || object made it an array, so the record was
+    re-classified forever. Only an object can be pending or written."""
+    watermark = _watermark(boundary)
+    record_id = _insert(boundary, Modality.UNKNOWN, None)
+    _admin_scalar(
+        boundary, "UPDATE survey_records SET metadata = CAST(:m AS json) WHERE id = :id RETURNING id",
+        m=metadata, id=record_id,
+    )
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        assert record_id not in [r.id for r in gateway.fetch_pending(watermark, 100)]
+        with pytest.raises(RecordNotPending):
+            gateway.submit_classification(record_id, ClassificationStatus.NEEDS_REVIEW, None, 0.0, "x")
+    finally:
+        gateway.close()
+    assert _admin_scalar(boundary, "SELECT metadata::text FROM survey_records WHERE id = :id", id=record_id) == metadata
+
+
 def test_agent_classifies_a_real_row_through_the_boundary(boundary, tmp_path):
     """The whole agent against real PostgreSQL: a stored step-4 snippet, a
     pending row, the agent login role, a fake LLM; the row ends up

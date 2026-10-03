@@ -140,6 +140,10 @@ CREATE FUNCTION public.agent_is_pending_unknown(p_modality text, p_metadata json
     LANGUAGE sql
     IMMUTABLE
     RETURN p_modality = 'unknown'
+       -- Only an object can be pending: ->> reads a scalar or an array as
+       -- "unclassified", and classify_unknown's jsonb || would turn it into an
+       -- array that reads as unclassified forever.
+       AND json_typeof(p_metadata) = 'object'
        AND coalesce(p_metadata ->> 'classification_status', 'unclassified') = 'unclassified';
 ALTER FUNCTION public.agent_is_pending_unknown(text, json) OWNER TO {{owner_role}};
 REVOKE ALL ON FUNCTION public.agent_is_pending_unknown(text, json) FROM PUBLIC;
