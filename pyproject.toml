@@ -45,6 +45,7 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
+agent = ["data/*.json"]
 storage = ["sql/*.sql"]
 
 [tool.pytest.ini_options]

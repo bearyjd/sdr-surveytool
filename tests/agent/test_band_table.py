@@ -1,0 +1,97 @@
+# tests/agent/test_band_table.py
+import pytest
+from pydantic import ValidationError
+
+from agent.band_table import BandEntry, load_band_table, match_bands
+
+
+def _entry(id_: str, start: float, end: float, obw: tuple[float, float] = (10e3, 30e3)) -> BandEntry:
+    return BandEntry(
+        id=id_,
+        start_hz=start,
+        end_hz=end,
+        service="test service",
+        typical_signals=("narrowband FM",),
+        expected_obw_hz=obw,
+        citation="47 CFR 0.0",
+        source="verbatim",
+    )
+
+
+def test_shipped_table_is_valid_and_cited():
+    table = load_band_table()
+    assert table.region == "US"
+    assert 20 <= len(table.entries) <= 30
+    for entry in table.entries:
+        assert entry.citation.startswith("47 CFR ")
+        assert entry.source.strip()
+        assert 47e6 <= entry.start_hz < entry.end_hz <= 6e9
+        low, high = entry.expected_obw_hz
+        # Plausibility must mean something: no range starts at 0 or spans
+        # more than ~2.4 decades.
+        assert 0 < low < high <= 250 * low, entry.id
+
+
+def test_shipped_table_ids_include_the_spec_examples():
+    ids = {entry.id for entry in load_band_table().entries}
+    assert {
+        "fm_broadcast",
+        "airband_vhf",
+        "frs_gmrs_462",
+        "ism_902_928",
+        "pcs_downlink",
+        "aws_downlink",
+        "lower700_downlink",
+        "upper700_c_downlink",
+        "lte_b71_600_downlink",
+        "adsb_1090",
+        "gnss_rnss_l1",
+        "ism_2400",
+        "cbrs",
+        "unii_5150_5250",
+        "unii_5725_5850",
+    } <= ids
+
+
+@pytest.mark.parametrize(
+    "start, end, obw",
+    [(46e6, 50e6, (1, 2)), (100e6, 100e6, (1, 2)), (100e6, 99e6, (1, 2)), (5.9e9, 6.1e9, (1, 2)), (100e6, 101e6, (2, 1))],
+)
+def test_entries_outside_47mhz_6ghz_or_inverted_are_rejected(start, end, obw):
+    with pytest.raises(ValidationError):
+        _entry("bad", start, end, obw)
+
+
+def test_entry_without_a_cfr_citation_is_rejected():
+    with pytest.raises(ValidationError):
+        BandEntry.model_validate({**_entry("x", 100e6, 101e6).model_dump(), "citation": "Wikipedia"})
+
+
+def test_grounded_needs_center_inside_and_plausible_obw():
+    bands = (_entry("frs", 462.54e6, 462.735e6, (2e3, 20e3)),)
+    (match,) = match_bands(bands, 462.6e6, 12e3)
+    assert match.grounded
+    (match,) = match_bands(bands, 462.6e6, 200e3)  # center inside, OBW implausible
+    assert not match.grounded
+
+
+def test_band_edges_are_inclusive():
+    bands = (_entry("b", 100e6, 101e6),)
+    assert match_bands(bands, 100e6, 20e3)[0].grounded
+    assert match_bands(bands, 101e6, 20e3)[0].grounded
+
+
+def test_signal_overlapping_an_edge_matches_ungrounded():
+    """Center just outside, occupied span overlapping: listed, not grounded."""
+    bands = (_entry("b", 100e6, 101e6),)
+    (match,) = match_bands(bands, 101e6 + 5e3, 20e3)
+    assert not match.grounded
+    assert match_bands(bands, 101e6 + 11e3, 20e3) == []
+
+
+def test_overlapping_entries_all_returned_lowest_start_first():
+    bands = (_entry("wide", 900e6, 930e6, (5e3, 2e6)), _entry("narrow", 914e6, 916e6, (100e3, 300e3)))
+    matches = match_bands(bands, 915e6, 125e3)
+    assert [(m.entry.id, m.grounded) for m in matches] == [("wide", True), ("narrow", True)]
+    matches = match_bands(bands, 915e6, 1e6)
+    assert [(m.entry.id, m.grounded) for m in matches] == [("wide", True), ("narrow", False)]
