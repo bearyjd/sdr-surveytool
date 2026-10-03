@@ -57,11 +57,16 @@ The dBFS power stats and the occupied-bandwidth estimate live in the shared top-
     cooldown.
 - `identifier.bandwidth_estimate` is the 99%-power occupied bandwidth of the burst
   (resolution sample_rate / 1024).
-  - **Noise floor:** measured per FFT bin from the snippet's own pre-trigger samples,
-    which are below the threshold by construction (`dsp.spectral.noise_floor_psd`).
-    It therefore follows the SDR's anti-alias roll-off and colored noise, and it
-    subtracts an emitter that was already on below the threshold, so the estimate
-    describes the burst that triggered capture.
+  - **Noise floor:** measured per FFT bin from the quiet frames of the snippet's
+    pre-trigger samples, meaning the frames whose mean power is below the trigger
+    threshold (`dsp.spectral.quiet_reference`, `noise_floor_psd`).
+    - **Why quiet frames only:** pre-trigger samples are not always signal-free. An
+      always-on emitter above the threshold (e.g. an LTE downlink) retriggers as soon
+      as its cooldown expires, so it fills them at full power, and as a reference it
+      would cancel itself.
+    - **What it buys:** the floor follows the SDR's anti-alias roll-off and colored
+      noise, and it subtracts an emitter that was already on below the threshold.
+      The estimate therefore describes the burst that triggered capture.
   - **Accuracy:** across 20 seeds, within -3%..+3% for 10-70 kHz brick-wall and
     70-85% shaped bursts at 11-20 dB SNR. This holds on white noise and on noise
     through 60%/80%-passband roll-off filters. Bursts only a few 1024-sample frames
@@ -69,8 +74,10 @@ The dBFS power stats and the occupied-bandwidth estimate live in the shared top-
   - **Unreliable estimates:** these carry
     `quality_flags.bandwidth_estimate_unreliable: true`:
     - a burst filling more than 90% of the band, or wrapping its edges;
-    - a snippet with fewer than 8 frames of pre-trigger reference (e.g. a trigger
-      right after stream start), which falls back to a flat median floor.
+    - a snippet with fewer than 8 quiet pre-trigger frames, which falls back to a
+      flat median floor. Typical causes are a trigger right after stream start, or
+      an always-on emitter that retriggered. Its bandwidth is still estimated
+      against the median, which is fine on flat noise but blind to roll-off.
 
 ## Snippet handoff (capture never writes to storage)
 
@@ -206,6 +213,9 @@ it down the same way Ctrl-C does.
 
 ## Known gaps (follow-ups)
 
+- **Always-on emitters:** an emitter that never drops below the threshold is
+  re-captured once per cooldown. It has no quiet reference, so its bandwidth is
+  always flagged unreliable (median floor).
 - **Ambiguous delivery:** when an emit fails after ingest actually received the
   record, capture deletes the staged IQ that ingest is about to adopt. Fixing this
   needs an acknowledgement or outbox protocol between capture and ingest, for all

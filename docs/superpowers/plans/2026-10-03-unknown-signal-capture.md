@@ -178,10 +178,13 @@ pipeline, §7 storage).
 >   - the normalizer refuses non-finite floats;
 >   - the tuned frequency is read back (`get_frequency(0)`);
 >   - snippet dirs must be absolute (capture defaults to `/var/lib/sdr-surveytool/...`);
->   - ingest's snippet store is opt-in, enabled by passing both snippet dirs.
-> - **Final counts:** the full suite gives `290 passed, 1 skipped`, and the
+>   - ingest's snippet store is opt-in, enabled by passing both snippet dirs;
+>   - only quiet (below-threshold) pre-trigger frames serve as the noise reference
+>     (`dsp.spectral.quiet_reference`), since an always-on emitter that retriggered
+>     would cancel itself.
+> - **Final counts:** the full suite gives `295 passed, 1 skipped`, and the
 >   `-W error` subset (`tests/capture/unknown tests/dsp
->   tests/storage/test_snippet_store.py`) gives `211 passed`.
+>   tests/storage/test_snippet_store.py`) gives `216 passed`.
 
 ## Verified facts (build-and-run spike, 2026-10-03)
 
