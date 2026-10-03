@@ -11,6 +11,8 @@ Two invariants:
   that raised before returning a response is not an answer.)
 
 Outcomes per record:
+- malformed (a view value fails db_gateway.parse_pending_row): needs_review
+  at once, reason malformed_record; no LLM call; never counts toward a halt;
 - no snippet (ingest rejected it or capture dropped it): needs_review at once,
   naming the quality flag; no LLM call; never counts toward a halt;
 - snippet outside the store: held; marked needs_review once a later snippet
@@ -205,6 +207,9 @@ class ClassificationAgent:
 
     def _process(self, record: PendingRecord) -> None:
         logger.info("Record %d: snippet %s", record.id, record.iq_snippet_path)
+        if record.malformed is not None:
+            self._submit(record.id, needs_review(f"malformed_record: {record.malformed}"))
+            return
         if record.iq_snippet_path is None:
             self._submit(record.id, needs_review(_no_snippet_reason(record)))
             return

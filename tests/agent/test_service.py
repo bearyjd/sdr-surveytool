@@ -288,6 +288,18 @@ def test_self_floor_grounding_is_off_unless_the_flag_is_given(tmp_path):
     assert _parse_args([*args, "--allow-self-floor-grounding"]).allow_self_floor_grounding is True
 
 
+def test_a_malformed_record_is_closed_without_an_llm_call_and_never_halts(store):
+    """A record whose view values cannot be parsed is a judgment about that
+    record: needs_review, NULL tag, no LLM call, and no halt however many."""
+    bad = [PendingRecord(i, None, None, None, None, None, malformed="snippet_duration_ms '3e9' is outside [0, 2147483647]") for i in range(1, 8)]
+    gateway = FakeGateway([*bad, _snippet_record(store, 8)])
+    client = ScriptedClient([GOOD])
+    assert _agent(gateway, client, store).run_batch() == 8
+    assert [(s[0], s[1], s[2], s[3]) for s in gateway.submitted] == [(i, REVIEW, None, 0.0) for i in range(1, 8)] + [(8, AUTO, "ism_902_928:lora", 0.9)]
+    assert all(s[4].startswith("malformed_record: snippet_duration_ms '3e9'") for s in gateway.submitted[:7])
+    assert len(client.requests) == 1
+
+
 def test_an_analysed_snippet_resets_the_streak(store):
     store.mkdir()
     records = [_gone(store, 1), _gone(store, 2), _gone(store, 3), _gone(store, 4), _snippet_record(store, 5), _gone(store, 6), _gone(store, 7)]

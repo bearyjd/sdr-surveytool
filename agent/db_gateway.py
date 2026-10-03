@@ -10,6 +10,9 @@ The only module in agent/ allowed to import sqlalchemy or psycopg.
 
 from __future__ import annotations
 
+import math
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import psycopg
@@ -25,6 +28,17 @@ DEFAULT_STATEMENT_TIMEOUT_S = 30.0
 _NOT_PENDING = "P0002"  # classify_unknown's no_data_found
 _TIMED_OUT = {"57014", "55P03"}  # query_canceled (statement_timeout), lock_not_available
 _CLASSIFY = "public.classify_unknown(integer, text, text, double precision, text)"
+
+# The view returns its numbers as text (agent_boundary.sql); these bounds
+# say what a plausible value is. Anything else makes the record malformed.
+_NUMBER = re.compile(r"-?\d+(\.\d+)?([eE][+-]?\d+)?")
+_BOUNDS = {
+    "sample_rate": (1.0, 1e10),
+    "center_freq": (1.0, 1e12),
+    "peak_power": (-400.0, 100.0),  # dBFS
+    "snippet_duration_ms": (0.0, 2**31 - 1),
+}
+_MAX_PATH_CHARS = 4096
 
 # The self-check is an allowlist. The connected role may be a member of
 # nothing but itself and the agent role; neither may carry a dangerous
@@ -147,7 +161,9 @@ class PendingRecord:
     """One row of public.agent_pending_unknown. Every value is DB data and
     therefore untrusted (the snippet path above all). iq_snippet_path is
     None when ingest rejected the snippet or capture dropped it; the
-    matching quality flag, if any, is in snippet_rejected/snippet_dropped."""
+    matching quality flag, if any, is in snippet_rejected/snippet_dropped.
+    malformed says why a value failed parse_pending_row's checks (that
+    value is then None): the record is closed out, never analysed."""
 
     id: int
     iq_snippet_path: str | None
@@ -157,6 +173,47 @@ class PendingRecord:
     snippet_duration_ms: int | None
     snippet_rejected: str | None = None
     snippet_dropped: str | None = None
+    malformed: str | None = None
+
+
+def _number(name: str, raw: str | None, problems: list[str]) -> float | None:
+    if raw is None:
+        return None
+    shown = repr(raw[:32])
+    if not _NUMBER.fullmatch(raw):
+        problems.append(f"{name} {shown} is not a number")
+        return None
+    value = float(raw)
+    low, high = _BOUNDS[name]
+    if not (math.isfinite(value) and low <= value <= high):
+        problems.append(f"{name} {shown} is outside [{low:.12g}, {high:.12g}]")
+        return None
+    return value
+
+
+def parse_pending_row(row: Sequence) -> PendingRecord:
+    """Parse and bound-check one view row (numbers arrive as text). Never
+    raises for bad values: they set PendingRecord.malformed instead."""
+    record_id, path, sample_rate, center_freq, peak_power, duration, rejected, dropped = row
+    problems: list[str] = []
+    if path is not None and (len(path) > _MAX_PATH_CHARS or "\x00" in path):
+        problems.append(f"iq_snippet_path is longer than {_MAX_PATH_CHARS} characters or holds NUL")
+        path = None
+    duration_ms = _number("snippet_duration_ms", duration, problems)
+    if duration_ms is not None and not duration_ms.is_integer():
+        problems.append(f"snippet_duration_ms {duration[:32]!r} is not an integer")
+        duration_ms = None
+    return PendingRecord(
+        id=record_id,
+        iq_snippet_path=path,
+        sample_rate=_number("sample_rate", sample_rate, problems),
+        center_freq=_number("center_freq", center_freq, problems),
+        peak_power=_number("peak_power", peak_power, problems),
+        snippet_duration_ms=None if duration_ms is None else int(duration_ms),
+        snippet_rejected=rejected,
+        snippet_dropped=dropped,
+        malformed="; ".join(problems) or None,
+    )
 
 
 class AgentGateway:
@@ -167,14 +224,14 @@ class AgentGateway:
         """Pending unknown rows with id > after_id, lowest id first."""
         with self._engine.connect() as conn:
             rows = conn.execute(_FETCH, {"after_id": after_id, "limit": limit}).all()
-        return [PendingRecord(*row) for row in rows]
+        return [parse_pending_row(row) for row in rows]
 
     def fetch_newest_with_snippet(self, after_id: int, limit: int) -> list[PendingRecord]:
         """The newest pending rows that carry a snippet path, newest first:
         the startup probe of the snippet-store mount."""
         with self._engine.connect() as conn:
             rows = conn.execute(_NEWEST_WITH_SNIPPET, {"after_id": after_id, "limit": limit}).all()
-        return [PendingRecord(*row) for row in rows]
+        return [parse_pending_row(row) for row in rows]
 
     def submit_classification(
         self,

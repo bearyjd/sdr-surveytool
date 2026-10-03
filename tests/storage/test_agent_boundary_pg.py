@@ -681,11 +681,47 @@ def test_newest_pending_snippets_for_the_startup_probe(boundary):
         gateway.close()
 
 
+def _set_metadata(boundary: Boundary, record_id: int, key: str, raw_json: str) -> None:
+    """Put a raw JSON value into a row's metadata, as a buggy or hostile
+    writer could, bypassing the pydantic model."""
+    _admin_scalar(
+        boundary,
+        "UPDATE survey_records SET metadata = jsonb_set(metadata::jsonb, ARRAY[:key], CAST(:raw AS jsonb))::json"
+        " WHERE id = :id RETURNING id",
+        key=key,
+        raw=raw_json,
+        id=record_id,
+    )
+
+
+def test_malformed_rows_never_fail_the_fetch(boundary):
+    """The view returns the numbers as text; a value no cast could take
+    (3e9 ms, a string sample rate) marks that one record instead of failing
+    every fetch."""
+    watermark = _watermark(boundary)
+    huge = _insert(boundary, Modality.UNKNOWN, None)
+    _set_metadata(boundary, huge, "snippet_duration_ms", "3e9")
+    word = _insert(boundary, Modality.UNKNOWN, None)
+    _set_metadata(boundary, word, "sample_rate", '"bad"')
+    good = _insert(boundary, Modality.UNKNOWN, None)
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        records = {r.id: r for r in gateway.fetch_pending(watermark, 10)}
+    finally:
+        gateway.close()
+    assert set(records) == {huge, word, good}
+    # jsonb normalizes 3e9 on the way in.
+    assert "snippet_duration_ms '3000000000' is outside [0, 2147483647]" in records[huge].malformed
+    assert "sample_rate 'bad' is not a number" in records[word].malformed
+    assert records[good].malformed is None and records[good].snippet_duration_ms == 1000
+
+
 def test_agent_classifies_a_real_row_through_the_boundary(boundary, tmp_path):
     """The whole agent against real PostgreSQL: a stored step-4 snippet, a
     pending row, the agent login role, a fake LLM; the row ends up
-    auto_classified and nothing else in it changes. A second pending row
-    whose snippet capture dropped is closed out as needs_review."""
+    auto_classified and nothing else in it changes. A malformed row before
+    it and a pending row whose snippet capture dropped are closed out as
+    needs_review."""
     rng = np.random.default_rng(42)
     n = 1 << 18
     iq = synthetic.noise(rng, n, 1e-5) + synthetic.gate(
@@ -697,6 +733,8 @@ def test_agent_classifies_a_real_row_through_the_boundary(boundary, tmp_path):
     )
     stored = LocalSnippetStore(staging, store_root).adopt(str(staged))
     watermark = _watermark(boundary)
+    malformed_id = _insert(boundary, Modality.UNKNOWN, None, path=stored, sample_rate=1e6)
+    _set_metadata(boundary, malformed_id, "snippet_duration_ms", "3e9")
     record_id = _insert(
         boundary, Modality.UNKNOWN, ClassificationStatus.UNCLASSIFIED, path=stored, sample_rate=1e6
     )
@@ -731,9 +769,12 @@ def test_agent_classifies_a_real_row_through_the_boundary(boundary, tmp_path):
             start_after_id=watermark,  # rows other tests left pending are not this test's
         )
         agent.check_snippet_root()
-        assert agent.run_batch() == 2
+        assert agent.run_batch() == 3
     finally:
         gateway.close()
+    malformed = _metadata(boundary, malformed_id)
+    assert (malformed["classification_status"], malformed["tag"]) == ("needs_review", None)
+    assert malformed["reasoning"].startswith("malformed_record: snippet_duration_ms '3000000000'")
     assert _metadata(boundary, record_id) == {
         **before,
         "classification_status": "auto_classified",

@@ -76,15 +76,17 @@ GRANT EXECUTE ON FUNCTION public.agent_is_pending_unknown(text, json) TO {{agent
 -- can close such rows out instead of leaving them pending forever.
 -- security_barrier makes PostgreSQL apply this WHERE clause before any
 -- non-leakproof condition a caller adds, so a caller's function can never see
--- a hidden row.
+-- a hidden row. Every value is returned as text, uncast: one row holding a
+-- value no cast could take (3e9 ms, a string sample rate) must not fail every
+-- fetch. The agent parses and bound-checks them per record.
 CREATE VIEW public.agent_pending_unknown
     WITH (security_barrier = true) AS
 SELECT r.id,
        r.metadata ->> 'iq_snippet_path' AS iq_snippet_path,
-       (r.metadata ->> 'sample_rate')::double precision AS sample_rate,
-       (r.identifier ->> 'center_freq')::double precision AS center_freq,
-       (r.signal ->> 'peak_power')::double precision AS peak_power,
-       (r.metadata ->> 'snippet_duration_ms')::integer AS snippet_duration_ms,
+       r.metadata ->> 'sample_rate' AS sample_rate,
+       r.identifier ->> 'center_freq' AS center_freq,
+       r.signal ->> 'peak_power' AS peak_power,
+       r.metadata ->> 'snippet_duration_ms' AS snippet_duration_ms,
        r.metadata -> 'quality_flags' ->> 'snippet_rejected' AS snippet_rejected,
        r.metadata -> 'quality_flags' ->> 'snippet_dropped' AS snippet_dropped
   FROM public.survey_records AS r
