@@ -491,6 +491,36 @@ def test_human_tag_committed_while_agent_waits_on_the_row_lock_wins(boundary):
     assert (metadata["classification_status"], metadata["tag"]) == ("manually_tagged", "human")
 
 
+def test_a_reinstall_drops_grants_added_to_the_boundary_objects(boundary):
+    """CREATE OR REPLACE keeps an object's ACL. A grant someone added to the
+    view or the functions must not survive the next install."""
+    stranger = f"sdr_stranger_grants_{boundary.suffix}"
+    classify = "public.classify_unknown(integer, text, text, double precision, text)"
+    pending = "public.agent_is_pending_unknown(text, json)"
+    admin = _engine(boundary.admin_url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(f"CREATE ROLE {stranger} NOLOGIN")
+            conn.exec_driver_sql(f"GRANT SELECT ON public.agent_pending_unknown TO {stranger}")
+            conn.exec_driver_sql(f"GRANT EXECUTE ON FUNCTION {classify} TO {stranger}")
+            conn.exec_driver_sql(f"GRANT EXECUTE ON FUNCTION {pending} TO PUBLIC")
+        install_agent_boundary(admin, boundary.agent_role, boundary.owner_role)
+        with admin.connect() as conn:
+            assert conn.execute(
+                text(
+                    "SELECT has_table_privilege(:r, 'public.agent_pending_unknown', 'SELECT'),"
+                    " has_function_privilege(:r, :classify, 'EXECUTE'),"
+                    " has_function_privilege(:r, :pending, 'EXECUTE')"
+                ),
+                {"r": stranger, "classify": classify, "pending": pending},
+            ).one() == (False, False, False)
+    finally:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(f"DROP OWNED BY {stranger}")
+            conn.exec_driver_sql(f"DROP ROLE IF EXISTS {stranger}")
+        admin.dispose()
+
+
 def test_self_check_rejects_a_superuser_url(boundary):
     with pytest.raises(BoundaryViolation, match="not confined.*has SUPERUSER"):
         connect_gateway(_url(boundary.admin_url), boundary.agent_role)

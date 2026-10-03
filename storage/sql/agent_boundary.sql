@@ -1,6 +1,8 @@
 -- storage/sql/agent_boundary.sql
 --
--- The Part 4 agent's database boundary. Idempotent: safe to apply again.
+-- The Part 4 agent's database boundary. Idempotent: safe to apply again. A
+-- reinstall drops and recreates the view and both functions, so no grant
+-- added to them since the last install survives it.
 -- Applied only by storage.agent_boundary (an admin CLI), as one transaction,
 -- never at ingest or agent startup. {{agent_role}} and {{owner_role}} are
 -- substituted by storage.agent_boundary.render_agent_boundary_sql after
@@ -46,11 +48,18 @@ $temp$;
 -- The owner role holds exactly what the view and classify_unknown need.
 GRANT SELECT, UPDATE (metadata) ON TABLE public.survey_records TO {{owner_role}};
 
+-- Start the boundary objects afresh: CREATE OR REPLACE would keep their
+-- ACLs, and a view's column types cannot change in place. No CASCADE: an
+-- object someone built on top of them makes the install fail loudly.
+DROP VIEW IF EXISTS public.agent_pending_unknown;
+DROP FUNCTION IF EXISTS public.classify_unknown(integer, text, text, double precision, text);
+DROP FUNCTION IF EXISTS public.agent_is_pending_unknown(text, json);
+
 -- The pending predicate, defined once and used by both the view and
 -- classify_unknown. A SQL-standard body is parsed now, so its operators are
 -- bound to pg_catalog at creation instead of resolved through the caller's
 -- search_path at run time; it is still inlined into the view's plan.
-CREATE OR REPLACE FUNCTION public.agent_is_pending_unknown(p_modality text, p_metadata json)
+CREATE FUNCTION public.agent_is_pending_unknown(p_modality text, p_metadata json)
     RETURNS boolean
     LANGUAGE sql
     IMMUTABLE
@@ -68,7 +77,7 @@ GRANT EXECUTE ON FUNCTION public.agent_is_pending_unknown(text, json) TO {{agent
 -- security_barrier makes PostgreSQL apply this WHERE clause before any
 -- non-leakproof condition a caller adds, so a caller's function can never see
 -- a hidden row.
-CREATE OR REPLACE VIEW public.agent_pending_unknown
+CREATE VIEW public.agent_pending_unknown
     WITH (security_barrier = true) AS
 SELECT r.id,
        r.metadata ->> 'iq_snippet_path' AS iq_snippet_path,
@@ -90,7 +99,7 @@ GRANT SELECT ON TABLE public.agent_pending_unknown TO {{agent_role}};
 -- SQLSTATE 22023 (invalid_parameter_value): bad arguments.
 -- SQLSTATE P0002 (no_data_found): the row is not, or no longer, a pending
 -- unknown row -- e.g. a human tagged it while the LLM call was in flight.
-CREATE OR REPLACE FUNCTION public.classify_unknown(
+CREATE FUNCTION public.classify_unknown(
     p_record_id integer,
     p_status text,
     p_tag text,
