@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -6,10 +7,11 @@ from capture.common.emitter import RecordEmitter
 from ingest.gps_fix import GpsFix, StaticGpsFixProvider
 from ingest.queue_server import QueueServer
 from ingest.service import IngestService
-from schema.records import Identifier, Modality, Signal, UnifiedRecord
+from schema.records import Identifier, Metadata, Modality, Signal, UnifiedRecord
 from storage.db import init_db, make_engine, make_session_factory
 from storage.models import SurveyRecord
 from storage.repository import save_record as real_save_record
+from storage.snippet_store import LocalSnippetStore
 
 
 def _record(
@@ -338,3 +340,106 @@ def test_attach_grid_density_keys_counts_per_cell():
     assert result_a.metadata.sample_count_in_grid_cell == 1
     assert result_b.metadata.sample_count_in_grid_cell == 1
     assert result_a_again.metadata.sample_count_in_grid_cell == 2
+
+
+def _stage_snippet(staging_dir, stem: str = "snip") -> str:
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    (staging_dir / f"{stem}.sigmf-data").write_bytes(b"\x00" * 16)
+    (staging_dir / f"{stem}.sigmf-meta").write_text("{}")
+    return str((staging_dir / f"{stem}.sigmf-data").resolve())
+
+
+def _snippet_record(snippet_path: str) -> UnifiedRecord:
+    return UnifiedRecord(
+        timestamp=datetime.now(timezone.utc),
+        lat=10.0,
+        lon=20.0,
+        gps_fix_quality=1,
+        survey_id="s",
+        operator_id="o",
+        modality=Modality.UNKNOWN,
+        identifier=Identifier(center_freq=915e6, bandwidth_estimate=20_000.0),
+        signal=Signal(rssi=-20.0, peak_power=-17.0),
+        metadata=Metadata(iq_snippet_path=snippet_path),
+    )
+
+
+def _snippet_pipeline(tmp_path, snippet_store):
+    socket_path = str(tmp_path / "ingest.sock")
+    server = QueueServer(socket_path)
+    server.start()
+    engine = make_engine("sqlite:///:memory:")
+    init_db(engine)
+    session_factory = make_session_factory(engine)
+    gps_provider = StaticGpsFixProvider(
+        GpsFix(lat=47.6062, lon=-122.3321, altitude=15.0, fix_quality=4)
+    )
+    service = IngestService(server, session_factory, gps_provider, snippet_store=snippet_store)
+    return socket_path, server, session_factory, service
+
+
+def test_process_one_adopts_staged_snippet_and_persists_final_path(tmp_path):
+    staging, store_root = tmp_path / "staging", tmp_path / "snippets"
+    staged = _stage_snippet(staging)
+    socket_path, server, session_factory, service = _snippet_pipeline(
+        tmp_path, LocalSnippetStore(staging, store_root)
+    )
+    try:
+        original = _snippet_record(staged)
+        with RecordEmitter(socket_path) as emitter:
+            emitter.emit(original)
+
+        processed = service.process_one(timeout=2)
+
+        final = str((store_root / "snip.sigmf-data").resolve())
+        assert processed.metadata.iq_snippet_path == final
+        assert (store_root / "snip.sigmf-meta").is_file()
+        assert list(staging.iterdir()) == []
+        # The emitted record object is never mutated; ingest works on copies.
+        assert original.metadata.iq_snippet_path == staged
+        with session_factory() as session:
+            rows = session.query(SurveyRecord).all()
+            assert len(rows) == 1
+            assert rows[0].metadata_["iq_snippet_path"] == final
+    finally:
+        server.stop()
+
+
+def test_process_one_rejects_snippet_outside_staging_without_persisting(tmp_path):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    outside = _stage_snippet(tmp_path / "elsewhere")
+    socket_path, server, session_factory, service = _snippet_pipeline(
+        tmp_path, LocalSnippetStore(staging, tmp_path / "snippets")
+    )
+    try:
+        with RecordEmitter(socket_path) as emitter:
+            emitter.emit(_snippet_record(outside))
+            emitter.emit(_record(lat=10.0, lon=20.0, gps_fix_quality=1))
+
+        with pytest.raises(ValueError, match="staging directory"):
+            service.process_one(timeout=2)
+
+        # The rejected record never bumped the density count for its cell.
+        assert service.process_one(timeout=2).metadata.sample_count_in_grid_cell == 1
+        assert Path(outside).exists()
+        with session_factory() as session:
+            assert session.query(SurveyRecord).count() == 1
+    finally:
+        server.stop()
+
+
+def test_process_one_rejects_snippet_record_when_no_store_configured(tmp_path):
+    staged = _stage_snippet(tmp_path / "staging")
+    socket_path, server, session_factory, service = _snippet_pipeline(tmp_path, None)
+    try:
+        with RecordEmitter(socket_path) as emitter:
+            emitter.emit(_snippet_record(staged))
+
+        with pytest.raises(RuntimeError, match="no snippet store"):
+            service.process_one(timeout=2)
+
+        with session_factory() as session:
+            assert session.query(SurveyRecord).count() == 0
+    finally:
+        server.stop()

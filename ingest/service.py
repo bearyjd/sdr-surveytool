@@ -13,6 +13,7 @@ from ingest.queue_server import QueueServer
 from schema.records import UnifiedRecord
 from storage.models import SurveyRecord
 from storage.repository import save_record
+from storage.snippet_store import SnippetStore
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +28,10 @@ _PLACEHOLDER_LON = 0.0
 
 
 class IngestService:
-    """Consumes validated records from a QueueServer, attaches the nearest
-    GPS fix when the record didn't already carry a usable one, tracks
-    per-grid-cell sample density, and persists via
-    storage.repository.save_record.
+    """Consumes validated records from a QueueServer, adopts any staged IQ
+    snippet into the snippet store, attaches the nearest GPS fix when the
+    record didn't already carry a usable one, tracks per-grid-cell sample
+    density, and persists via storage.repository.save_record.
 
     Thread-safety: process_one() itself may be called from any single
     thread, but internal grid-density bookkeeping (_grid_counts) is
@@ -45,10 +46,12 @@ class IngestService:
         queue_server: QueueServer,
         session_factory: sessionmaker | None,
         gps_provider: GpsFixProvider,
+        snippet_store: SnippetStore | None = None,
     ) -> None:
         self._queue_server = queue_server
         self._session_factory = session_factory
         self._gps_provider = gps_provider
+        self._snippet_store = snippet_store
         # Seeded from the DB so sample_count_in_grid_cell stays monotonic across
         # ingest restarts mid-survey; without this every cell restarts at 1 and
         # the persisted density values are useless for coverage-gap analysis.
@@ -99,6 +102,11 @@ class IngestService:
         to wake up periodically to observe a shutdown signal.
         """
         record = self._queue_server.get(timeout=timeout)
+        # Adopt before the grid-density bump: a rejected snippet raises here
+        # with nothing to roll back. If save_record later fails, the adopted
+        # pair stays in the store unreferenced (an orphan, never a dangling
+        # path in the database).
+        record = self._adopt_snippet_if_present(record)
         record = self._attach_gps_if_missing(record)
         record, grid_key = self._attach_grid_density(record)
         try:
@@ -119,6 +127,22 @@ class IngestService:
             )
             raise
         return record
+
+    def _adopt_snippet_if_present(self, record: UnifiedRecord) -> UnifiedRecord:
+        """Move a capture-staged SigMF pair into the snippet store and point
+        the record at its final location. Capture never writes to storage
+        itself (design doc section 6); this is where snippets cross over."""
+        staged = record.metadata.iq_snippet_path
+        if staged is None:
+            return record
+        if self._snippet_store is None:
+            raise RuntimeError(
+                f"Record carries iq_snippet_path {staged!r} but ingest has no "
+                "snippet store configured"
+            )
+        final = self._snippet_store.adopt(staged)
+        updated_metadata = record.metadata.model_copy(update={"iq_snippet_path": final})
+        return record.model_copy(update={"metadata": updated_metadata})
 
     def _has_usable_fix(self, record: UnifiedRecord) -> bool:
         """True if the record already reports a real GPS fix.

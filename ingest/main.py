@@ -12,6 +12,7 @@ from ingest.gps_fix import GpsFix, StaticGpsFixProvider
 from ingest.queue_server import QueueServer
 from ingest.service import IngestService
 from storage.db import init_db, make_engine, make_session_factory
+from storage.snippet_store import LocalSnippetStore
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Seconds to wait for a record before re-checking for shutdown.",
+    )
+    parser.add_argument(
+        "--snippet-staging-dir",
+        default="data/snippet-staging",
+        help="Directory capture processes stage SigMF snippets in. Must match "
+        "the capture side's --staging-dir; snippet paths outside it are rejected.",
+    )
+    parser.add_argument(
+        "--snippet-store-dir",
+        default="data/snippets",
+        help="Directory ingest moves adopted SigMF snippets into.",
     )
     # STAND-IN: the real u-blox GPS reader service (gps/) does not exist yet per
     # the plan, so ingest is wired to a fixed fix supplied on the command line.
@@ -79,7 +91,8 @@ def main(argv: list[str] | None = None) -> None:
 
     server = QueueServer(args.socket_path)
     server.start()
-    service = IngestService(server, session_factory, gps_provider)
+    snippet_store = LocalSnippetStore(args.snippet_staging_dir, args.snippet_store_dir)
+    service = IngestService(server, session_factory, gps_provider, snippet_store=snippet_store)
     logger.info("Ingest listening on %s -> %s", args.socket_path, args.database_url)
 
     try:
