@@ -535,6 +535,68 @@ def test_a_record_deferred_by_a_transient_error_is_never_reasked_after_an_answer
     assert len(client.requests) == 2 and gateway.submitted == []
 
 
+class ReplayingGateway(FakeGateway):
+    """A view that hands back records the cursor has passed (as after a lost
+    cursor): only the agent's own guards stop a second ask."""
+
+    def fetch_pending(self, after_id, limit):
+        return super().fetch_pending(0, limit)
+
+
+def test_guard_an_answered_record_brought_back_is_never_asked_again(store):
+    """Guards: the answered set is recorded after every answer, and checked
+    before any processing. Record 1's answer is invalid (held); the replaying
+    view brings it back in every batch."""
+    gateway = ReplayingGateway([_snippet_record(store, 1)])
+    client = ScriptedClient([REFUSAL] * 4)
+    agent = _agent(gateway, client, store)
+    for _ in range(3):
+        agent.run_batch()
+    assert len(client.requests) == 1
+
+
+def test_guard_a_held_record_leaves_the_deferred_set(store):
+    """Guard: once answered (here invalid, after a 529), the record is held,
+    not deferred: no batch fetches it by id again."""
+    gateway = FakeGateway([_snippet_record(store, 1)])
+    clock = [START]
+    agent = _agent(gateway, ScriptedClient([_status_error(529), REFUSAL]), store, now=lambda: clock[0])
+    for _ in range(6):
+        agent.run_batch()
+        clock[0] += timedelta(minutes=10)
+    assert gateway.by_id == [[1]]  # the one retry that drew the invalid answer
+
+
+def test_guard_a_deferred_record_is_not_reprocessed_by_the_main_loop(store, monkeypatch):
+    """Guard: a deferred record waits for its due time; the main loop skips
+    it even when the view hands it back."""
+    reads = []
+
+    def eio(path, *args):
+        reads.append(path)
+        raise SnippetUnreadable(f"Cannot read {path}: OSError(5, 'I/O error')", transient=True)
+
+    monkeypatch.setattr(service, "read_snippet", eio)
+    gateway = ReplayingGateway([_gone(_with_content(store), 1)])
+    agent = _agent(gateway, ScriptedClient([]), store)  # the clock never moves: never due
+    for _ in range(4):
+        agent.run_batch()
+    assert len(reads) == 1
+
+
+def test_guard_a_decision_is_kept_before_held_answers_are_released(store):
+    """Guard: record 2's decision is remembered before the held record 1 is
+    released; that release's write fails, and record 2 is still written,
+    without a second ask."""
+    gateway = FakeGateway([_snippet_record(store, 1), _snippet_record(store, 2)], fail_once={1})
+    client = ScriptedClient([REFUSAL, GOOD])
+    agent = _agent(gateway, client, store)
+    with pytest.raises(ConnectionError):
+        agent.run_batch()
+    agent.run_batch()
+    assert sorted(s[0] for s in gateway.submitted) == [1, 2] and len(client.requests) == 2
+
+
 class _PerRecordClient:
     """Answers from a seeded script and counts, per record, the calls that
     returned a response. The record is read off the prompt: record i's
