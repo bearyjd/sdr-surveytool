@@ -196,11 +196,18 @@ def test_a_failed_emit_drops_only_that_snippet(tmp_path, caplog):
         def emit(self, record) -> None:
             raise OSError("ingest socket gone")
 
+    staging = tmp_path / "staging"
+    staging.mkdir(mode=0o700)  # run() creates it at startup
+    drops: Counter = Counter()
     with caplog.at_level(logging.ERROR):
         service._stage_and_emit(
-            _snippet(), _settings(tmp_path, min_free_bytes=0), BrokenEmitter(), "s1", "op1", Counter()
+            _snippet(), _settings(staging, min_free_bytes=0), BrokenEmitter(), "s1", "op1", drops
         )
     assert "dropping it" in caplog.text
+    # The record never reached ingest, so nothing will ever adopt the staged
+    # pair: it must not be left behind to fill the disk.
+    assert list(staging.iterdir()) == []
+    assert drops == Counter({"emit_failed": 1})
 
 
 def test_snippet_is_dropped_before_writing_when_disk_is_nearly_full(tmp_path, monkeypatch, caplog):

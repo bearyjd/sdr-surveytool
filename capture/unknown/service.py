@@ -157,8 +157,8 @@ def _stage_and_emit(
     drops: Counter[str],
 ) -> None:
     """A full disk or a dead ingest socket loses this one snippet, not the
-    radio session. (If staging succeeded but emit failed, the staged pair is
-    left behind in the staging directory.)"""
+    radio session. A snippet whose record could not be emitted has its staged
+    pair deleted: nothing would ever adopt it."""
     free = shutil.disk_usage(settings.staging_dir).free
     if free - snippet.iq.nbytes < settings.min_free_bytes:
         drops["low_disk"] += 1
@@ -173,12 +173,32 @@ def _stage_and_emit(
         )
         return
     try:
-        emitter.emit(process_snippet(snippet, settings, survey_id, operator_id))
+        record = process_snippet(snippet, settings, survey_id, operator_id)
     except Exception:
+        drops["stage_failed"] += 1
         logger.exception(
-            "Failed to stage/emit snippet triggered at sample %d; dropping it",
+            "Failed to stage snippet triggered at sample %d; dropping it",
             snippet.trigger.sample_index,
         )
+        return
+    try:
+        emitter.emit(record)
+    except Exception:
+        drops["emit_failed"] += 1
+        _discard_staged(record.metadata.iq_snippet_path)
+        logger.exception(
+            "Failed to emit snippet triggered at sample %d; dropping it and "
+            "deleting its staged files",
+            snippet.trigger.sample_index,
+        )
+
+
+def _discard_staged(data_path: str | None) -> None:
+    if data_path is None:
+        return
+    data = Path(data_path)
+    for staged in (data, data.with_suffix(".sigmf-meta")):
+        staged.unlink(missing_ok=True)
 
 
 def _offer_or_drop(
