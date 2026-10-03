@@ -16,8 +16,42 @@
 
 SET LOCAL search_path = pg_catalog, pg_temp;
 
--- Roles. Operators create the login role themselves:
---   CREATE ROLE <login> LOGIN PASSWORD '<from your secret store>' IN ROLE {{agent_role}};
+-- Roles. Operators create the login role themselves (agent/README.md). An
+-- existing role is reused only if it cannot log in and owns nothing but the
+-- boundary objects below: otherwise the boundary would inherit its powers.
+DO $existing$
+DECLARE
+    v_role text;
+BEGIN
+    FOREACH v_role IN ARRAY ARRAY['{{agent_role}}', '{{owner_role}}'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = v_role AND rolcanlogin) THEN
+            RAISE EXCEPTION 'agent boundary: existing role % can log in; use a fresh role name', v_role
+                USING ERRCODE = 'invalid_parameter_value';
+        END IF;
+        IF EXISTS (
+            SELECT 1
+              FROM pg_catalog.pg_shdepend AS d
+              JOIN pg_catalog.pg_roles AS r ON r.oid = d.refobjid
+             WHERE d.refclassid = 'pg_catalog.pg_authid'::pg_catalog.regclass
+               AND d.deptype = 'o'
+               AND r.rolname = v_role
+               AND NOT (d.dbid = (SELECT oid FROM pg_catalog.pg_database
+                                   WHERE datname = pg_catalog.current_database())
+                        AND ((d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                              AND d.objid = pg_catalog.to_regclass('public.agent_pending_unknown'))
+                          OR (d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+                              AND d.objid IN (
+                                  pg_catalog.to_regprocedure(
+                                      'public.classify_unknown(integer, text, text, double precision, text)'),
+                                  pg_catalog.to_regprocedure(
+                                      'public.agent_is_pending_unknown(text, json)')))))
+        ) THEN
+            RAISE EXCEPTION 'agent boundary: existing role % owns objects besides the boundary; use a fresh role name', v_role
+                USING ERRCODE = 'invalid_parameter_value';
+        END IF;
+    END LOOP;
+END
+$existing$;
 DO $roles$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '{{agent_role}}') THEN

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import numpy as np
+import psycopg
 import pytest
 from anthropic.types import Message
 from sqlalchemy import Engine, create_engine, text
@@ -555,6 +556,34 @@ def test_a_reinstall_drops_grants_added_to_the_boundary_objects(boundary):
         with admin.connect() as conn:
             conn.exec_driver_sql(f"DROP OWNED BY {stranger}")
             conn.exec_driver_sql(f"DROP ROLE IF EXISTS {stranger}")
+        admin.dispose()
+
+
+@pytest.mark.parametrize(
+    "setup, as_owner, problem",
+    [
+        (["CREATE ROLE {role} LOGIN"], False, "can log in"),
+        (["CREATE ROLE {role} NOLOGIN", "CREATE TABLE public.sdr_owned_{suffix} (x integer)",
+          "ALTER TABLE public.sdr_owned_{suffix} OWNER TO {role}"], True, "owns objects"),
+    ],
+)
+def test_the_installer_refuses_an_existing_role_that_could_widen_the_boundary(boundary, setup, as_owner, problem):
+    """A role that can log in, or that already owns something, must not
+    become the agent or owner role: the boundary would inherit its powers."""
+    role = f"sdr_existing_{boundary.suffix}"
+    names = {"role": role, "suffix": boundary.suffix}
+    admin = _engine(boundary.admin_url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            for statement in setup:
+                conn.exec_driver_sql(statement.format(**names))
+        roles = (boundary.agent_role, role) if as_owner else (role, boundary.owner_role)
+        with pytest.raises(psycopg.errors.InvalidParameterValue, match=f"{role} {problem}"):
+            install_agent_boundary(admin, *roles)
+    finally:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(f"DROP TABLE IF EXISTS public.sdr_owned_{boundary.suffix}")
+            conn.exec_driver_sql(f"DROP ROLE IF EXISTS {role}")
         admin.dispose()
 
 
