@@ -27,6 +27,7 @@ STAGED_DATA_NAME = re.compile(
 # AD9361 maximum) x (5 s pre + 5 s post, the window caps) x 8 bytes (cf32).
 DEFAULT_MAX_SNIPPET_BYTES = 4_915_200_000
 _CF32_BYTES = 8
+_MAX_META_BYTES = 1024 * 1024  # a capture's SigMF meta is a few hundred bytes
 # adopt() retries these a few times (they pass: a signal, a full fd table)
 # before treating the failure as a rejection; every other OSError is final.
 _TRANSIENT_ERRNOS = frozenset({errno.EINTR, errno.EAGAIN, errno.EMFILE, errno.ENFILE})
@@ -180,7 +181,14 @@ class LocalSnippetStore:
         meta = data.with_suffix(_META_SUFFIX)
         data_stat = _single_regular_file(data)
         _check_plausible_size(data, data_stat.st_size, self._max_snippet_bytes)
-        sources = [(data, data_stat), (meta, _single_regular_file(meta))]
+        meta_stat = _single_regular_file(meta)
+        if meta_stat.st_size == 0 or meta_stat.st_size > _MAX_META_BYTES:
+            raise SnippetRejected(
+                "bad_size",
+                f"Staged snippet meta {meta.name!r} has an implausible size "
+                f"({meta_stat.st_size} bytes)",
+            )
+        sources = [(data, data_stat), (meta, meta_stat)]
         linked: list[Path] = []
         try:
             for source, checked in sources:

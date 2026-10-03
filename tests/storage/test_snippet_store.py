@@ -217,6 +217,26 @@ def test_other_errors_are_not_retried(dirs, monkeypatch):
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("size", [0, 1024 * 1024 + 1])
+def test_adopt_rejects_an_empty_or_oversized_meta(dirs, size):
+    """SigMF metadata for one capture is a few hundred bytes; ingest never
+    parses it, but it also won't adopt megabytes of it."""
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    data, meta = _stage(staging)
+    meta.write_bytes(b" " * size)
+    _rejected(store, data, "bad_size")
+    assert data.exists() and meta.exists() and list(root.iterdir()) == []
+
+
+def test_adopt_accepts_a_meta_exactly_at_the_cap(dirs):
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    data, meta = _stage(staging)
+    meta.write_bytes(b" " * (1024 * 1024))
+    assert Path(store.adopt(str(data))).with_suffix(".sigmf-meta").stat().st_size == 1024 * 1024
+
+
 def test_adopt_rejects_a_path_outside_staging(dirs, tmp_path):
     """iq_snippet_path arrives over the ingest socket, so it is untrusted:
     ingest must never move an arbitrary file into the store."""
