@@ -45,7 +45,17 @@ in use, confirm the receiver's roll-off is steep enough.
 ## Failure policy
 
 `needs_review` is a judgment about one record, never the result of a systemic fault, and
-the LLM answers at most once per record per run. Every outcome falls in one class:
+the LLM answers at most once per record per run. Two consequences are by design:
+
+- **Fast captures are never auto-classified.** The reader keeps at most 2 s and at most
+  2^25 samples. A step-4 snippet lasts about 1 s (0.1 s before the trigger, 0.9 s after),
+  so above ~33.55 MS/s (2^25 samples per second) every snippet is cut, carries the
+  `truncated` reason, and goes to `needs_review`.
+- **Five genuinely missing snippets in a row halt.** The agent cannot tell five records
+  whose files were deleted from a stale or unmounted copy of the store, so it stops with
+  them unmarked. Clean up or restore the files, then restart.
+
+Every outcome falls in one class:
 
 | Class | Cases | Action |
 |---|---|---|
@@ -183,23 +193,70 @@ the cause is understood.
 A halt (the systemic class above) logs `Agent halted: <cause>` and exits with status
 **3**. Never restart on it automatically: the fault would recur, and the daily token
 budget, which lives in the process, would start over with every restart. Other exits (a
-crash, a lost database at startup) may restart, slowly. With systemd:
+crash, a lost database at startup) may restart, slowly.
+
+### A hardened systemd unit
+
+The container described under "The boundary" is the reference deployment. On a host
+without one, this unit gives the agent the same profile; each line says what it enforces:
 
 ```ini
+[Unit]
+Description=sdr-surveytool Part 4 classification agent
+Wants=network-online.target
+After=network-online.target
+
 [Service]
 ExecStart=/usr/local/bin/sdr-agent --snippet-store-dir /srv/surveytool/snippets
+# The uid that owns the 0700 store and its 0600 snippets (step 4's ingest uid).
+User=surveytool-ingest
+# SURVEYTOOL_AGENT_DATABASE_URL and ANTHROPIC_API_KEY; the file is root-owned, 0600.
+EnvironmentFile=/etc/surveytool/agent.env
+# No privilege gain through setuid/setgid binaries or file capabilities.
+NoNewPrivileges=yes
+# No capabilities at all, not even the bounding set to regain them from.
+CapabilityBoundingSet=
+# The whole filesystem is read-only to the agent...
+ProtectSystem=strict
+# ...and the store explicitly so (it never writes there).
+ReadOnlyPaths=/srv/surveytool/snippets
+# No /home, /root or /run/user; a private /tmp and /dev (no device files).
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+# TCP/IP only. No AF_UNIX: the ingest socket (and any other local socket) is
+# unreachable, so the database must be reached over TCP (127.0.0.1 locally).
+RestrictAddressFamilies=AF_INET AF_INET6
+# The worst case peaks at 584 MB (above); past 1 GiB the kernel kills it.
+MemoryMax=1G
+# Crashes restart, slowly; a halt (status 3) never does.
 Restart=on-failure
 RestartSec=60
 RestartPreventExitStatus=3
+
+[Install]
+WantedBy=multi-user.target
 ```
+
+The unit cannot limit egress by host name: restrict it to the database and
+`api.anthropic.com` with a firewall or an egress proxy, as the container's network policy
+does. (`IPAddressAllow=` takes addresses, and the API's change.)
 
 One agent runs per database: it holds a session advisory lock for its lifetime, and a
 second instance refuses to start, naming the lock and the query that finds its holder
 (`pg_locks` joined to `pg_stat_activity`). The agent checks the lock before every batch; if
 its lock session dies, it halts (status 3) rather than race a successor. Any role that can
-connect to the database can take the key first and block startup (lock-key squatting);
-the refusal's query names that session, and revoking CONNECT from PUBLIC (above) limits
-who can. SIGTERM stops the agent at once, even
-mid-sleep (a poll, a backoff or a budget pause).
+connect to the database can take the key first and block startup (lock-key squatting).
+The refusal names the query that finds the holder, which you can also run yourself:
+
+```sql
+SELECT a.pid, a.usename, a.client_addr, a.backend_start
+  FROM pg_locks AS l JOIN pg_stat_activity AS a USING (pid)
+ WHERE l.locktype = 'advisory' AND l.classid = 1396986433 AND l.objid = 1195724372 AND l.granted;
+```
+
+Terminate that session (`pg_terminate_backend(pid)`) if it is not an agent; revoking CONNECT
+from PUBLIC (above) limits who can squat. SIGTERM stops the agent at once, even mid-sleep
+(a poll, a backoff or a budget pause).
 The Anthropic client is pinned to `https://api.anthropic.com`; `ANTHROPIC_BASE_URL` is
 ignored.
