@@ -1,4 +1,5 @@
 # tests/agent/test_snippet_reader.py
+import errno
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import sigmf.hashing
+import sigmf.sigmffile
 
 import agent.snippet_reader
 from agent.snippet_reader import (
@@ -122,6 +124,30 @@ def test_the_reference_is_clipped_to_what_was_read(store, monkeypatch):
     monkeypatch.setattr(agent.snippet_reader, "MAX_SAMPLES", 2048)
     data = write_sigmf_snippet(np.zeros(8192, np.complex64), store, FS, FREQ, START, trigger_offset=4096)
     assert read_snippet(str(data), store).pre_trigger_samples == 2048
+
+
+def test_a_transient_io_error_is_flagged_transient(store, monkeypatch):
+    """EIO (a flaky disk or NFS) may pass; the agent retries the record
+    later. A missing or corrupt file will not, and is about the record."""
+    data = _write(store)
+
+    def eio(*args, **kwargs):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(sigmf.sigmffile.SigMFFile, "read_samples", eio)
+    with pytest.raises(SnippetUnreadable) as excinfo:
+        read_snippet(str(data), store)
+    assert excinfo.value.transient
+
+
+def test_a_missing_or_corrupt_snippet_is_not_transient(store):
+    with pytest.raises(SnippetUnreadable) as missing:
+        read_snippet(str(store / "gone.sigmf-data"), store)
+    data = _write(store)
+    data.with_suffix(".sigmf-meta").write_text("{not json")
+    with pytest.raises(SnippetUnreadable) as corrupt:
+        read_snippet(str(data), store)
+    assert not missing.value.transient and not corrupt.value.transient
 
 
 def test_never_hashes_the_data_file(store, monkeypatch):

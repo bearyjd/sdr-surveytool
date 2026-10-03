@@ -5,6 +5,8 @@ No database, no network, no real time (sleep and the clock are injected)."""
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import os
+
 import anthropic
 import httpx
 import numpy as np
@@ -13,7 +15,9 @@ from anthropic.types import Message
 
 from agent.band_table import load_band_table
 from agent.db_gateway import PendingRecord, RecordNotPending, SubmitRejected, SubmitTimedOut
-from agent.service import AgentSettings, ClassificationAgent, SystemicFault, _parse_args, main, run
+from agent import service
+from agent.service import AgentSettings, ClassificationAgent, SystemicFault, _parse_args, backoff_delay, main, run
+from agent.snippet_reader import SnippetUnreadable
 from capture.unknown.snippet_writer import write_sigmf_snippet
 from dsp import synthetic
 from schema.records import ClassificationStatus
@@ -26,16 +30,25 @@ AUTO, REVIEW = ClassificationStatus.AUTO_CLASSIFIED, ClassificationStatus.NEEDS_
 
 
 class FakeGateway:
-    def __init__(self, records, not_pending=(), fail_once=(), timed_out=(), rejected=()):
+    def __init__(self, records, not_pending=(), fail_once=(), timed_out=(), timed_out_once=(), rejected=()):
         self.records = records
         self.not_pending, self.timed_out, self.rejected = set(not_pending), set(timed_out), set(rejected)
-        self.fail_once = set(fail_once)
+        self.fail_once, self.timed_out_once = set(fail_once), set(timed_out_once)
         self.fetches: list[tuple[int, int]] = []
+        self.by_id: list[list[int]] = []
         self.submitted: list[tuple] = []
 
     def fetch_pending(self, after_id, limit):
+        """Like the view: a written record is no longer pending."""
         self.fetches.append((after_id, limit))
-        return [r for r in self.records if r.id > after_id][:limit]
+        written = {s[0] for s in self.submitted}
+        return [r for r in self.records if r.id > after_id and r.id not in written][:limit]
+
+    def fetch_by_ids(self, ids):
+        """Those of `ids` still pending (not written, not tagged by a human)."""
+        self.by_id.append(list(ids))
+        written = {s[0] for s in self.submitted}
+        return [r for r in self.records if r.id in set(ids) and r.id not in written | self.not_pending]
 
     def fetch_newest_with_snippet(self, after_id, limit):
         withs = [r for r in self.records if r.id > after_id and r.iq_snippet_path is not None]
@@ -45,6 +58,9 @@ class FakeGateway:
         if record_id in self.fail_once:
             self.fail_once.discard(record_id)
             raise ConnectionError("database went away")
+        if record_id in self.timed_out_once:
+            self.timed_out_once.discard(record_id)
+            raise SubmitTimedOut(f"record {record_id}")
         for ids, error in ((self.not_pending, RecordNotPending), (self.timed_out, SubmitTimedOut), (self.rejected, SubmitRejected)):
             if record_id in ids:
                 raise error(f"record {record_id}")
@@ -214,43 +230,142 @@ def test_invalid_answers_in_a_row_halt_with_nothing_marked(store, bad):
     assert gateway.submitted == []
 
 
-def test_a_snippet_outside_the_store_is_held_until_a_snippet_reads(store, tmp_path):
-    outside = _snippet_record(tmp_path / "elsewhere", 1)
-    gateway = FakeGateway([outside, _snippet_record(store, 2)])
+def _with_content(store: Path) -> Path:
+    """A healthy store holds snippets; one is enough to tell it from an
+    empty mount point."""
+    _snippet_record(store, 999)
+    return store
+
+
+def test_a_snippet_outside_the_store_is_judged_at_once(store, tmp_path):
+    """The root is healthy and the startup check passed, so a path that
+    resolves elsewhere is about that record: needs_review, no LLM call."""
+    gateway = FakeGateway([_snippet_record(tmp_path / "elsewhere", 1), _snippet_record(store, 2)])
     client = ScriptedClient([GOOD])
     _agent(gateway, client, store).run_batch()
-    assert [(s[0], s[1], s[2]) for s in gateway.submitted] == [(1, REVIEW, None), (2, AUTO, "ism_902_928:lora")]
-    assert "outside the snippet store" in gateway.submitted[0][4]
+    assert [(s[0], s[1], s[2], s[3]) for s in gateway.submitted] == [(1, REVIEW, None, 0.0), (2, AUTO, "ism_902_928:lora", 0.9)]
+    assert gateway.submitted[0][4].startswith("snippet_outside_store:")
     assert len(client.requests) == 1  # never asked about record 1
 
 
-def test_a_wrong_store_root_halts_before_marking_anything(store, tmp_path):
-    """Every path resolves elsewhere (e.g. the store mounted at another
-    path): five in a row halt, and not one record is marked."""
-    gateway = FakeGateway([_snippet_record(tmp_path / "elsewhere", i) for i in range(1, 7)])
-    with pytest.raises(SystemicFault, match="5 snippets in a row could not be analysed") as excinfo:
-        _agent(gateway, ScriptedClient([]), store).run_batch()
-    assert "--snippet-store-dir" in str(excinfo.value) and gateway.submitted == []
+def test_missing_snippets_in_a_healthy_store_are_judged_and_never_halt(store):
+    gateway = FakeGateway([_gone(_with_content(store), i) for i in range(1, 9)])
+    client = ScriptedClient([])
+    assert _agent(gateway, client, store).run_batch() == 8
+    assert [(s[0], s[1], s[2]) for s in gateway.submitted] == [(i, REVIEW, None) for i in range(1, 9)]
+    assert all(s[4].startswith("snippet_unreadable:") for s in gateway.submitted)
+    assert client.requests == []
 
 
-def test_unreadable_snippets_stay_pending_and_five_in_a_row_halt(store):
+def test_a_corrupt_snippet_in_a_healthy_store_is_judged(store):
+    record = _snippet_record(_with_content(store), 1)
+    Path(record.iq_snippet_path).with_suffix(".sigmf-meta").write_text("{not json")
+    gateway = FakeGateway([record])
+    _agent(gateway, ScriptedClient([]), store).run_batch()
+    ((_, status, tag, _, reasoning),) = gateway.submitted
+    assert (status, tag) == (REVIEW, None) and reasoning.startswith("snippet_unreadable:")
+
+
+def test_a_missing_snippet_in_an_empty_store_halts_with_nothing_marked(store):
+    """An empty root while records point into it is an unmounted store, not
+    a run of broken snippets."""
     store.mkdir()
-    gateway = FakeGateway([_gone(store, i) for i in range(1, 6)])
-    with pytest.raises(SystemicFault, match="5 snippets in a row could not be analysed") as excinfo:
+    gateway = FakeGateway([_gone(store, i) for i in range(1, 4)])
+    with pytest.raises(SystemicFault, match="is empty"):
         _agent(gateway, ScriptedClient([]), store).run_batch()
-    assert "records [1, 2, 3, 4, 5]" in str(excinfo.value)
-    assert "--start-after-id 5" in str(excinfo.value)
     assert gateway.submitted == []
 
 
-def test_a_snippet_with_no_occupied_region_stays_pending_and_counts(store):
-    """Step 4 triggered on energy, so an empty spectrum means the analysis
-    failed: never marked, and five in a row halt."""
-    gateway = FakeGateway([_snippet_record(store, i, quiet=True) for i in range(1, 6)])
+def test_a_store_root_that_vanishes_halts_with_nothing_marked(store):
+    record = _snippet_record(store, 1)
+    for path in store.iterdir():
+        path.unlink()
+    store.rmdir()
+    gateway = FakeGateway([record])
+    with pytest.raises(SystemicFault, match="does not exist"):
+        _agent(gateway, ScriptedClient([]), store).run_batch()
+    assert gateway.submitted == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_a_store_root_without_permission_halts_with_nothing_marked(store):
+    record = _snippet_record(store, 1)
+    store.chmod(0)
+    try:
+        gateway = FakeGateway([record])
+        with pytest.raises(SystemicFault, match="permission denied"):
+            _agent(gateway, ScriptedClient([]), store).run_batch()
+        assert gateway.submitted == []
+    finally:
+        store.chmod(0o700)
+
+
+def test_a_transient_read_error_is_retried_by_id_up_to_the_attempt_cap(store, monkeypatch):
+    """EIO and friends are about this moment, not the record: it is kept
+    and retried by id in later batches (the cursor moves on), and after 10
+    attempts left pending -- never marked -- for the next run."""
+    real_read = service.read_snippet
+    reads = []
+
+    def flaky(path, *args):
+        reads.append(path)
+        if "/gone" in path:
+            raise SnippetUnreadable(f"Cannot read {path}: OSError(5, 'I/O error')", transient=True)
+        return real_read(path, *args)
+
+    monkeypatch.setattr(service, "read_snippet", flaky)
+    gateway = FakeGateway([_gone(_with_content(store), 1), _snippet_record(store, 2)])
+    agent = _agent(gateway, ScriptedClient([GOOD]), store)
+    for _ in range(12):
+        agent.run_batch()
+    assert [s[0] for s in gateway.submitted] == [2]
+    assert sum(path.endswith("gone1.sigmf-data") for path in reads) == 10
+    assert gateway.by_id == [[1]] * 9
+    assert [after for after, _ in gateway.fetches][:2] == [0, 2]
+
+
+def test_a_spectrum_with_no_region_after_the_self_floor_fallback_is_judged(store):
+    """Step 4 triggered on energy, but neither floor finds anything: that is
+    about the record (needs_review, no LLM call), however many in a row."""
+    gateway = FakeGateway([_snippet_record(store, i, quiet=True) for i in range(1, 8)])
     client = ScriptedClient([])
-    with pytest.raises(SystemicFault, match="no occupied region"):
-        _agent(gateway, client, store).run_batch()
-    assert gateway.submitted == [] and client.requests == []
+    assert _agent(gateway, client, store).run_batch() == 7
+    assert [(s[0], s[1], s[2]) for s in gateway.submitted] == [(i, REVIEW, None) for i in range(1, 8)]
+    assert all(s[4].startswith("no_occupied_region:") for s in gateway.submitted)
+    assert client.requests == []
+
+
+def test_a_deterministic_analysis_failure_is_judged_after_one_retry(store, monkeypatch):
+    calls = []
+
+    def broken(*args):
+        calls.append(1)
+        raise FloatingPointError("overflow in channelize")
+
+    monkeypatch.setattr(service, "analyse_snippet", broken)
+    gateway = FakeGateway([_snippet_record(store, 1)])
+    client = ScriptedClient([])
+    _agent(gateway, client, store).run_batch()
+    ((_, status, tag, _, reasoning),) = gateway.submitted
+    assert (status, tag, len(calls)) == (REVIEW, None, 2)
+    assert reasoning.startswith("analysis_failed:") and "overflow in channelize" in reasoning
+    assert client.requests == []
+
+
+def test_an_analysis_failure_that_does_not_repeat_is_retried_once(store, monkeypatch):
+    real = service.analyse_snippet
+    calls = []
+
+    def flaky(*args):
+        calls.append(1)
+        if len(calls) == 1:
+            raise MemoryError()
+        return real(*args)
+
+    monkeypatch.setattr(service, "analyse_snippet", flaky)
+    gateway = FakeGateway([_snippet_record(store, 1)])
+    _agent(gateway, ScriptedClient([GOOD]), store).run_batch()
+    assert [(s[0], s[1]) for s in gateway.submitted] == [(1, AUTO)]
 
 
 @pytest.mark.parametrize(
@@ -320,28 +435,32 @@ def test_a_malformed_record_is_closed_without_an_llm_call_and_never_halts(store)
     assert len(client.requests) == 1
 
 
-def test_an_analysed_snippet_resets_the_streak(store):
-    store.mkdir()
-    records = [_gone(store, 1), _gone(store, 2), _gone(store, 3), _gone(store, 4), _snippet_record(store, 5), _gone(store, 6), _gone(store, 7)]
-    gateway = FakeGateway(records)
-    assert _agent(gateway, ScriptedClient([GOOD]), store).run_batch() == 7
-    assert [s[0] for s in gateway.submitted] == [5]
-
-
-def test_transient_errors_rewind_and_retry_the_same_record(store):
+def test_transient_api_errors_back_off_and_retry_the_record_by_id(store):
+    """The record is kept and retried by id; nothing after it is asked
+    about until it succeeds, so an outage spends one record's attempts."""
     gateway = FakeGateway([_snippet_record(store, 1), _snippet_record(store, 2)])
     client = ScriptedClient([_status_error(529), _connection_error(), GOOD, GOOD])
     agent = _agent(gateway, client, store)
     assert _drain(agent, 3) == [2.0, 4.0, None]
-    assert [after for after, _ in gateway.fetches] == [0, 0, 0]
+    assert gateway.by_id == [[1], [1]]
+    assert [after for after, _ in gateway.fetches] == [0, 1]
     assert [s[0] for s in gateway.submitted] == [1, 2]
 
 
+def test_the_backoff_is_clamped_however_long_the_outage():
+    assert backoff_delay(1, 2.0, 300.0) == 2.0
+    assert backoff_delay(5, 2.0, 300.0) == 32.0
+    assert backoff_delay(2000, 2.0, 300.0) == 300.0  # 2 ** 1999 would overflow a float
+
+
 def test_an_outage_never_marks_and_never_halts(store):
+    """Record 1 is left pending after its 10th attempt (retried next run);
+    record 2 then waits its turn. Nothing is marked, nothing halts."""
     gateway = FakeGateway([_snippet_record(store, 1), _snippet_record(store, 2)])
     agent = _agent(gateway, ScriptedClient([_status_error(503)] * 12), store)
     assert _drain(agent, 12) == [2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 300.0, 300.0, 300.0, 300.0]
     assert gateway.submitted == []
+    assert gateway.by_id[-1] == [2]
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404])
@@ -378,13 +497,38 @@ def test_a_write_rejected_by_the_database_halts(store):
         _agent(gateway, ScriptedClient([GOOD]), store).run_batch()
 
 
-def test_a_timed_out_write_leaves_the_record_pending_and_moves_on(store):
-    gateway = FakeGateway([_snippet_record(store, 1), _snippet_record(store, 2)], timed_out={1})
+def test_a_timed_out_write_is_retried_by_id_without_asking_again(store):
+    gateway = FakeGateway([_snippet_record(store, 1), _snippet_record(store, 2)], timed_out_once={1})
     client = ScriptedClient([GOOD, GOOD])
     agent = _agent(gateway, client, store)
-    assert agent.run_batch() == 2
-    assert [s[0] for s in gateway.submitted] == [2] and len(client.requests) == 2
-    assert agent.run_batch() == 0
+    agent.run_batch()
+    assert [s[0] for s in gateway.submitted] == [2]
+    agent.run_batch()
+    assert [s[0] for s in gateway.submitted] == [2, 1] and len(client.requests) == 2
+
+
+def test_a_write_that_keeps_timing_out_stops_at_the_attempt_cap(store):
+    gateway = FakeGateway([_snippet_record(store, 1)], timed_out={1})
+    client = ScriptedClient([GOOD])
+    agent = _agent(gateway, client, store)
+    for _ in range(12):
+        agent.run_batch()
+    assert gateway.submitted == [] and len(client.requests) == 1
+    assert gateway.by_id == [[1]] * 9  # attempts 2-10; then left pending for the next run
+
+
+def test_a_held_verdict_is_kept_until_its_write_succeeds(store):
+    """A held invalid answer is released when the model works again; if
+    that write times out, the verdict is kept and written later -- never
+    lost, never re-asked."""
+    gateway = FakeGateway([_snippet_record(store, 1), _snippet_record(store, 2)], timed_out_once={1})
+    client = ScriptedClient([REFUSAL, GOOD])
+    agent = _agent(gateway, client, store)
+    agent.run_batch()
+    assert [s[0] for s in gateway.submitted] == [2]
+    agent.run_batch()
+    assert [(s[0], s[1], s[2]) for s in gateway.submitted] == [(2, AUTO, "ism_902_928:lora"), (1, REVIEW, None)]
+    assert len(client.requests) == 2
 
 
 def test_cursor_only_moves_forward(store):
@@ -458,20 +602,33 @@ def test_run_lets_a_systemic_fault_through():
         run(_Batches([SystemicFault("outage")]), 1.0, lambda: False, lambda s: None)
 
 
-def test_startup_check_requires_an_absolute_root(store):
-    agent = _agent(FakeGateway([]), ScriptedClient([]), Path("data/snippets"))
-    with pytest.raises(SystemicFault, match="must be absolute"):
-        agent.check_snippet_root()
+@pytest.mark.parametrize(
+    "root, problem",
+    [(Path("data/snippets"), "must be absolute"), (Path("/nonexistent/snippets"), "does not exist")],
+)
+def test_startup_check_requires_a_healthy_root(root, problem):
+    with pytest.raises(SystemicFault, match=problem):
+        _agent(FakeGateway([]), ScriptedClient([]), root).check_snippet_root()
 
 
-def test_startup_check_passes_when_a_recent_snippet_reads(store, tmp_path):
-    """The newest is broken, the next one reads: the mount is right."""
-    gateway = FakeGateway([_snippet_record(store, 1), _gone(store, 2), PendingRecord(3, None, FS, TUNED, None, None)])
+def test_startup_check_refuses_a_root_that_is_a_file(tmp_path):
+    (tmp_path / "file").write_text("")
+    with pytest.raises(SystemicFault, match="not a directory"):
+        _agent(FakeGateway([]), ScriptedClient([]), tmp_path / "file").check_snippet_root()
+
+
+def test_broken_snippets_never_block_startup(store):
+    """Store-root health, not the snippets: the newest are missing, but
+    their paths are under the root, so the mount is right."""
+    gateway = FakeGateway([_gone(_with_content(store), 1), _gone(store, 2), PendingRecord(3, None, FS, TUNED, None, None)])
     _agent(gateway, ScriptedClient([]), store).check_snippet_root()
     _agent(FakeGateway([]), ScriptedClient([]), store).check_snippet_root()  # nothing to probe yet
 
 
 def test_startup_check_halts_when_the_store_is_mounted_elsewhere(store, tmp_path):
+    """A healthy root that none of the newest pending snippets is under:
+    the store is mounted at another path than ingest's."""
+    _with_content(store)
     gateway = FakeGateway([_snippet_record(tmp_path / "elsewhere", i) for i in (1, 2)])
     with pytest.raises(SystemicFault, match="identical resolved path"):
         _agent(gateway, ScriptedClient([]), store.resolve()).check_snippet_root()

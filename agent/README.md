@@ -14,7 +14,15 @@ quiet pre-trigger reference at all (`no_quiet_noise_reference`). The last covers
 always-on emitter, such as an LTE downlink, which fills its own pre-trigger: by default
 those records always go to review.
 
-### `--allow-self-floor-grounding` (off by default)
+The tag, confidence and reasoning go back into the record's own metadata, and nothing
+else does. A record whose snippet ingest rejected or capture dropped (`iq_snippet_path`
+NULL, `quality_flags.snippet_rejected` / `snippet_dropped` set) is closed out as
+`needs_review` without an LLM call.
+
+The modulation classifier is a seam (`classifier.py`): v1 ships `UnavailableClassifier`;
+the TorchSig model trained offline on the DGX Spark plugs in later for Jetson inference.
+
+## `--allow-self-floor-grounding` (off by default)
 
 Without a quiet reference the agent estimates a flat noise floor from the capture itself,
 which is blind to the receiver's filter roll-off. With this flag, a primary region
@@ -25,19 +33,22 @@ zone. At a milder 8-12 dB roll-off it need not: 20 of 259 wrong self-floor prima
 interior regions inflated to 31-360 kHz, which could ground with a wrong bandwidth. Enable
 the flag only after recorded bladeRF captures, at the sample rates and analog bandwidths
 in use, confirm the receiver's roll-off is steep enough.
-The tag, confidence and reasoning go back into the record's own metadata, and nothing
-else does. A record whose snippet ingest rejected or capture dropped (`iq_snippet_path`
-NULL, `quality_flags.snippet_rejected` / `snippet_dropped` set) is closed out as
-`needs_review` without an LLM call.
 
-`needs_review` is a judgment about one record, never the result of a systemic fault:
-outcomes that could be systemic (a snippet outside the store, an invalid model answer)
-are held pending until a later success proves the system works, transient API errors
-are retried indefinitely with backoff, and a run of failures halts the agent with the
-records still pending. The LLM answers at most once per record per run.
+## Failure policy
 
-The modulation classifier is a seam (`classifier.py`): v1 ships `UnavailableClassifier`;
-the TorchSig model trained offline on the DGX Spark plugs in later for Jetson inference.
+`needs_review` is a judgment about one record, never the result of a systemic fault, and
+the LLM answers at most once per record per run. Every outcome falls in one class:
+
+| Class | Cases | Action |
+|---|---|---|
+| Per-record judgment | malformed record (`malformed_record`); no snippet (the `snippet_rejected` / `snippet_dropped` flag named); snippet outside the store (`snippet_outside_store`); snippet missing or corrupt while the store root is healthy (`snippet_unreadable`); no region even against the self floor (`no_occupied_region`); an analysis that fails twice (`analysis_failed`) | `needs_review` at once, NULL tag, confidence 0, the reason named, no LLM call, never counted toward a halt |
+| Transient per-record | a transient read error (EIO, EAGAIN, EINTR, ETIMEDOUT, ESTALE, ENOMEM, EBUSY); a write timeout (`statement_timeout`, lock timeout); a transient API error (connection, 408, 409, 429, >= 500) | kept, with its verdict if one was decided, in an in-run deferred set that later batches retry by id, whatever the cursor. A decided verdict is never re-asked. An API error also backs off 2, 4, ... s (capped at 300 s) before the next batch. After 10 attempts the record is left pending for the next run |
+| Systemic: halt | the store root missing, not a directory, unreadable, or empty while records point into it; 5 batches in a row failing outside any record (the database unreachable); 5 invalid model answers in a row; a non-retryable API error; a write the database rejects | halt with nothing marked for it; the message names the cause |
+
+An invalid model answer (validation failure, refusal, `max_tokens`) is held until a later
+answer validates, then goes to review. A spent daily token budget pauses until UTC
+midnight. At startup the agent checks the store root, and that the newest pending snippet
+paths lie under it; a broken snippet never blocks startup.
 
 ## The boundary
 
@@ -47,8 +58,9 @@ to the cellular/WiFi/BT decode modules.
 - **The container is the boundary.** The agent runs in its own container as the same uid
   as ingest (step 4 keeps the snippet store `0700` and every snippet `0600`, owned by that
   uid). The store is bind-mounted **read-only at the identical resolved path ingest uses**:
-  records hold absolute `resolve()`d paths, and the agent refuses to start if none of the
-  newest pending snippets reads under `--snippet-store-dir`. The ingest socket is **not**
+  records hold absolute `resolve()`d paths, and the agent refuses to start if the root is
+  unusable or none of the newest pending snippet paths lies under `--snippet-store-dir`.
+  The ingest socket is **not**
   mounted. Network egress is limited to the database and `api.anthropic.com`. Give it a
   memory limit of about 1 GiB: the analysis peaks at ~610 MB at its 2^25-sample cap.
 - **The database.** The agent's login role (`IN ROLE surveytool_agent`, and in nothing

@@ -3,36 +3,31 @@
 
 Two invariants:
 - needs_review is a judgment about one record, never the consequence of a
-  systemic fault. An outcome that could be systemic is held, still pending,
-  until a later success shows the system works; too many in a row halt the
-  agent with them still pending;
+  systemic fault;
 - the LLM answers at most once per record per process run. A decision that
   could not be written is kept and written again, never re-asked. (A call
   that raised before returning a response is not an answer.)
 
-Outcomes per record:
-- malformed (a view value fails db_gateway.parse_pending_row): needs_review
-  at once, reason malformed_record; no LLM call; never counts toward a halt;
-- no snippet (ingest rejected it or capture dropped it): needs_review at once,
-  naming the quality flag; no LLM call; never counts toward a halt;
-- snippet outside the store: held; marked needs_review once a later snippet
-  is analysed (the store root is then known to be right);
-- snippet unreadable, no occupied region, or feature extraction failed: left
-  pending (step 4 triggered on energy, so finding none is our failure);
-- no quiet pre-trigger reference (an always-on emitter fills its own): the
-  self-floor analysis goes to the LLM, but routing caps it at needs_review
-  unless allow_self_floor_grounding is set (see agent.analysis);
-- max_consecutive_snippet_failures of the above in a row: halt;
-- transient API error: the cursor is rewound to the record and the loop backs
-  off exponentially (capped) and retries it indefinitely; never marked;
-- any other API error (auth, bad request, unknown model): halt;
-- invalid model output (validation failure, refusal, max_tokens): held;
-  marked needs_review once a later answer validates;
-  max_consecutive_bad_outputs in a row: halt;
-- write rejected by the database (bad arguments): halt; write timed out: left
-  pending; any other write error fails the batch, and the kept decision is
-  written when the record is fetched again;
-- daily token budget spent: pause until the UTC day rolls over.
+Every outcome falls in one of three classes (agent/README.md has the table):
+- per-record judgment: needs_review at once, NULL tag, a reason naming it,
+  no LLM call, never counted toward a halt. A malformed record, no snippet
+  (rejected or dropped), a snippet outside the store, a snippet missing or
+  corrupt while the store root is healthy, no occupied region even against
+  the self floor, an analysis that fails twice;
+- transient per-record: the record, with its verdict if one was decided, is
+  kept in an in-run deferred set that later batches retry by id, so the
+  advancing cursor never strands it. A transient read error, a write
+  timeout, a transient API error (which also backs off, capped, before the
+  next batch). After max_attempts_per_record attempts the record is left
+  pending for the next run;
+- systemic: halt, with nothing marked for it. The store root unhealthy
+  (missing, not a directory, unreadable, or empty while records point into
+  it), a run of failed batches (the database unreachable), a run of invalid
+  model answers, a non-retryable API error, a write the database rejects.
+
+Two outcomes sit outside the classes: an invalid model answer is held until
+a later answer validates (then it goes to review), and a spent daily token
+budget pauses until the UTC day rolls over.
 """
 
 from __future__ import annotations
@@ -73,23 +68,64 @@ from agent.llm import (
 )
 from agent.prompt import SYSTEM_PROMPT, build_user_message
 from agent.routing import Decision, needs_review, route
-from agent.snippet_reader import SnippetOutsideStore, SnippetUnreadable, read_snippet
+from agent.snippet_reader import Snippet, SnippetOutsideStore, SnippetUnreadable, read_snippet
 
 logger = logging.getLogger(__name__)
 
 _SDK_MAX_RETRIES = 2  # inside each of our calls, before our own backoff
 _SDK_TIMEOUT_SECONDS = 60.0
 _STARTUP_PROBES = 5
+_MAX_BACKOFF_EXPONENT = 30  # 2 s * 2**30 is far past any cap; 2**2000 would overflow a float
 
 
 class SystemicFault(RuntimeError):
     """Not about any one record: halt rather than mark the backlog."""
 
 
-class _RetryLater(Exception):
+class _Backoff(Exception):
+    """A transient API error: the record is deferred; wait before the next batch."""
+
     def __init__(self, delay: float) -> None:
         super().__init__(delay)
         self.delay = delay
+
+
+@dataclass(frozen=True)
+class _Deferred:
+    attempts: int  # transient failures so far
+    verdict: Decision | None  # decided and awaiting a successful write; None: decide again
+
+
+def backoff_delay(streak: int, base_seconds: float, cap_seconds: float) -> float:
+    """base * 2**(streak - 1), capped; the exponent is clamped first."""
+    return min(base_seconds * 2.0 ** min(streak - 1, _MAX_BACKOFF_EXPONENT), cap_seconds)
+
+
+def store_root_problem(root: Path, expect_content: bool = False) -> str | None:
+    """Why the snippet store root cannot be used, or None. With
+    expect_content, an empty root (an unmounted store's mount point) is a
+    problem too: records point into it."""
+    if not root.is_absolute():
+        return f"--snippet-store-dir must be absolute, got {str(root)!r}"
+    try:
+        empty = next(root.iterdir(), None) is None
+    except FileNotFoundError:
+        return f"{root} does not exist"
+    except NotADirectoryError:
+        return f"{root} is not a directory"
+    except PermissionError:
+        return f"permission denied on {root}"
+    except OSError as exc:
+        return f"cannot list {root}: {exc}"
+    if expect_content and empty:
+        return f"{root} is empty although pending records point into it: is the store mounted?"
+    return None
+
+
+def _under(path: str, root: Path) -> bool:
+    """Lexically, without touching the file: is `path` inside `root`?"""
+    candidate = Path(path)
+    return candidate.is_absolute() and Path(*candidate.parts).is_relative_to(root.resolve())
 
 
 @dataclass(frozen=True)
@@ -98,7 +134,7 @@ class AgentSettings:
     model: str = DEFAULT_MODEL
     max_tokens: int = DEFAULT_MAX_TOKENS
     batch_size: int = 20
-    max_consecutive_snippet_failures: int = 5
+    max_attempts_per_record: int = 10  # transient failures before a record waits for the next run
     max_consecutive_bad_outputs: int = 5
     daily_token_budget: int = 2_000_000
     backoff_seconds: float = 2.0
@@ -129,9 +165,9 @@ def _no_snippet_reason(record: PendingRecord) -> str:
 
 
 class ClassificationAgent:
-    """Stateful by necessity: it carries the fetch cursor, the held records,
-    the decisions not yet written and the day's token spend from one record
-    to the next."""
+    """Stateful by necessity: it carries the fetch cursor, the deferred and
+    held records, the decisions not yet written and the day's token spend
+    from one record to the next."""
 
     def __init__(
         self,
@@ -152,77 +188,105 @@ class ClassificationAgent:
         self._sleep = sleep
         self._now = now
         self._last_id = start_after_id
-        # (record id, reason, verdict): verdict is the needs_review to write
-        # once the root is proven right (outside-store), else None (stays pending).
-        self._snippet_failures: list[tuple[int, str, Decision | None]] = []
+        self._deferred: dict[int, _Deferred] = {}
+        self._given_up: set[int] = set()  # past the attempt cap: pending until the next run
         self._bad_outputs: list[tuple[int, Decision]] = []
-        self._unwritten: dict[int, Decision] = {}
         self._transient_streak = 0
         self._retry_in: float | None = None
         self._budget_day = now().date()
         self._tokens_today = 0
 
     def check_snippet_root(self) -> None:
-        """Before touching any record: the root must be absolute, and one of
-        the newest pending snippets must read through it. Step 4 stores
-        resolve()d absolute paths, so a store mounted anywhere else would
-        make every snippet 'outside the store'."""
+        """Before touching any record: the store root must be healthy, and
+        the newest pending snippet paths must lie under it (lexically: a
+        broken snippet is a judgment about its record, not a reason to
+        refuse to start). Step 4 stores resolve()d absolute paths, so a
+        store mounted at another path would put every snippet 'outside'."""
         root = self._settings.snippet_root
-        if not root.is_absolute():
-            raise SystemicFault(f"--snippet-store-dir must be absolute, got {str(root)!r}")
+        problem = store_root_problem(root)
+        if problem is not None:
+            raise SystemicFault(f"The snippet store is unusable: {problem}")
         newest = self._gateway.fetch_newest_with_snippet(self._last_id, _STARTUP_PROBES)
-        problems = []
-        for record in newest:
-            try:
-                read_snippet(record.iq_snippet_path, root, record.sample_rate, record.center_freq)
-                return
-            except (SnippetOutsideStore, SnippetUnreadable) as exc:
-                problems.append(f"record {record.id}: {exc}")
-        if problems:
+        paths = [record.iq_snippet_path for record in newest if record.iq_snippet_path and record.malformed is None]
+        if paths and not any(_under(path, root) for path in paths):
             raise SystemicFault(
-                f"None of the newest pending snippets reads under {root}: "
-                + "; ".join(problems)
-                + ". Mount the snippet store read-only at the identical resolved path ingest uses."
+                f"None of the newest pending snippets is under {root} (e.g. {paths[0][:200]!r}). "
+                "Mount the snippet store read-only at the identical resolved path ingest uses."
             )
-        logger.info("No pending snippet to probe %s with yet", root)
 
     def take_retry_delay(self) -> float | None:
-        """Seconds to wait before retrying a record whose LLM call hit a
-        transient error, or None."""
+        """Seconds to wait before the next batch after a transient API
+        error, or None."""
         delay, self._retry_in = self._retry_in, None
         return delay
 
     def run_batch(self) -> int:
-        """Process the next pending records (ids above the cursor); returns
-        how many were fetched. Raises SystemicFault to halt."""
-        records = self._gateway.fetch_pending(self._last_id, self._settings.batch_size)
-        for record in records:
-            try:
-                self._process(record)
-            except _RetryLater as retry:
-                self._retry_in = retry.delay  # the cursor stays before this record
-                break
-            self._last_id = record.id
-        return len(records)
+        """Retry the deferred records by id, then process the next pending
+        records above the cursor; returns how many records were looked at.
+        Raises SystemicFault to halt."""
+        looked_at = 0
+        try:
+            looked_at += self._retry_deferred()
+            records = self._gateway.fetch_pending(self._last_id, self._settings.batch_size)
+            looked_at += len(records)
+            for record in records:
+                if record.id not in self._deferred and record.id not in self._given_up:
+                    try:
+                        self._process(record)
+                    except _Backoff:
+                        self._last_id = record.id  # deferred: retried by id, not by the cursor
+                        raise
+                # Any other exception leaves the cursor before the record, so
+                # it is fetched again (a verdict already decided is deferred).
+                self._last_id = record.id
+        except _Backoff as backoff:
+            self._retry_in = backoff.delay
+        return looked_at
+
+    def _retry_deferred(self) -> int:
+        if not self._deferred:
+            return 0
+        still_pending = {record.id: record for record in self._gateway.fetch_by_ids(sorted(self._deferred))}
+        for record_id in sorted(self._deferred):
+            if record_id not in still_pending:  # written meanwhile, or a human tagged it
+                del self._deferred[record_id]
+                continue
+            verdict = self._deferred[record_id].verdict
+            if verdict is not None:
+                self._write(record_id, verdict)
+            else:
+                self._process(still_pending[record_id])
+        return len(still_pending)
 
     def _process(self, record: PendingRecord) -> None:
         logger.info("Record %d: snippet %s", record.id, record.iq_snippet_path)
-        if record.malformed is not None:
-            self._submit(record.id, needs_review(f"malformed_record: {record.malformed}"))
-            return
-        if record.iq_snippet_path is None:
-            self._submit(record.id, needs_review(_no_snippet_reason(record)))
-            return
-        decision = self._unwritten.get(record.id) or self._decide(record)
-        if decision is not None:
-            self._submit(record.id, decision)
+        verdict = self._judge(record)
+        if verdict is not None:
+            self._write(record.id, verdict)
 
-    def _decide(self, record: PendingRecord) -> Decision | None:
-        """The decision to write now, or None when the record stays pending
-        or is held."""
-        analysis = self._analyse(record)
-        if analysis is None:
-            return None
+    def _judge(self, record: PendingRecord) -> Decision | None:
+        """The verdict to write now, or None when the record is deferred or
+        held."""
+        if record.malformed is not None:
+            return needs_review(f"malformed_record: {record.malformed}")
+        if record.iq_snippet_path is None:
+            return needs_review(_no_snippet_reason(record))
+        try:
+            snippet = read_snippet(
+                record.iq_snippet_path, self._settings.snippet_root, record.sample_rate, record.center_freq
+            )
+        except SnippetOutsideStore as exc:
+            self._require_healthy_root(expect_content=False)
+            return needs_review(f"snippet_outside_store: {exc}")
+        except SnippetUnreadable as exc:
+            if exc.transient:
+                self._defer(record.id, str(exc))
+                return None
+            self._require_healthy_root(expect_content=True)
+            return needs_review(f"snippet_unreadable: {exc}")
+        analysis = self._analyse(record.id, snippet)
+        if isinstance(analysis, Decision):
+            return analysis
         result = self._ask(record.id, build_user_message(analysis))
         if result.classification is None:
             self._hold_bad_output(record.id, needs_review(f"Model output failed validation: {result.failure}"))
@@ -233,45 +297,56 @@ class ClassificationAgent:
             analysis.modulation_label,
             analysis.reduced_confidence,
         )
-        self._unwritten[record.id] = decision  # before anything else can fail
+        self._remember(record.id, decision)  # before releasing held answers can fail
         self._release_bad_outputs()
         return decision
 
-    def _analyse(self, record: PendingRecord) -> SnippetAnalysis | None:
+    def _analyse(self, record_id: int, snippet: Snippet) -> SnippetAnalysis | Decision:
+        """The analysis, or the judgment it leads to. A failure is retried
+        once; a second one is about the record (the analysis is
+        deterministic)."""
         try:
-            snippet = read_snippet(
-                record.iq_snippet_path, self._settings.snippet_root, record.sample_rate, record.center_freq
-            )
-        except SnippetOutsideStore as exc:
-            return self._snippet_failed(record.id, str(exc), needs_review(f"Snippet rejected: {exc}"))
-        except SnippetUnreadable as exc:
-            return self._snippet_failed(record.id, str(exc), None)
-        try:
-            analysis = analyse_snippet(
-                snippet, self._bands, self._classifier, self._settings.allow_self_floor_grounding
-            )
-        except Exception as exc:
-            logger.exception("Feature extraction failed for record %d", record.id)
-            return self._snippet_failed(record.id, f"feature extraction failed: {exc!r}", None)
+            analysis = self._analyse_once(snippet)
+        except Exception:
+            logger.exception("Analysis failed for record %d; retrying once", record_id)
+            try:
+                analysis = self._analyse_once(snippet)
+            except Exception as exc:
+                logger.exception("Analysis failed again for record %d", record_id)
+                return needs_review(f"analysis_failed: {exc!r}")
         if analysis.primary is None:
-            return self._snippet_failed(record.id, "no occupied region stood above the noise floor", None)
-        failures, self._snippet_failures = self._snippet_failures, []
-        for record_id, _, verdict in failures:
-            if verdict is not None:
-                self._submit(record_id, verdict)
+            return needs_review(
+                "no_occupied_region: nothing stood above the noise floor, the self floor included"
+            )
         return analysis
 
-    def _snippet_failed(self, record_id: int, reason: str, verdict: Decision | None) -> None:
-        self._snippet_failures.append((record_id, reason, verdict))
-        logger.warning("Record %d held pending: %s", record_id, reason)
-        if len(self._snippet_failures) >= self._settings.max_consecutive_snippet_failures:
-            ids = [failed for failed, _, _ in self._snippet_failures]
-            raise SystemicFault(
-                f"{len(ids)} snippets in a row could not be analysed (records {ids}; last: "
-                f"{reason}). Check --snippet-store-dir and the store's read-only mount, or "
-                f"restart with --start-after-id {record_id} to skip them."
+    def _analyse_once(self, snippet: Snippet) -> SnippetAnalysis:
+        return analyse_snippet(snippet, self._bands, self._classifier, self._settings.allow_self_floor_grounding)
+
+    def _require_healthy_root(self, expect_content: bool) -> None:
+        problem = store_root_problem(self._settings.snippet_root, expect_content)
+        if problem is not None:
+            raise SystemicFault(f"The snippet store is unusable: {problem}. No record was marked for it.")
+
+    def _remember(self, record_id: int, verdict: Decision) -> None:
+        entry = self._deferred.get(record_id)
+        self._deferred[record_id] = _Deferred(0 if entry is None else entry.attempts, verdict)
+
+    def _defer(self, record_id: int, why: str) -> None:
+        """A transient failure: keep the record (and any verdict) for a later
+        batch, up to max_attempts_per_record attempts."""
+        entry = self._deferred.get(record_id) or _Deferred(0, None)
+        attempts = entry.attempts + 1
+        if attempts >= self._settings.max_attempts_per_record:
+            self._deferred.pop(record_id, None)
+            self._given_up.add(record_id)
+            logger.error(
+                "Record %d left pending after %d attempts (last: %s); not retried again this run",
+                record_id, attempts, why,
             )
-        return None
+            return
+        self._deferred[record_id] = _Deferred(attempts, entry.verdict)
+        logger.warning("Record %d deferred (attempt %d): %s", record_id, attempts, why)
 
     def _hold_bad_output(self, record_id: int, verdict: Decision) -> None:
         self._bad_outputs.append((record_id, verdict))
@@ -281,16 +356,16 @@ class ClassificationAgent:
             raise SystemicFault(
                 f"{len(ids)} model answers in a row were refused or failed validation (records "
                 f"{ids}; last: {verdict.reasoning}). Check the model id, the tool schema and "
-                f"the prompt; restart with --start-after-id {record_id} to skip them."
+                "the prompt; they stay pending."
             )
 
     def _release_bad_outputs(self) -> None:
         """An answer just validated, so the model works: each held invalid
         answer was about its own record, and goes to review."""
         while self._bad_outputs:
-            record_id, verdict = self._bad_outputs[0]
-            self._submit(record_id, verdict)
-            self._bad_outputs.pop(0)
+            record_id, verdict = self._bad_outputs.pop(0)
+            self._remember(record_id, verdict)
+            self._write(record_id, verdict)
 
     def _ask(self, record_id: int, user_message: str) -> LlmResult:
         self._wait_for_budget()
@@ -300,17 +375,13 @@ class ClassificationAgent:
             )
         except Exception as exc:
             if not is_transient(exc):
-                raise SystemicFault(
-                    f"Non-retryable Anthropic API error on record {record_id}: {exc!r}. "
-                    f"If the record itself causes it, restart with --start-after-id {record_id}."
-                ) from exc
+                raise SystemicFault(f"Non-retryable Anthropic API error on record {record_id}: {exc!r}") from exc
             self._transient_streak += 1
-            delay = min(
-                self._settings.backoff_seconds * 2 ** (self._transient_streak - 1),
-                self._settings.max_backoff_seconds,
+            delay = backoff_delay(
+                self._transient_streak, self._settings.backoff_seconds, self._settings.max_backoff_seconds
             )
-            logger.warning("Transient LLM failure on record %d (%r); retrying it in %.0f s", record_id, exc, delay)
-            raise _RetryLater(delay) from exc
+            self._defer(record_id, f"transient API error {exc!r}; next batch in {delay:.0f} s")
+            raise _Backoff(delay) from exc
         self._transient_streak = 0
         self._tokens_today += result.tokens_used
         return result
@@ -328,22 +399,26 @@ class ClassificationAgent:
         self._sleep((midnight - now).total_seconds())
         self._budget_day, self._tokens_today = midnight.date(), 0
 
-    def _submit(self, record_id: int, decision: Decision) -> None:
+    def _write(self, record_id: int, verdict: Decision) -> None:
+        """Write a verdict. It stays in the deferred set until the database
+        accepts it (or a human got there first), so no failure loses it."""
+        self._remember(record_id, verdict)
         try:
             self._gateway.submit_classification(
-                record_id, decision.status, decision.tag, decision.confidence, decision.reasoning
+                record_id, verdict.status, verdict.tag, verdict.confidence, verdict.reasoning
             )
         except RecordNotPending:
             logger.info("Record %d was no longer pending (a human got there first); skipped", record_id)
         except SubmitTimedOut as exc:
-            logger.warning("%s; record %d stays pending", exc, record_id)
+            self._defer(record_id, str(exc))
+            return
         except SubmitRejected as exc:
-            raise SystemicFault(str(exc)) from exc
+            raise SystemicFault(f"The database rejected a write, a bug in the agent: {exc}") from exc
         else:
             logger.info(
-                "Record %d -> %s (%s, %.2f)", record_id, decision.status.value, decision.tag, decision.confidence
+                "Record %d -> %s (%s, %.2f)", record_id, verdict.status.value, verdict.tag, verdict.confidence
             )
-        self._unwritten.pop(record_id, None)
+        self._deferred.pop(record_id, None)
 
 
 def run(
@@ -355,7 +430,8 @@ def run(
 ) -> None:
     """Loop until `stopping()`. A batch that fails outside any record (the
     database going away) is retried after `poll_seconds`, and
-    max_failed_batches in a row halt; SystemicFault propagates."""
+    max_failed_batches in a row halt, naming the last error; SystemicFault
+    propagates."""
     failed = 0
     while not stopping():
         try:
@@ -367,7 +443,10 @@ def run(
             failed += 1
             logger.exception("Batch failed (%d in a row)", failed)
             if failed >= max_failed_batches:
-                raise SystemicFault(f"{failed} batches in a row failed (last: {exc!r})") from exc
+                raise SystemicFault(
+                    f"{failed} batches in a row failed outside any record, so the database (or the "
+                    f"connection to it) is failing; last error: {exc!r}"
+                ) from exc
             fetched = 0
         delay = agent.take_retry_delay()
         if stopping():

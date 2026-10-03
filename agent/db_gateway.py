@@ -155,6 +155,14 @@ _NEWEST_WITH_SNIPPET = text(
      LIMIT :limit
     """
 )
+_BY_IDS = text(
+    f"""
+    SELECT {_COLUMNS}
+      FROM public.agent_pending_unknown
+     WHERE id = ANY(CAST(:ids AS integer[]))
+     ORDER BY id
+    """
+)
 _SUBMIT = text(
     """
     SELECT public.classify_unknown(
@@ -253,6 +261,13 @@ class AgentGateway:
         """Pending unknown rows with id > after_id, lowest id first."""
         with self._engine.connect() as conn:
             rows = conn.execute(_FETCH, {"after_id": after_id, "limit": limit}).all()
+        return [parse_pending_row(row) for row in rows]
+
+    def fetch_by_ids(self, ids: Sequence[int]) -> list[PendingRecord]:
+        """Those of `ids` that are still pending, lowest id first: the
+        agent's deferred records, retried whatever the cursor."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(_BY_IDS, {"ids": list(ids)}).all()
         return [parse_pending_row(row) for row in rows]
 
     def fetch_newest_with_snippet(self, after_id: int, limit: int) -> list[PendingRecord]:

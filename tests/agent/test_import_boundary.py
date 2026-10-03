@@ -14,7 +14,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 ALLOWED_MODULES = {
-    "__future__", "argparse", "collections", "dataclasses", "datetime", "enum", "functools",
+    "__future__", "argparse", "collections", "dataclasses", "datetime", "enum", "errno", "functools",
     "json", "logging", "math", "os", "pathlib", "re", "signal", "statistics", "time", "typing",
     "anthropic", "numpy", "pydantic", "sigmf",
     "agent", "dsp", "schema",

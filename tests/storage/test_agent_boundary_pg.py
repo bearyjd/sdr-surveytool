@@ -805,6 +805,19 @@ def test_malformed_rows_never_fail_the_fetch(boundary):
     assert records[good].malformed is None and records[good].snippet_duration_ms == 1000
 
 
+def test_deferred_records_are_fetched_by_id_while_pending(boundary):
+    first = _insert(boundary, Modality.UNKNOWN, None)
+    tagged = _insert(boundary, Modality.UNKNOWN, ClassificationStatus.MANUALLY_TAGGED)
+    last = _insert(boundary, Modality.UNKNOWN, None)
+    wifi = _insert(boundary, Modality.WIFI, None)
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        assert [r.id for r in gateway.fetch_by_ids([last, tagged, wifi, first, 10**9])] == [first, last]
+        assert gateway.fetch_by_ids([]) == []
+    finally:
+        gateway.close()
+
+
 def test_agent_classifies_a_real_row_through_the_boundary(boundary, tmp_path):
     """The whole agent against real PostgreSQL: a stored step-4 snippet, a
     pending row, the agent login role, a fake LLM; the row ends up

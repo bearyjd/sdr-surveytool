@@ -20,6 +20,7 @@ length and the trigger threshold it lies below.
 
 from __future__ import annotations
 
+import errno
 import json
 import math
 from dataclasses import dataclass
@@ -37,6 +38,9 @@ MAX_SECONDS = 2.0
 MAX_SAMPLES = 1 << 25
 MIN_SAMPLES = 1024  # one coarse FFT frame (dsp.segmentation.NFFT)
 _MAX_META_BYTES = 1 << 20
+# I/O errors that may pass (a flaky disk, NFS, memory pressure): the record
+# is retried later. Anything else (missing, permission, corrupt) is final.
+_TRANSIENT_ERRNOS = frozenset({errno.EIO, errno.EAGAIN, errno.EINTR, errno.ETIMEDOUT, errno.ESTALE, errno.ENOMEM, errno.EBUSY})
 # Step 4's writer records its trigger threshold on the "pre_trigger"
 # annotation under this key (capture.unknown.snippet_writer.THRESHOLD_KEY;
 # agent/ cannot import capture/).
@@ -49,9 +53,13 @@ class SnippetOutsideStore(Exception):
 
 
 class SnippetUnreadable(Exception):
-    """The snippet is missing, unreadable, or malformed. The record stays
-    pending; many in a row point to a systemic fault (wrong root, unmounted
-    disk)."""
+    """The snippet is missing, unreadable, or malformed: about the record,
+    unless `transient` (an I/O error that may pass, such as EIO), when the
+    agent retries it later."""
+
+    def __init__(self, message: str, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 @dataclass(frozen=True)
@@ -110,7 +118,8 @@ def read_snippet(
     except SnippetUnreadable:
         raise
     except Exception as exc:  # the files are untrusted: any parse or read failure is "unreadable"
-        raise SnippetUnreadable(f"Cannot read {data}: {exc!r}") from exc
+        transient = isinstance(exc, OSError) and exc.errno in _TRANSIENT_ERRNOS
+        raise SnippetUnreadable(f"Cannot read {data}: {exc!r}", transient) from exc
 
 
 def _samples(
