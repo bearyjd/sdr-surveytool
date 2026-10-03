@@ -198,6 +198,9 @@ class ClassificationAgent:
         self._last_id = start_after_id
         self._deferred: dict[int, _Deferred] = {}
         self._given_up: set[int] = set()  # past the attempt cap: pending until the next run
+        # The model has answered about these this run (a verdict, or a held
+        # invalid answer): they never reach the LLM again.
+        self._answered: set[int] = set()
         self._bad_outputs: list[tuple[int, Decision]] = []
         self._transient_streak = 0
         self._retry_in: float | None = None
@@ -275,6 +278,8 @@ class ClassificationAgent:
     def _judge(self, record: PendingRecord) -> Decision | None:
         """The verdict to write now, or None when the record is deferred or
         held."""
+        if record.id in self._answered:
+            return None  # its verdict is deferred or held: written from there, never re-asked
         if record.malformed is not None:
             return needs_review(f"malformed_record: {record.malformed}")
         if record.iq_snippet_path is None:
@@ -296,7 +301,9 @@ class ClassificationAgent:
         if isinstance(analysis, Decision):
             return analysis
         result = self._ask(record.id, build_user_message(analysis))
+        self._answered.add(record.id)
         if result.classification is None:
+            self._deferred.pop(record.id, None)  # held instead, until the model is shown to work
             self._hold_bad_output(record.id, needs_review(f"Model output failed validation: {result.failure}"))
             return None
         decision = route(result.classification, analysis.grounded_band_ids, analysis.reduced_confidence)

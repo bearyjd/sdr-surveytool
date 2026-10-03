@@ -5,6 +5,7 @@ No database, no network, no real time (sleep and the clock are injected)."""
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import json
 import os
 import signal
 import threading
@@ -436,6 +437,80 @@ def test_an_always_on_emitter_at_the_trigger_threshold_always_closes(store):
     assert _agent(gateway, client, store, batch_size=20).run_batch() == 20
     assert [s[0] for s in gateway.submitted] == list(range(1, 21))
     assert len(client.requests) == 20
+
+
+def test_a_record_deferred_by_a_transient_error_is_never_reasked_after_an_answer(store):
+    """The reviewer's probe: a 529, then an invalid answer. The answer is
+    held; the record must leave the deferred set, or every later batch asks
+    the model about it again."""
+    gateway = FakeGateway([_snippet_record(store, 1)])
+    client = ScriptedClient([_status_error(529), REFUSAL] + [REFUSAL] * 10)
+    agent = _agent(gateway, client, store)
+    for _ in range(8):
+        agent.run_batch()
+    assert len(client.requests) == 2 and gateway.submitted == []
+
+
+class _PerRecordClient:
+    """Answers from a seeded script and counts, per record, the calls that
+    returned a response. The record is read off the prompt: record i's
+    burst sits at 915.1 + 0.02 * i MHz."""
+
+    def __init__(self, seed: int) -> None:
+        self.rng = np.random.default_rng(seed)
+        self.answered: dict[int, int] = {}
+        self.messages = self
+
+    def create(self, **kwargs) -> Message:
+        prompt = kwargs["messages"][0]["content"]
+        center = json.loads(prompt[prompt.index("{") :])["primary_emitter"]["center_mhz"]
+        record_id = round((center - 915.1) / 0.02)
+        outcome = ("529", "connection", "invalid", "good", "good")[self.rng.integers(5)]
+        if outcome == "529":
+            raise _status_error(529)
+        if outcome == "connection":
+            raise _connection_error()
+        self.answered[record_id] = self.answered.get(record_id, 0) + 1
+        answer = REFUSAL if outcome == "invalid" else _message(
+            [{"type": "tool_use", "id": "t", "name": "record_classification", "input": GOOD}]
+        )
+        return Message.model_validate(answer)
+
+
+def _offset_record(store: Path, record_id: int) -> PendingRecord:
+    rng = np.random.default_rng(record_id)
+    n = 1 << 18
+    burst = synthetic.gate(synthetic.band_limited(rng, n, FS, 20e3, 100e3 + 20e3 * record_id, 1e-3), FS, [(0.05, 0.1)])
+    path = write_sigmf_snippet(burst + synthetic.noise(rng, n, 1e-5), store, FS, TUNED, START, trigger_offset=round(0.05 * FS))
+    return PendingRecord(record_id, str(path), FS, TUNED, -20.0, 262)
+
+
+@pytest.mark.parametrize("seed", range(16))
+def test_the_llm_never_answers_twice_for_a_record_whatever_fails(store, seed):
+    """A property over mixed failures -- transient API errors, invalid
+    answers, timed-out and failed writes -- driven through many batches:
+    once the model has answered about a record, it is never asked again."""
+    records = [_offset_record(store, i) for i in range(1, 7)]
+    rng = np.random.default_rng(100 + seed)
+    ids = [r.id for r in records]
+    gateway = FakeGateway(
+        records,
+        timed_out_once=set(rng.choice(ids, 2, replace=False).tolist()),
+        fail_once=set(rng.choice(ids, 2, replace=False).tolist()),
+    )
+    client = _PerRecordClient(seed)
+    clock = [START]
+    agent = _agent(gateway, client, store, now=lambda: clock[0], batch_size=3)
+    for _ in range(40):
+        try:
+            agent.run_batch()
+        except ConnectionError:
+            pass
+        except SystemicFault:
+            break
+        clock[0] += timedelta(minutes=10)
+    assert client.answered and max(client.answered.values()) == 1
+    assert set(client.answered) <= set(ids)
 
 
 def test_a_malformed_record_is_closed_without_an_llm_call_and_never_halts(store):
