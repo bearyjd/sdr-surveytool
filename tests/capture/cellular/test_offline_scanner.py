@@ -236,9 +236,12 @@ _REAL_TABLE_HEADER = REAL_STDOUT[
 ]
 
 
-def _block_at(fc: str) -> str:
-    """REAL_STDOUT's cell-301 detection block, moved to another frequency."""
-    return _REAL_BLOCK.replace("At freqeuncy 1815.3MHz", f"At freqeuncy {fc}MHz")
+def _block_at(fc: str, rx_power_db: str = "-9.44976") -> str:
+    """REAL_STDOUT's cell-301 detection block, moved to another frequency
+    and optionally given another RX power."""
+    return _REAL_BLOCK.replace(
+        "At freqeuncy 1815.3MHz", f"At freqeuncy {fc}MHz"
+    ).replace("RX power level: -9.44976 dB", f"RX power level: {rx_power_db} dB")
 
 
 def _synthetic_row(
@@ -292,6 +295,39 @@ def test_parse_cellsearch_output_prefers_nearest_row_within_radius():
     )
     cells = parse_cellsearch_output(stdout)
     assert cells[0]["n_rb_dl"] == 100
+
+
+def test_parse_cellsearch_output_gives_a_row_to_one_block_only(caplog):
+    """CellSearch prints a block for every detection, but its table lists
+    only dedup() survivors: here a weaker 1815.5 MHz detection of PCI 301
+    lost to the 1815.3 MHz one. Only the survivor gets the row's MIB; the
+    loser keeps None, without a warning (losing dedup is normal)."""
+    stdout = _synthetic_stdout(
+        [_block_at("1815.5", rx_power_db="-20.1"), _block_at("1815.3")],
+        [_synthetic_row(fc="1815.3")],
+    )
+    with caplog.at_level(logging.WARNING, logger="capture.cellular.offline_scanner"):
+        cells = parse_cellsearch_output(stdout)
+    assert [(cell["freq_mhz"], cell["n_rb_dl"]) for cell in cells] == [
+        (1815.5, None),
+        (1815.3, 100),
+    ]
+    assert caplog.records == []
+
+
+def test_parse_cellsearch_output_gives_a_tied_row_to_the_strongest_block():
+    """Two detections of PCI 301 at the same frequency: dedup() keeps the
+    higher pss_pow, so the stronger block gets the row even though it is
+    printed second."""
+    stdout = _synthetic_stdout(
+        [_block_at("1815.3", rx_power_db="-20.1"), _block_at("1815.3")],
+        [_synthetic_row()],
+    )
+    cells = parse_cellsearch_output(stdout)
+    assert [(cell["rx_power_db"], cell["n_rb_dl"]) for cell in cells] == [
+        (-20.1, None),
+        (-9.44976, 100),
+    ]
 
 
 def test_parse_cellsearch_output_matches_duplex_mode():

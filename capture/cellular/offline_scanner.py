@@ -41,14 +41,15 @@ _SUMMARY_ROW = re.compile(
     re.MULTILINE,
 )
 
-# CellSearch's dedup() merges same-ID detections whose actual carriers
-# (fc_requested + freq_superfine) lie within 1 MHz. The parser approximates
-# that by comparing fc alone: the table doesn't carry the residual offset at
-# full precision, and prints fc to 5 significant digits against the
-# detection block's 6. The approximation can only lose a match (MIB fields
-# left None, warning logged), never attach another cell's row: a candidate
-# must also share the detection's duplex mode and cell ID, and the nearest
-# one wins.
+# CellSearch prints a "Detected a ... cell!" block for every detection, but
+# its summary table lists only the survivors of dedup(), which collapses
+# same-ID detections whose actual carriers (fc_requested + freq_superfine)
+# lie within 1 MHz into the strongest one (CellSearch.cpp:489-497). So each
+# row is given to at most one block: the one dedup() kept (see
+# _assign_rows); the other blocks of that cell keep None MIB fields.
+# Frequencies are compared on fc alone, within this radius: the table
+# doesn't carry the residual offset at full precision, and prints fc to 5
+# significant digits against the detection block's 6.
 _SAME_CELL_MHZ = 1.0
 
 _MIB_KEYS = (
@@ -81,22 +82,41 @@ def _parse_summary_rows(stdout: str) -> list[dict]:
     return rows
 
 
-def _matching_row(cell: dict, rows: list[dict]) -> dict | None:
-    """The summary row for the same cell: same duplex mode and cell ID, and
-    the nearest frequency within _SAME_CELL_MHZ. None if there is no such
-    row, e.g. when the output was cut off before or inside the table."""
-    candidates = [
-        row
-        for row in rows
-        if row["duplex"] == cell["duplex"]
+def _same_cell(cell: dict, row: dict) -> bool:
+    return (
+        row["duplex"] == cell["duplex"]
         and row["cell_id"] == cell["cell_id"]
         and abs(row["freq_mhz"] - cell["freq_mhz"]) < _SAME_CELL_MHZ
-    ]
-    return min(
-        candidates,
-        key=lambda row: abs(row["freq_mhz"] - cell["freq_mhz"]),
-        default=None,
     )
+
+
+def _assign_rows(cells: list[dict], rows: list[dict]) -> list[dict | None]:
+    """One-to-one: gives each summary row to at most one detection block,
+    and returns each block's row (or None). A row goes to the block
+    dedup() kept: the row prints the survivor's own fc, so the nearest
+    frequency wins, and on a tie the strongest block, since dedup() keeps
+    the higher pss_pow (CellSearch.cpp:495-497). Pairs are taken nearest
+    first, so a block also gets its nearest row."""
+    pairs = sorted(
+        (
+            (
+                abs(row["freq_mhz"] - cell["freq_mhz"]),
+                -cell["rx_power_db"],
+                row_index,
+                cell_index,
+            )
+            for row_index, row in enumerate(rows)
+            for cell_index, cell in enumerate(cells)
+            if _same_cell(cell, row)
+        )
+    )
+    row_by_cell: dict[int, dict] = {}
+    taken_rows: set[int] = set()
+    for _, _, row_index, cell_index in pairs:
+        if row_index not in taken_rows and cell_index not in row_by_cell:
+            row_by_cell[cell_index] = rows[row_index]
+            taken_rows.add(row_index)
+    return [row_by_cell.get(cell_index) for cell_index in range(len(cells))]
 
 
 def parse_cellsearch_output(stdout: str) -> list[dict]:
@@ -105,16 +125,17 @@ def parse_cellsearch_output(stdout: str) -> list[dict]:
     MIB fields (antenna ports, CP type, n_RB and derived bandwidth, PHICH
     duration and resource) from its final summary table. CellSearch only
     reports a cell after a CRC-checked MIB decode, but it never prints the
-    SFN, and it reports no RSRP/RSRQ/SINR or SIB fields (so no PLMN). A
-    cell with no matching table row gets None MIB fields; if the table was
-    printed at all, that is also logged as a warning. Note "freqeuncy"
-    reproduces a real typo in CellSearch's own output text, not a mistake
-    here."""
+    SFN, and it reports no RSRP/RSRQ/SINR or SIB fields (so no PLMN).
+    Returns one dict per block. Each table row's MIB goes to one block only,
+    the one CellSearch's dedup() kept; other blocks of the same cell get
+    None MIB fields. A block with no table row within reach also gets None,
+    and if the table was printed at all, that is logged as a warning. Note
+    "freqeuncy" reproduces a real typo in CellSearch's own output text, not
+    a mistake here."""
     rows = _parse_summary_rows(stdout)
     table_printed = _SUMMARY_HEADER in stdout
-    cells = []
-    for match in _CELL_BLOCK.finditer(stdout):
-        cell = {
+    detections = [
+        {
             "duplex": match.group("duplex"),
             "freq_mhz": float(match.group("freq_mhz")),
             "cell_id": int(match.group("cell_id")),
@@ -122,9 +143,12 @@ def parse_cellsearch_output(stdout: str) -> list[dict]:
             "rx_power_db": float(match.group("rx_power_db")),
             "freq_offset_hz": float(match.group("freq_offset_hz")),
         }
-        row = _matching_row(cell, rows)
+        for match in _CELL_BLOCK.finditer(stdout)
+    ]
+    cells = []
+    for cell, row in zip(detections, _assign_rows(detections, rows)):
         if row is None:
-            if table_printed:
+            if table_printed and not any(_same_cell(cell, other) for other in rows):
                 logger.warning(
                     "CellSearch summary table has no row for detected cell %r "
                     "(%r, %r MHz); its MIB fields are left as None",
