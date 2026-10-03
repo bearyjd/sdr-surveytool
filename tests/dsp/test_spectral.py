@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from dsp.spectral import (
+    bandwidth_is_reliable,
     OccupiedBandwidth,
     dbfs,
     mean_burst_power_dbfs,
@@ -298,3 +299,12 @@ def test_dsp_imports_nothing_from_capture_or_gnuradio():
     )
     repo_root = Path(__file__).resolve().parents[2]
     subprocess.run([sys.executable, "-c", probe], cwd=repo_root, check=True)
+
+
+@pytest.mark.parametrize(
+    "hz, wraps, reliable",
+    [(0.9 * FS, False, True), (0.91 * FS, False, False), (1_000.0, True, False), (1_000.0, False, True)],
+)
+def test_bandwidth_is_reliable(hz, wraps, reliable):
+    """The one reliability rule, shared with dsp.segmentation."""
+    assert bandwidth_is_reliable(hz, FS, wraps) is reliable
