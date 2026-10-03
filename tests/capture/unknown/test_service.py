@@ -23,6 +23,7 @@ from capture.unknown.energy_trigger import TriggerEvent
 from capture.unknown.sample_clock import SampleClock
 from capture.unknown.service import CaptureSettings, process_snippet
 from capture.unknown.snippet_assembler import CapturedSnippet
+from capture.unknown.snippet_writer import THRESHOLD_KEY
 from schema.records import ClassificationStatus, Modality, UnifiedRecord
 from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES
 
@@ -227,6 +228,13 @@ def test_record_and_sigmf_carry_the_frequency_the_sdr_actually_tuned(tmp_path):
     assert record.identifier.center_freq == tuned
     recording = sigmffile.fromfile(record.metadata.iq_snippet_path)
     assert recording.get_captures()[0][sigmf.FREQUENCY_KEY] == tuned
+
+
+def test_the_sigmf_records_the_trigger_threshold_for_part_4(tmp_path):
+    settings = _settings(tmp_path)
+    record = process_snippet(_snippet(), settings, "s1", "op1")
+    pre_trigger, _ = sigmffile.fromfile(record.metadata.iq_snippet_path).get_annotations()
+    assert pre_trigger[THRESHOLD_KEY] == settings.threshold_dbfs == -30.0
 
 
 def test_snippet_duration_reflects_samples_actually_captured(tmp_path):

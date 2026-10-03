@@ -12,6 +12,10 @@ from sigmf import SigMFFile
 from sigmf.utils import SIGMF_DATETIME_ISO8601_FMT
 
 _RECORDER = "sdr-surveytool capture.unknown"
+# The trigger threshold rides on the "pre_trigger" annotation under this
+# project's own SigMF extension namespace, declared (optional) in the global.
+THRESHOLD_KEY = "sdr_surveytool:threshold_dbfs"
+_EXTENSION = {"name": "sdr_surveytool", "version": "1.0.0", "optional": True}
 
 
 def write_sigmf_snippet(
@@ -21,6 +25,7 @@ def write_sigmf_snippet(
     center_freq_hz: float,
     capture_start: datetime,
     trigger_offset: int | None = None,
+    threshold_dbfs: float | None = None,
 ) -> Path:
     """Write `iq` as a SigMF pair (`.sigmf-data` raw cf32_le + `.sigmf-meta`
     JSON) directly in `staging_dir` and return the absolute `.sigmf-data`
@@ -40,8 +45,12 @@ def write_sigmf_snippet(
     SigMF capture's core:datetime. `trigger_offset` (the index of the trigger
     sample in `iq`) is written as two standard annotations: "pre_trigger"
     over [0, trigger_offset), the below-threshold noise reference that
-    dsp.spectral.noise_floor_psd expects, and "burst" from the trigger on. The basename carries a random suffix, so
-    concurrent capture processes can never collide.
+    dsp.spectral.noise_floor_psd expects, and "burst" from the trigger on.
+    `threshold_dbfs`, the trigger threshold those pre-trigger samples are
+    below, is recorded on the "pre_trigger" annotation (THRESHOLD_KEY), so a
+    reader can select the same quiet frames capture's own bandwidth
+    measurement used (dsp.spectral.quiet_reference). The basename carries a
+    random suffix, so concurrent capture processes can never collide.
     """
     if capture_start.tzinfo is None:
         raise ValueError("capture_start must be timezone-aware (UTC)")
@@ -64,15 +73,16 @@ def write_sigmf_snippet(
 
         # Built from the final data path: sigmf records a non-conforming data
         # filename (such as the temporary one) as core:dataset in the meta.
-        meta = SigMFFile(
-            data_file=str(data_path),
-            global_info={
-                sigmf.DATATYPE_KEY: "cf32_le",
-                sigmf.SAMPLE_RATE_KEY: float(sample_rate),
-                sigmf.RECORDER_KEY: _RECORDER,
-                sigmf.DESCRIPTION_KEY: "Energy-triggered unknown-signal snippet",
-            },
-        )
+        global_info = {
+            sigmf.DATATYPE_KEY: "cf32_le",
+            sigmf.SAMPLE_RATE_KEY: float(sample_rate),
+            sigmf.RECORDER_KEY: _RECORDER,
+            sigmf.DESCRIPTION_KEY: "Energy-triggered unknown-signal snippet",
+        }
+        records_threshold = threshold_dbfs is not None and bool(trigger_offset)
+        if records_threshold:
+            global_info[sigmf.EXTENSIONS_KEY] = [dict(_EXTENSION)]
+        meta = SigMFFile(data_file=str(data_path), global_info=global_info)
         meta.add_capture(
             0,
             metadata={
@@ -81,7 +91,7 @@ def write_sigmf_snippet(
             },
         )
         if trigger_offset is not None:
-            _annotate_trigger(meta, trigger_offset, len(iq))
+            _annotate_trigger(meta, trigger_offset, len(iq), threshold_dbfs if records_threshold else None)
         meta.validate()
         with _create_private(tmp_meta, "w") as meta_file:
             meta.dump(meta_file, pretty=True)
@@ -97,16 +107,17 @@ def write_sigmf_snippet(
     return data_path
 
 
-def _annotate_trigger(meta: SigMFFile, trigger_offset: int, length: int) -> None:
+def _annotate_trigger(
+    meta: SigMFFile, trigger_offset: int, length: int, threshold_dbfs: float | None
+) -> None:
     if trigger_offset > 0:
-        meta.add_annotation(
-            0,
-            length=trigger_offset,
-            metadata={
-                sigmf.LABEL_KEY: "pre_trigger",
-                sigmf.COMMENT_KEY: "Below the trigger threshold: per-bin noise reference",
-            },
-        )
+        pre_trigger: dict[str, str | float] = {
+            sigmf.LABEL_KEY: "pre_trigger",
+            sigmf.COMMENT_KEY: "Below the trigger threshold: per-bin noise reference",
+        }
+        if threshold_dbfs is not None:
+            pre_trigger[THRESHOLD_KEY] = float(threshold_dbfs)
+        meta.add_annotation(0, length=trigger_offset, metadata=pre_trigger)
     meta.add_annotation(
         trigger_offset,
         length=length - trigger_offset,
