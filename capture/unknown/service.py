@@ -55,8 +55,13 @@ class CaptureSettings:
                 f"Trigger threshold {self.threshold_dbfs} dBFS is at or above full "
                 "scale (0 dBFS) and could never fire; lower the noise floor or margin"
             )
-        if self.pre_trigger_seconds < 0 or self.cooldown_seconds < 0:
-            raise ValueError("pre_trigger_seconds and cooldown_seconds must be >= 0")
+        if self.pre_trigger_seconds < 0:
+            raise ValueError("pre_trigger_seconds must be >= 0")
+        if self.cooldown_seconds <= 0:
+            raise ValueError(
+                "cooldown_seconds must be > 0: the trigger is level-triggered, so a "
+                "zero cooldown re-captures a continuous emitter back to back"
+            )
         if self.samples(self.averaging_seconds) < 1 or self.samples(self.post_trigger_seconds) < 1:
             raise ValueError(
                 "averaging_seconds and post_trigger_seconds must each span at least one sample"

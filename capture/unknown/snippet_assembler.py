@@ -57,6 +57,13 @@ class SnippetAssembler:
         post_trigger_samples: int,
         last_trigger_at: Mapping[float, datetime],
     ) -> None:
+        if post_trigger_samples < 1:
+            raise ValueError(
+                "post_trigger_samples must be >= 1: an empty post-trigger window "
+                "never completes, so process() would never advance"
+            )
+        if pre_trigger_samples < 0:
+            raise ValueError("pre_trigger_samples must be >= 0")
         self._clock = clock
         self._center_freq_hz = center_freq_hz
         self._config = config

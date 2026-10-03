@@ -54,6 +54,13 @@ def test_settings_reject_a_threshold_at_or_above_full_scale(tmp_path):
         _settings(tmp_path, noise_floor_dbfs=-5.0, threshold_db=10.0)
 
 
+def test_settings_reject_non_positive_cooldown(tmp_path):
+    """A zero cooldown with a level trigger re-captures a continuous emitter
+    back to back, i.e. writes to disk as fast as the radio produces samples."""
+    with pytest.raises(ValueError, match="cooldown_seconds"):
+        _settings(tmp_path, cooldown_seconds=0.0)
+
+
 def test_settings_reject_windows_shorter_than_one_sample(tmp_path):
     with pytest.raises(ValueError, match="at least one sample"):
         _settings(tmp_path, averaging_seconds=1e-7)

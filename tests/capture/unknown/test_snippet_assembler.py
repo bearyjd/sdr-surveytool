@@ -122,3 +122,17 @@ def test_zero_pre_trigger_samples_starts_snippet_at_trigger():
     (snippet,) = _feed(_assembler(pre=0), iq, power, 100)
     assert snippet.start_index == 1_000
     np.testing.assert_array_equal(snippet.iq, iq[1_000:1_400])
+
+
+def test_rejects_an_empty_post_trigger_window():
+    """post=0 used to hang process(): the capture could never fill, so the
+    read position never advanced."""
+    with pytest.raises(ValueError, match="post_trigger_samples"):
+        SnippetAssembler(
+            clock=SampleClock(anchor=ANCHOR, sample_rate=FS),
+            center_freq_hz=FREQ,
+            config=CONFIG,
+            pre_trigger_samples=PRE,
+            post_trigger_samples=0,
+            last_trigger_at={},
+        )
