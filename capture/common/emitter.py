@@ -14,7 +14,10 @@ class RecordEmitter:
     records as newline-delimited JSON.
 
     Thread-safe: concurrent calls to emit() are serialized via an internal lock,
-    ensuring that records are never interleaved on the wire."""
+    ensuring that records are never interleaved on the wire.
+
+    Ingest need not be up first: entering the context tolerates a failed
+    connect (logged), and emit() connects lazily."""
 
     def __init__(self, socket_path: str) -> None:
         self._socket_path = socket_path
@@ -22,18 +25,25 @@ class RecordEmitter:
         self._lock = threading.Lock()
 
     def connect(self) -> None:
-        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._sock.connect(self._socket_path)
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(self._socket_path)
+        except OSError:
+            sock.close()
+            raise
+        self._sock = sock
 
     def emit(self, record: UnifiedRecord) -> None:
-        """Send one record. If the connection has died (typically because the
-        ingest process restarted), reconnect once and re-send. A second failure
-        propagates to the caller, whose per-cycle error handling logs it and
-        retries on the next poll rather than dying."""
-        if self._sock is None:
-            raise RuntimeError("RecordEmitter.connect() must be called before emit()")
+        """Send one record, connecting first if not connected yet (ingest was
+        down at startup). If the connection has died (typically because the
+        ingest process restarted), reconnect once and re-send. A failure to
+        (re)connect propagates to the caller, whose per-cycle error handling
+        logs it and retries on the next poll rather than dying."""
         payload = (record.model_dump_json() + "\n").encode("utf-8")
         with self._lock:
+            if self._sock is None:
+                self._reconnect_locked().sendall(payload)
+                return
             try:
                 self._sock.sendall(payload)
             except OSError as exc:
@@ -64,7 +74,14 @@ class RecordEmitter:
             self._sock = None
 
     def __enter__(self) -> RecordEmitter:
-        self.connect()
+        try:
+            self.connect()
+        except OSError as exc:
+            logger.warning(
+                "Ingest socket %s not reachable yet (%s); will connect on first emit",
+                self._socket_path,
+                exc,
+            )
         return self
 
     def __exit__(self, *exc_info: object) -> None:
