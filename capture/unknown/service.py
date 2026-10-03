@@ -191,13 +191,17 @@ def run(
                         # Up to ~670 MB: don't hold it while waiting for the next.
                         del snippet
             except Exception as failure:
+                lasted = None if opened_at is None else time.monotonic() - opened_at
+                if lasted is not None and lasted >= _QUICK_DRIFT_SECONDS:
+                    # A long healthy session clears any earlier escalation.
+                    backoff = _INITIAL_BACKOFF_SECONDS
                 # Sustained overflow makes every new session drift within
                 # seconds: count a quick drift rebuild like a failure to open,
                 # so the backoff escalates instead of rebuilding in a loop.
                 escalate = (
                     isinstance(failure, _ClockDrift)
-                    and opened_at is not None
-                    and time.monotonic() - opened_at < _QUICK_DRIFT_SECONDS
+                    and lasted is not None
+                    and lasted < _QUICK_DRIFT_SECONDS
                 )
                 logger.exception(
                     "Unknown-signal capture session failed; retrying in %.1fs", backoff

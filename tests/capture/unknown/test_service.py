@@ -346,6 +346,45 @@ def test_quick_drift_rebuilds_escalate_the_backoff_instead_of_looping(tmp_path, 
     assert sleeps == [1.0, 1.0, 2.0]
 
 
+def test_a_long_healthy_session_clears_an_escalated_backoff(tmp_path, monkeypatch):
+    """Two quick drift rebuilds escalate the backoff. A third session that then
+    runs healthily for two hours before stalling must retry after the initial
+    backoff, not the escalated one."""
+    sessions = []
+
+    @contextmanager
+    def fake_open_session(settings, last_trigger_at, drops):
+        sessions.append(len(sessions) + 1)
+        if len(sessions) == 4:
+            raise KeyboardInterrupt
+
+        def failing():
+            if len(sessions) < 3:
+                raise service._ClockDrift("Sample clock is +3.0s off the wall clock")
+            raise RuntimeError("SDR stream stalled")
+            yield  # pragma: no cover
+
+        yield failing()
+
+    # monotonic() at: open 1, drift 1 (1 s), open 2, drift 2 (1 s),
+    # open 3, stall 3 (2 h later).
+    ticks = iter([0.0, 1.0, 1.0, 2.0, 2.0, 7202.0])
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) > 10:
+            raise AssertionError(f"run() kept retrying: {sleeps}")
+
+    monkeypatch.setattr(service, "_open_session", fake_open_session)
+    monkeypatch.setattr(service, "RecordEmitter", _FakeEmitter)
+    monkeypatch.setattr(service.time, "sleep", fake_sleep)
+    monkeypatch.setattr(service.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(KeyboardInterrupt):
+        service.run(_settings(tmp_path, min_free_bytes=0), "/unused.sock", "s1", "op1")
+    assert sleeps == [1.0, 2.0, 1.0]
+
+
 def test_run_resolves_secures_and_logs_staging_dir_at_startup(tmp_path, monkeypatch, caplog):
     monkeypatch.chdir(tmp_path)
     seen = []
