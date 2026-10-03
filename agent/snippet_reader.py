@@ -41,9 +41,11 @@ MAX_SECONDS = 2.0
 MAX_SAMPLES = 1 << 25
 MIN_SAMPLES = 1024  # one coarse FFT frame (dsp.segmentation.NFFT)
 _MAX_META_BYTES = 1 << 20
-# Regular files only, opened without following a final symlink and without
-# blocking on a FIFO, then read a bounded chunk at a time.
+# Regular files only, reached from a store-root fd one path component at a
+# time without following any symlink, opened without blocking on a FIFO,
+# then read a bounded chunk at a time.
 _OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _READ_CHUNK = 1 << 20
 # I/O errors that may pass (a flaky disk, NFS, memory pressure): the record
 # is retried later. Anything else (missing, permission, corrupt) is final.
@@ -117,12 +119,22 @@ def read_snippet(
     meta = path.with_suffix(META_SUFFIX)
     _contained(meta, root)
     try:
-        metadata = json.loads(_read_meta(meta))
-        if sigmf.DATASET_KEY in metadata[sigmf.SigMFFile.GLOBAL_KEY]:
-            raise SnippetUnreadable(f"{meta} names a non-conforming dataset; step 4 never writes one")
-        # Metadata only: the samples are read below, from a checked regular file.
-        recording = sigmffile.SigMFFile(metadata=metadata, skip_checksum=True)
-        return _samples(recording, path, data, record_sample_rate, record_center_hz)
+        relative = path.relative_to(root)  # lexically: the walk below never resolves anything
+    except ValueError:
+        raise SnippetOutsideStore(f"{path} is not spelled under the snippet store {root}") from None
+    try:
+        # One fd on the root; every open below walks from it, so a component
+        # swapped for a symlink after the checks above is refused, not followed.
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            metadata = json.loads(_read_meta(root_fd, relative.with_suffix(META_SUFFIX)))
+            if sigmf.DATASET_KEY in metadata[sigmf.SigMFFile.GLOBAL_KEY]:
+                raise SnippetUnreadable(f"{meta} names a non-conforming dataset; step 4 never writes one")
+            # Metadata only: the samples are read below, from a checked regular file.
+            recording = sigmffile.SigMFFile(metadata=metadata, skip_checksum=True)
+            return _samples(recording, root_fd, relative, data, record_sample_rate, record_center_hz)
+        finally:
+            os.close(root_fd)
     except SnippetUnreadable:
         raise
     except Exception as exc:  # the files are untrusted: any parse or read failure is "unreadable"
@@ -131,17 +143,28 @@ def read_snippet(
         raise SnippetUnreadable(f"Cannot read {data}: {exc!r}", transient, missing) from exc
 
 
-def _open_regular(path: Path) -> tuple[int, os.stat_result]:
-    """A read-only fd on `path`, which must be a regular file: not a symlink,
-    FIFO, socket or device (a FIFO would block the reader, and the agent,
-    forever). Checked before opening and again on the fd."""
-    if not stat.S_ISREG(os.lstat(path).st_mode):
-        raise SnippetUnreadable(f"{path} is not a regular file")
-    fd = os.open(path, _OPEN_FLAGS)
+def _open_regular(root_fd: int, relative: Path) -> tuple[int, os.stat_result]:
+    """A read-only fd on `relative` under the store root, which must be a
+    regular file: not a symlink, FIFO, socket or device (a FIFO would block
+    the reader, and the agent, forever). Each directory on the way is opened
+    from the last with O_NOFOLLOW, so none can be swapped for a symlink;
+    the file is checked before opening and again on its fd."""
+    dir_fd = os.dup(root_fd)
+    try:
+        for part in relative.parts[:-1]:
+            next_fd = os.open(part, _DIR_FLAGS, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = next_fd
+        name = relative.parts[-1]
+        if not stat.S_ISREG(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode):
+            raise SnippetUnreadable(f"{relative} is not a regular file")
+        fd = os.open(name, _OPEN_FLAGS, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
     try:
         status = os.fstat(fd)
-        if not stat.S_ISREG(status.st_mode):  # swapped since the lstat
-            raise SnippetUnreadable(f"{path} is not a regular file")
+        if not stat.S_ISREG(status.st_mode):  # swapped since the stat
+            raise SnippetUnreadable(f"{relative} is not a regular file")
     except BaseException:
         os.close(fd)
         raise
@@ -162,8 +185,8 @@ def _read_fd(fd: int, nbytes: int) -> np.ndarray:
     return out
 
 
-def _read_meta(meta: Path) -> bytes:
-    fd, status = _open_regular(meta)
+def _read_meta(root_fd: int, meta: Path) -> bytes:
+    fd, status = _open_regular(root_fd, meta)
     try:
         if status.st_size > _MAX_META_BYTES:
             raise SnippetUnreadable(f"{meta} is larger than {_MAX_META_BYTES} bytes")
@@ -174,7 +197,8 @@ def _read_meta(meta: Path) -> bytes:
 
 def _samples(
     recording: sigmffile.SigMFFile,
-    path: Path,
+    root_fd: int,
+    relative: Path,
     data: Path,
     record_sample_rate: float | None,
     record_center_hz: float | None,
@@ -196,7 +220,7 @@ def _samples(
         sample_rate = record_sample_rate
     if record_center_hz is not None:
         center = record_center_hz
-    fd, status = _open_regular(path)
+    fd, status = _open_regular(root_fd, relative)
     try:
         sample_count = status.st_size // np.dtype("<c8").itemsize
         count = min(sample_count, round(MAX_SECONDS * sample_rate), MAX_SAMPLES)

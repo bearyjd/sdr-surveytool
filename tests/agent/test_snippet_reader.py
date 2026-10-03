@@ -253,6 +253,36 @@ def test_a_symlink_inside_the_store_is_unreadable(store):
         read_snippet(str(link), store)
 
 
+@pytest.mark.parametrize("nested", [False, True])
+def test_a_swap_after_the_containment_check_is_never_followed(store, tmp_path, monkeypatch, nested):
+    """Codex M6: the containment check resolved the path, then the open
+    followed it again by name. A file (or a directory on the way) swapped
+    for a symlink in between would have been read from outside the store.
+    The open now walks from a store-root fd with O_NOFOLLOW on every part."""
+    outside = _write(tmp_path / "outside")
+    home = store / "sub" if nested else store
+    inside = write_sigmf_snippet(np.ones(4096, np.complex64), home, FS, FREQ, START)
+    real_contained = agent.snippet_reader._contained
+
+    def check_then_swap(path, root):
+        resolved = real_contained(path, root)
+        if path.suffix == ".sigmf-meta":  # both checks passed; the attacker wins the race here
+            if nested:
+                moved = store / "sub-moved"
+                home.rename(moved)
+                home.symlink_to(outside.parent, target_is_directory=True)
+                for target in (outside, outside.with_suffix(".sigmf-meta")):
+                    target.rename(outside.parent / inside.with_suffix(target.suffix).name)
+            else:
+                inside.unlink()
+                inside.symlink_to(outside)
+        return resolved
+
+    monkeypatch.setattr(agent.snippet_reader, "_contained", check_then_swap)
+    with pytest.raises(SnippetUnreadable):
+        read_snippet(str(inside), store)
+
+
 def test_a_meta_naming_another_dataset_is_never_followed(store, tmp_path):
     """sigmf's fromfile() follows core:dataset (relative to the meta, or
     absolute), so a crafted meta inside the store could make it read any

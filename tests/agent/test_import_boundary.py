@@ -37,7 +37,10 @@ OS_ALLOWED = {"environ", "getenv"}
 # The snippet reader alone may open, check and read files by descriptor
 # (regular files only, no symlink, no blocking on a FIFO).
 SNIPPET_READER = "agent/snippet_reader.py"
-READER_OS = {"lstat", "fstat", "open", "read", "close", "stat_result", "O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"}
+READER_OS = {
+    "stat", "fstat", "open", "read", "close", "dup", "stat_result",
+    "O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC", "O_DIRECTORY",
+}
 BANNED_ATTRIBUTES = {"os", "subprocess"}  # reached through another module: pathlib.os
 
 
