@@ -130,6 +130,17 @@ def call_reservation(user_message: str, max_tokens: int) -> int:
     return -(-characters // _CHARS_PER_TOKEN) + max_tokens
 
 
+# A generous upper estimate of one user message (measured: 1.2-1.7 kB).
+_MESSAGE_ALLOWANCE_CHARS = 6000
+
+
+def minimum_daily_budget(max_tokens: int) -> int:
+    """One call's reservation with a generous message. A smaller daily
+    budget would allow about one call a day (the day's first call always
+    goes ahead), so the CLI refuses it."""
+    return call_reservation("x" * _MESSAGE_ALLOWANCE_CHARS, max_tokens)
+
+
 def backoff_delay(streak: int, base_seconds: float, cap_seconds: float) -> float:
     """base * 2**(streak - 1), capped; the exponent is clamped first."""
     return min(base_seconds * 2.0 ** min(streak - 1, _MAX_BACKOFF_EXPONENT), cap_seconds)
@@ -606,7 +617,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "roll-off can inflate an interior region's bandwidth unnoticed. Enable only once "
         "recorded bladeRF captures confirm a steep enough roll-off (agent/README.md).",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    floor = minimum_daily_budget(args.max_tokens)
+    if args.daily_token_budget < floor:
+        parser.error(
+            f"--daily-token-budget {args.daily_token_budget} is below one call's reservation ({floor} tokens: "
+            "the estimated input plus --max-tokens), which would allow about one call a day"
+        )
+    return args
 
 
 def install_stop_signal() -> threading.Event:

@@ -30,6 +30,7 @@ from agent.service import (
     install_stop_signal,
     main,
     make_client,
+    minimum_daily_budget,
     run,
     serve,
     serve_and_close,
@@ -489,11 +490,25 @@ def test_the_cli_refuses_out_of_range_numbers(tmp_path, capsys, flag, value):
 
 
 def test_the_cli_accepts_the_edges_of_each_range(tmp_path):
+    floor = minimum_daily_budget(256)
     args = _parse_args(
-        ["--snippet-store-dir", str(tmp_path), "--poll-seconds", "0.5", "--max-tokens", "256", "--daily-token-budget", "1"]
+        ["--snippet-store-dir", str(tmp_path), "--poll-seconds", "0.5", "--max-tokens", "256",
+         "--daily-token-budget", str(floor)]
     )
-    assert (args.poll_seconds, args.max_tokens, args.daily_token_budget) == (0.5, 256, 1)
+    assert (args.poll_seconds, args.max_tokens, args.daily_token_budget) == (0.5, 256, floor)
     assert _parse_args(["--snippet-store-dir", str(tmp_path), "--max-tokens", "8192"]).max_tokens == 8192
+
+
+def test_a_budget_below_one_calls_reservation_is_refused(tmp_path, capsys):
+    """A budget smaller than one call's reservation (estimated input plus
+    --max-tokens) would let the agent make about one call a day."""
+    floor = minimum_daily_budget(1024)
+    assert floor > 1024
+    with pytest.raises(SystemExit) as excinfo:
+        _parse_args(["--snippet-store-dir", str(tmp_path), "--daily-token-budget", str(floor - 1)])
+    assert excinfo.value.code == 2
+    assert f"below one call's reservation ({floor} tokens" in capsys.readouterr().err
+    assert _parse_args(["--snippet-store-dir", str(tmp_path), "--daily-token-budget", str(floor)]).daily_token_budget == floor
 
 
 def test_self_floor_grounding_is_off_unless_the_flag_is_given(tmp_path):

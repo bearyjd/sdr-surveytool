@@ -84,6 +84,8 @@ schema and message, at 3 characters per token, an overestimate) plus `--max-toke
 reservation is reconciled to the billed usage when the call returns; a call that fails or
 times out keeps its reservation, since it may still have been billed. A call whose
 reservation does not fit waits for UTC midnight; the day's first call always goes ahead.
+The CLI refuses a budget smaller than one reservation (about 3,000 tokens plus
+`--max-tokens`), which would allow about one call a day.
 The budget lives in the process: a restart starts it over, so a crash loop could spend it
 again and again. That is why halts exit with status 3 and must never be auto-restarted
 (below), and why other restarts should be slow (`RestartSec`).
