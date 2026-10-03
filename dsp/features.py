@@ -60,6 +60,7 @@ class RegionFeatures:
     snr_db: float
     analysis_rate_hz: float  # decimated sample rate the features were measured at
     bandwidth_reliable: bool  # the region's own judgment (dsp.segmentation)
+    fine_resolution_hz: float  # one fine-PSD bin: obw_hz is a multiple of it
 
 
 def channelize(
@@ -157,6 +158,7 @@ def region_features(iq: np.ndarray, segmentation: Segmentation, region: Spectral
         snr_db=region.snr_db,
         analysis_rate_hz=rate,
         bandwidth_reliable=region.bandwidth_reliable,
+        fine_resolution_hz=rate / fine_nfft,
     )
 
 

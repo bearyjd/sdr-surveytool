@@ -41,6 +41,11 @@ from dsp.segmentation import (
 NO_QUIET_NOISE_REFERENCE = "no_quiet_noise_reference"
 EDGE_REGION_UNRELIABLE = "edge_region_unreliable"
 LOW_SNR = "low_snr"
+OBW_UNRESOLVED = "obw_unresolved"
+# A bare carrier reads 3-5 fine bins (the Hann main lobe). A width within 4
+# bins only bounds the true width from above, so it cannot meet a band's
+# expected minimum: at 30-56 MS/s a CW read 2.8-7.3 kHz and grounded FRS.
+_UNRESOLVED_FINE_BINS = 4
 # Below this region SNR the OBW and center are too noisy to ground a band:
 # a 125 kHz burst 9 dB above the noise read 9.0 dB and grounded in 902-928 MHz.
 _MIN_GROUNDING_SNR_DB = 10.0
@@ -141,6 +146,8 @@ def _reduced_confidence(
         reasons.append("bandwidth_unreliable")
     if primary is not None and primary.snr_db < _MIN_GROUNDING_SNR_DB:
         reasons.append(LOW_SNR)
+    if primary is not None and primary.obw_hz <= _UNRESOLVED_FINE_BINS * primary.fine_resolution_hz:
+        reasons.append(OBW_UNRESOLVED)
     return tuple(reasons)
 
 

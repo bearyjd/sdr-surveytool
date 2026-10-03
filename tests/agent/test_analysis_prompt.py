@@ -134,6 +134,38 @@ def test_a_low_snr_primary_grounds_nothing(in_band_snr_db, grounded):
     assert analysis.grounded_band_ids == ({"ism_902_928"} if grounded else frozenset())
 
 
+@pytest.mark.parametrize("sample_rate", [30.72e6, 40e6, 56e6])
+def test_a_bare_carrier_never_grounds_frs(sample_rate):
+    """At high sample rates a fine bin is kilohertz wide, and a bare CW
+    reads 3 bins -- 2.8 to 7.3 kHz, inside FRS's 2-20 kHz. A width within 4
+    fine bins only bounds the true width from above, so it cannot meet any
+    expected minimum: obw_unresolved, nothing grounds."""
+    n, pre = 1 << 21, 1 << 18
+    rng = np.random.default_rng(3)
+    carrier = synthetic.tone(n, sample_rate, 100e3, 1e-4)
+    carrier[:pre] = 0
+    snippet = Snippet(
+        iq=carrier + synthetic.noise(rng, n, 1e-5), sample_rate=sample_rate, center_freq_hz=462.5e6,
+        truncated=False, pre_trigger_samples=pre,
+    )
+    analysis = analyse_snippet(snippet, BANDS, UnavailableClassifier())
+    assert analysis.primary.obw_hz <= 4 * analysis.primary.fine_resolution_hz
+    assert analysis.reduced_confidence == ("obw_unresolved",)
+    assert [(m.entry.id, m.grounded) for m in analysis.band_matches] == [("frs_gmrs_462", False)]
+
+
+def test_a_resolved_narrowband_signal_still_grounds_frs():
+    rng = np.random.default_rng(4)
+    burst = synthetic.band_limited(rng, N, FS, 12.5e3, 100e3, 1e-4)
+    burst[:PRE] = 0
+    snippet = Snippet(
+        iq=burst + synthetic.noise(rng, N, 1e-5), sample_rate=FS, center_freq_hz=462.5e6,
+        truncated=False, pre_trigger_samples=PRE,
+    )
+    analysis = analyse_snippet(snippet, BANDS, UnavailableClassifier())
+    assert analysis.reduced_confidence == () and analysis.grounded_band_ids == {"frs_gmrs_462"}
+
+
 def test_non_finite_samples_reduce_confidence():
     analysis = analyse_snippet(_snippet(_two_emitters(), non_finite=3), BANDS, UnavailableClassifier())
     assert analysis.reduced_confidence == ("non_finite_samples",)

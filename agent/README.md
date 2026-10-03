@@ -10,8 +10,9 @@ a band-table entry the signal is grounded in; everything else goes to `needs_rev
 The noise reference is the snippet's pre-trigger, below the trigger threshold step 4
 records in the SigMF. Any `reduced_confidence` reason keeps every band match ungrounded
 and caps routing at `needs_review`: NaN or inf samples, an unreliable bandwidth, a
-primary less than 10 dB above the noise (`low_snr`), or no quiet pre-trigger reference
-at all (`no_quiet_noise_reference`). The last covers every
+primary less than 10 dB above the noise (`low_snr`), a width within 4 fine bins of the
+resolution (`obw_unresolved`: a bare carrier), or no quiet pre-trigger reference at all
+(`no_quiet_noise_reference`). The last covers every
 always-on emitter, such as an LTE downlink, which fills its own pre-trigger: by default
 those records always go to review.
 
