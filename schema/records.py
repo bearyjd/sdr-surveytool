@@ -2,9 +2,34 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+def without_nul(value: str | None) -> str | None:
+    """`value` with any NUL characters removed: radio-derived strings (an
+    SSID, a BLE device name) may carry them, and a record may not."""
+    return None if value is None else value.replace("\x00", "")
+
+
+def _nul_at(value: Any, path: str) -> str | None:
+    """The path of the first string (or dict key) holding a NUL, or None."""
+    if isinstance(value, str):
+        return path if "\x00" in value else None
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str) and "\x00" in key:
+                return path
+            found = _nul_at(item, f"{path}.{key}")
+            if found is not None:
+                return found
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            found = _nul_at(item, f"{path}[{index}]")
+            if found is not None:
+                return found
+    return None
 
 
 class Modality(str, Enum):
@@ -69,3 +94,13 @@ class UnifiedRecord(BaseModel):
     identifier: Identifier
     signal: Signal
     metadata: Metadata = Field(default_factory=Metadata)
+
+    @model_validator(mode="after")
+    def _no_nul_characters(self) -> UnifiedRecord:
+        """PostgreSQL text and jsonb cannot hold U+0000: one stored row with it
+        fails every read of the agent's view and every jsonb cast."""
+        for name, value in self.model_dump().items():
+            found = _nul_at(value, name)
+            if found is not None:
+                raise ValueError(f"{found} holds a NUL character, which PostgreSQL cannot store")
+        return self

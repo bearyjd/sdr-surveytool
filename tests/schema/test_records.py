@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -57,3 +58,21 @@ def test_needs_review_status_round_trips_through_json():
         "auto_classified",
         "needs_review",
     ]
+
+
+@pytest.mark.parametrize(
+    "overrides, where",
+    [
+        ({"survey_id": "s\x001"}, "survey_id"),
+        ({"identifier": Identifier(ssid="Hid\x00den")}, "identifier.ssid"),
+        ({"metadata": Metadata(reasoning="a\x00b")}, "metadata.reasoning"),
+        ({"metadata": Metadata(quality_flags={"snippet_dropped": "low\x00disk"})}, "metadata.quality_flags.snippet_dropped"),
+        ({"metadata": Metadata(quality_flags={"bad\x00key": True})}, "metadata.quality_flags"),
+        ({"metadata": Metadata(quality_flags={"list": ["ok", "n\x00"]})}, "metadata.quality_flags.list[1]"),
+    ],
+)
+def test_a_nul_character_anywhere_is_rejected(overrides, where):
+    """PostgreSQL text and jsonb cannot hold U+0000: one stored row with it
+    would fail every read of the agent's view and every jsonb cast."""
+    with pytest.raises(ValidationError, match=rf"{re.escape(where)} holds a NUL character"):
+        _make_record(**overrides)
