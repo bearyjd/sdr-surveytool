@@ -3,7 +3,14 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from schema.records import Identifier, Modality, Signal, UnifiedRecord
+from schema.records import (
+    ClassificationStatus,
+    Identifier,
+    Metadata,
+    Modality,
+    Signal,
+    UnifiedRecord,
+)
 
 
 def _make_record(**overrides):
@@ -37,3 +44,16 @@ def test_metadata_defaults_to_zero_sample_count():
 def test_signal_requires_rssi():
     with pytest.raises(ValidationError):
         Signal()
+
+
+def test_needs_review_status_round_trips_through_json():
+    """Part 4 routes low-confidence or ungrounded results to needs_review."""
+    record = _make_record(metadata=Metadata(classification_status="needs_review", tag=None, confidence=0.0))
+    restored = UnifiedRecord.model_validate_json(record.model_dump_json())
+    assert restored.metadata.classification_status is ClassificationStatus.NEEDS_REVIEW
+    assert [status.value for status in ClassificationStatus] == [
+        "unclassified",
+        "manually_tagged",
+        "auto_classified",
+        "needs_review",
+    ]

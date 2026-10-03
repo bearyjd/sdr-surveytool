@@ -18,6 +18,9 @@ class ClassificationStatus(str, Enum):
     UNCLASSIFIED = "unclassified"
     MANUALLY_TAGGED = "manually_tagged"
     AUTO_CLASSIFIED = "auto_classified"
+    # Part 4 agent: a judgment that a human must resolve (to manually_tagged).
+    # Terminal for the agent, and never assigned for systemic faults.
+    NEEDS_REVIEW = "needs_review"
 
 
 class Identifier(BaseModel):
