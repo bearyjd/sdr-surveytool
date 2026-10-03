@@ -74,6 +74,33 @@ def test_adopt_accepts_a_snippet_exactly_at_the_size_bound(dirs):
     assert LocalSnippetStore(staging, root).max_snippet_bytes == DEFAULT_MAX_SNIPPET_BYTES
 
 
+def test_discard_removes_an_adopted_pair(dirs):
+    """Ingest's compensation when the record referencing a just-adopted pair
+    can't be persisted."""
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    data, _ = _stage(staging)
+    final = store.adopt(str(data))
+    store.discard(final)
+    assert list(root.iterdir()) == []
+    store.discard(final)  # already gone: nothing to do, no error
+
+
+@pytest.mark.parametrize("where", ["staging", "dot_dot", "bad_name"])
+def test_discard_never_touches_anything_outside_the_store(dirs, where):
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    data, meta = _stage(staging)
+    target = {
+        "staging": data,
+        "dot_dot": root / ".." / "staging" / data.name,
+        "bad_name": root / "snip.sigmf-data",
+    }[where]
+    with pytest.raises(ValueError):
+        store.discard(str(target))
+    assert data.exists() and meta.exists()
+
+
 def test_adopt_rejects_a_path_outside_staging(dirs, tmp_path):
     """iq_snippet_path arrives over the ingest socket, so it is untrusted:
     ingest must never move an arbitrary file into the store."""

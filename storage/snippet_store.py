@@ -68,6 +68,11 @@ class SnippetStore(Protocol):
         path. Raises SnippetRejected for a pair that must not be adopted."""
         ...
 
+    def discard(self, stored_data_path: str) -> None:
+        """Remove a pair adopt() returned, e.g. when its record could not be
+        persisted. Missing files are not an error."""
+        ...
+
 
 class LocalSnippetStore:
     """Local flat-file IQ snippet storage (design doc section 7), swappable for
@@ -140,6 +145,19 @@ class LocalSnippetStore:
             raise SnippetRejected(
                 "os_error", f"Could not adopt snippet {data.name!r}: {type(error).__name__} ({code})"
             ) from error
+
+    def discard(self, stored_data_path: str) -> None:
+        """Remove a pair this store adopted (ingest's compensation when the
+        record referencing it can't be persisted). Only ever touches a
+        capture-named pair directly inside the store root."""
+        data = Path(os.path.abspath(stored_data_path))
+        if data.parent != self._root_dir or not STAGED_DATA_NAME.fullmatch(data.name):
+            raise ValueError(
+                f"Refusing to discard {stored_data_path!r}: not a snippet in the store "
+                f"{str(self._root_dir)!r}"
+            )
+        data.unlink(missing_ok=True)
+        data.with_suffix(_META_SUFFIX).unlink(missing_ok=True)
 
     def _link_pair(self, data: Path) -> str:
         meta = data.with_suffix(_META_SUFFIX)

@@ -455,3 +455,46 @@ def test_process_one_flags_snippet_record_when_no_store_configured(tmp_path):
             assert session.query(SurveyRecord).count() == 1
     finally:
         server.stop()
+
+
+class _FailingAfterStartup:
+    """A session factory whose database goes down after IngestService has
+    seeded its grid counts."""
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self.failing = False
+
+    def __call__(self):
+        if self.failing:
+            raise RuntimeError("database down")
+        return self._real()
+
+
+def test_persist_failure_discards_the_snippet_it_just_adopted(tmp_path, caplog):
+    """During a database outage every record fails to persist; the snippet
+    adopted for it must not be left behind, unreferenced, in the store."""
+    staging, store_root = tmp_path / "staging", tmp_path / "snippets"
+    staged = _stage_snippet(staging)
+    socket_path = str(tmp_path / "ingest.sock")
+    server = QueueServer(socket_path)
+    server.start()
+    engine = make_engine("sqlite:///:memory:")
+    init_db(engine)
+    session_factory = _FailingAfterStartup(make_session_factory(engine))
+    service = IngestService(
+        server,
+        session_factory,
+        StaticGpsFixProvider(GpsFix(lat=47.6062, lon=-122.3321, altitude=15.0, fix_quality=4)),
+        snippet_store=LocalSnippetStore(staging, store_root),
+    )
+    session_factory.failing = True
+    try:
+        with RecordEmitter(socket_path) as emitter:
+            emitter.emit(_snippet_record(staged))
+        with caplog.at_level("WARNING"), pytest.raises(RuntimeError, match="database down"):
+            service.process_one(timeout=2)
+    finally:
+        server.stop()
+    assert list(store_root.iterdir()) == []
+    assert repr(str(store_root.resolve() / Path(staged).name)) in caplog.text

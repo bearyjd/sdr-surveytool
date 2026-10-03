@@ -104,9 +104,11 @@ class IngestService:
         record = self._queue_server.get(timeout=timeout)
         # Adopt before the grid-density bump: an I/O error raises here with
         # nothing to roll back (a rejected snippet doesn't raise; the record is
-        # kept without it). If save_record later fails, the adopted pair stays
-        # in the store unreferenced (an orphan, never a dangling database path).
+        # kept without it). If save_record later fails, the adopted pair is
+        # discarded again rather than left unreferenced in the store.
+        staged = record.metadata.iq_snippet_path
         record = self._adopt_snippet_if_present(record)
+        adopted = record.metadata.iq_snippet_path if staged is not None else None
         record = self._attach_gps_if_missing(record)
         record, grid_key = self._attach_grid_density(record)
         try:
@@ -119,6 +121,8 @@ class IngestService:
             # of dropping the record silently.
             with self._grid_lock:
                 self._grid_counts[grid_key] -= 1
+            if adopted is not None:
+                self._discard_adopted(adopted)
             logger.error(
                 "Failed to persist record for grid cell %s; record dropped "
                 "and grid count reverted",
@@ -145,6 +149,17 @@ class IngestService:
             return self._without_snippet(record, rejection.reason, str(rejection))
         updated_metadata = record.metadata.model_copy(update={"iq_snippet_path": final})
         return record.model_copy(update={"metadata": updated_metadata})
+
+    def _discard_adopted(self, stored_path: str) -> None:
+        """The record referencing this pair was never persisted: remove the
+        pair instead of leaving it orphaned in the store."""
+        assert self._snippet_store is not None  # only adopted when a store exists
+        try:
+            self._snippet_store.discard(stored_path)
+        except Exception:
+            logger.error("Could not discard orphaned snippet %r", stored_path, exc_info=True)
+        else:
+            logger.warning("Discarded snippet %r: its record could not be persisted", stored_path)
 
     def _without_snippet(self, record: UnifiedRecord, reason: str, detail: str) -> UnifiedRecord:
         """A rejected snippet loses only the snippet: the detection is still
