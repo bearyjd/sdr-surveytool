@@ -382,6 +382,16 @@ disagree with this list, this list wins.
     `dsp.features.channelize_region` (`95734b5`). The analysis channelizes it once for
     both (`baseband_features`), keeping a 1 s, 20 MS/s snippet at 0.82 s of analysis
     and 386 MB peak RSS.
+- **Verification fixes** (on top of `ea5b726`).
+  - A record the model has answered (a verdict or a held invalid answer) leaves the
+    deferred set and never reaches the LLM again that run (`7b9938c`). A seeded property
+    test drives mixed failures through 40 batches.
+  - Startup reads the newest pending snippets until one reads, and halts if none does. At
+    runtime a missing snippet is held, unmarked, until another snippet reads; then it is
+    judged `snippet_missing`. `max_consecutive_missing_snippets = 5` in a row with none read
+    in between halt: a stale copy of the store (`f1b983b`).
+  - Each deferred record waits 2, 4, 8, ... s (capped at 300 s) before its next attempt. A
+    batch with nothing due returns 0, so the loop sleeps its poll (`9d44ef5`).
 - **Import guard** (`fc053be`). It flags `.os` and `.subprocess` attribute chains, and its
   docstring now lists what it does not see. `errno` and `threading` joined the agent's
   stdlib allowlist.
