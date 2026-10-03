@@ -12,6 +12,7 @@ import pytest
 
 from capture.unknown import service
 from capture.unknown.energy_trigger import TriggerEvent
+from capture.unknown.sample_clock import SampleClock
 from capture.unknown.service import CaptureSettings, process_snippet
 from capture.unknown.snippet_assembler import CapturedSnippet
 from schema.records import ClassificationStatus, Modality
@@ -99,12 +100,25 @@ class _FakeTap:
         self.error: Exception | None = None
 
 
+def _drain(snippets, tap, monotonic, wall_clock=lambda: ANCHOR):
+    return service._drain(
+        snippets,
+        tap,
+        clock=SampleClock(anchor=ANCHOR, sample_rate=FS),
+        stall_seconds=5.0,
+        max_drift_seconds=2.0,
+        poll_seconds=0.0,
+        monotonic=monotonic,
+        wall_clock=wall_clock,
+    )
+
+
 def test_drain_yields_snippets_then_raises_when_stream_stalls():
     snippets: queue.Queue = queue.Queue()
     snippets.put("snippet-1")
     tap = _FakeTap()
     times = iter([0.0, 1.0, 3.0, 9.0])
-    drained = service._drain(snippets, tap, stall_seconds=5.0, poll_seconds=0.0, monotonic=lambda: next(times))
+    drained = _drain(snippets, tap, monotonic=lambda: next(times))
 
     assert next(drained) == "snippet-1"
     tap.samples_seen = 4096  # progress at t=1.0
@@ -115,7 +129,7 @@ def test_drain_yields_snippets_then_raises_when_stream_stalls():
 def test_drain_reraises_a_tap_failure():
     tap = _FakeTap()
     tap.error = ValueError("assembler bug")
-    drained = service._drain(queue.Queue(), tap, stall_seconds=5.0, poll_seconds=0.0, monotonic=lambda: 0.0)
+    drained = _drain(queue.Queue(), tap, monotonic=lambda: 0.0)
     with pytest.raises(RuntimeError, match="tap failed") as excinfo:
         next(drained)
     assert isinstance(excinfo.value.__cause__, ValueError)
@@ -139,7 +153,7 @@ def test_drain_delivers_completed_snippets_before_reraising_a_tap_failure():
     snippets.put("snippet-2")
     tap = _FakeTap()
     tap.error = ValueError("assembler bug")
-    drained = service._drain(snippets, tap, stall_seconds=5.0, poll_seconds=0.0, monotonic=lambda: 0.0)
+    drained = _drain(snippets, tap, monotonic=lambda: 0.0)
     assert [next(drained), next(drained)] == ["snippet-1", "snippet-2"]
     with pytest.raises(RuntimeError, match="tap failed"):
         next(drained)
@@ -150,10 +164,21 @@ def test_drain_delivers_completed_snippets_before_reporting_a_stall():
     for name in ("snippet-1", "snippet-2", "snippet-3"):
         snippets.put(name)
     times = iter([0.0, 9.0, 9.0, 9.0, 9.0])
-    drained = service._drain(
-        snippets, _FakeTap(), stall_seconds=5.0, poll_seconds=0.0, monotonic=lambda: next(times)
-    )
+    drained = _drain(snippets, _FakeTap(), monotonic=lambda: next(times))
     assert list(_take_until_error(drained)) == ["snippet-1", "snippet-2", "snippet-3"]
+
+
+@pytest.mark.parametrize("wall_offset_s", [3.5, -1.5])
+def test_drain_ends_the_session_when_sample_time_drifts_from_wall_time(wall_offset_s):
+    """Dropped samples (SDR overflow) put sample time behind wall time, and an
+    NTP/GPS clock step jumps wall time either way. Past the threshold the
+    session ends, and the rebuild re-anchors the sample clock."""
+    tap = _FakeTap()
+    tap.samples_seen = 100_000  # sample time = anchor + 1.0 s
+    walls = iter([ANCHOR + timedelta(seconds=1.5), ANCHOR + timedelta(seconds=wall_offset_s)])
+    drained = _drain(queue.Queue(), tap, monotonic=lambda: 0.0, wall_clock=lambda: next(walls))
+    with pytest.raises(RuntimeError, match="off the wall clock"):
+        next(drained)
 
 
 def _take_until_error(drained):
@@ -295,6 +320,7 @@ def test_cli_requires_noise_floor_and_builds_settings():
     assert settings.threshold_dbfs == -50.0
     assert settings.staging_dir == Path("data/snippet-staging")
     assert settings.min_free_bytes == 2 * 1024**3
+    assert settings.max_clock_drift_seconds == 2.0
     assert args.socket_path == "/tmp/sdr-ingest.sock"
 
 

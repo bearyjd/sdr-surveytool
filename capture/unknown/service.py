@@ -56,6 +56,10 @@ class CaptureSettings:
     # No new samples for this long means the SDR stream is dead (unplugged,
     # wedged driver, or its source returned WORK_DONE): rebuild the session.
     stall_seconds: float = 5.0
+    # Sample time is anchor + index / rate. Dropped samples (SDR overflow)
+    # make it lag wall time, and NTP/GPS steps move wall time; past this
+    # divergence the session is rebuilt, which re-anchors it.
+    max_clock_drift_seconds: float = 2.0
 
     def __post_init__(self) -> None:
         if self.sample_rate <= 0 or self.center_freq_hz <= 0:
@@ -74,8 +78,8 @@ class CaptureSettings:
             )
         if self.min_free_bytes < 0:
             raise ValueError("min_free_bytes must be >= 0")
-        if self.stall_seconds <= 0:
-            raise ValueError("stall_seconds must be > 0")
+        if self.stall_seconds <= 0 or self.max_clock_drift_seconds <= 0:
+            raise ValueError("stall_seconds and max_clock_drift_seconds must be > 0")
         if self.samples(self.averaging_seconds) < 1 or self.samples(self.post_trigger_seconds) < 1:
             raise ValueError(
                 "averaging_seconds and post_trigger_seconds must each span at least one sample"
@@ -270,26 +274,41 @@ def _open_session(
     try:
         # Inside the try: a start() that fails part-way still gets torn down.
         flowgraph.top_block.start()
-        yield _drain(snippets, flowgraph.tap, stall_seconds=settings.stall_seconds)
+        yield _drain(
+            snippets,
+            flowgraph.tap,
+            clock=clock,
+            stall_seconds=settings.stall_seconds,
+            max_drift_seconds=settings.max_clock_drift_seconds,
+        )
     finally:
         flowgraph.top_block.stop()
         flowgraph.top_block.wait()
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _drain(
     snippets: queue.Queue,
     tap,
+    clock: SampleClock,
     stall_seconds: float,
+    max_drift_seconds: float,
     poll_seconds: float = _POLL_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
+    wall_clock: Callable[[], datetime] = _utc_now,
 ) -> Iterator[CapturedSnippet]:
     """Yield snippets as the flowgraph completes them; raise once it dies.
 
     `tap` is the flowgraph's SnippetTap (anything with samples_seen and
     error). A GNU Radio flowgraph fails silently from Python's point of
-    view, so health is polled: a tap error is re-raised, and samples_seen
-    frozen for stall_seconds means the SDR stopped streaming. The monotonic
-    clock here is health-checking only; no record timing depends on it.
+    view, so health is polled: a tap error is re-raised, samples_seen
+    frozen for stall_seconds means the SDR stopped streaming, and sample time
+    (clock.time_at(samples_seen)) more than max_drift_seconds from wall time
+    means samples were dropped or the wall clock stepped. The monotonic and
+    wall clocks here are health checks only; record timing never reads them.
     Snippets the flowgraph completed before it died are still delivered
     before the failure is raised.
     """
@@ -311,6 +330,13 @@ def _drain(
                 last_seen, last_progress = tap.samples_seen, now
             elif now - last_progress > stall_seconds:
                 failure = f"SDR stream stalled: no samples for {stall_seconds:g}s"
+            if failure is None:
+                drift = (wall_clock() - clock.time_at(tap.samples_seen)).total_seconds()
+                if abs(drift) > max_drift_seconds:
+                    failure = (
+                        f"Sample clock is {drift:+.1f}s off the wall clock (dropped "
+                        "samples or a clock step); rebuilding to re-anchor"
+                    )
         if failure is not None:
             yield from _take_all(snippets)
             raise RuntimeError(failure) from tap.error
@@ -381,6 +407,13 @@ def _parse_args(argv: list[str] | None = None) -> tuple[CaptureSettings, argpars
         "fall below this many free bytes (staging, store and database share it).",
     )
     parser.add_argument(
+        "--max-clock-drift-s",
+        type=float,
+        default=2.0,
+        help="Rebuild the radio session (re-anchoring sample time) when sample "
+        "time and wall time diverge by more than this.",
+    )
+    parser.add_argument(
         "--staging-dir",
         default="data/snippet-staging",
         help="Must match ingest's --snippet-staging-dir.",
@@ -401,6 +434,7 @@ def _parse_args(argv: list[str] | None = None) -> tuple[CaptureSettings, argpars
             device=args.device,
             device_args=args.device_args,
             min_free_bytes=args.min_free_bytes,
+            max_clock_drift_seconds=args.max_clock_drift_s,
         )
     except ValueError as exc:
         parser.error(str(exc))

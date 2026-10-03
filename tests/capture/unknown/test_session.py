@@ -24,6 +24,9 @@ def _settings(tmp_path, **overrides) -> CaptureSettings:
             "noise_floor_dbfs": -40.0,
             "staging_dir": tmp_path,
             "stall_seconds": 0.2,
+            # The vector source replays 2 s of samples in milliseconds, so
+            # sample time races ahead of wall time; that's not drift here.
+            "max_clock_drift_seconds": 60.0,
             **overrides,
         }
     )
