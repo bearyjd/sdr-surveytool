@@ -10,6 +10,7 @@ The only module in agent/ allowed to import sqlalchemy or psycopg.
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections.abc import Sequence
@@ -44,13 +45,15 @@ _BOUNDS = {
 }
 _MAX_PATH_CHARS = 4096
 
+logger = logging.getLogger(__name__)
+
 # The self-check is an allowlist, run against the LOGIN (session_user): a
 # login whose role setting switches it to another role at connect would
 # otherwise be judged by that role, and could RESET ROLE back. The session
 # must run as the login itself, with no role settings. The login may be a
 # member of nothing but itself and the agent role; neither may carry a
 # dangerous attribute, any privilege on survey_records, the right to create
-# objects anywhere, TEMPORARY on any database, or a large-object writer;
+# objects anywhere, TEMPORARY on the survey database, or a large-object writer;
 # and the only SECURITY DEFINER function it may execute (outside
 # extensions) is classify_unknown. Its definer (the owner role) must belong
 # to no role and hold nothing on survey_records beyond SELECT and UPDATE
@@ -104,10 +107,10 @@ _PROBLEMS = text(
      WHERE r.rolname IN (session_user, :agent_role)
        AND pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'CREATE')
     UNION ALL
-    SELECT 3, r.rolname || ' has TEMPORARY on database ' || d.datname
-      FROM pg_catalog.pg_roles AS r, pg_catalog.pg_database AS d
+    SELECT 3, r.rolname || ' has TEMPORARY on database ' || pg_catalog.current_database()
+      FROM pg_catalog.pg_roles AS r
      WHERE r.rolname IN (session_user, :agent_role)
-       AND pg_catalog.has_database_privilege(r.oid, d.oid, 'TEMPORARY')
+       AND pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'TEMPORARY')
     UNION ALL
     SELECT 4, 'can execute large-object writer ' || w.fn::pg_catalog.regprocedure::text
       FROM (VALUES (pg_catalog.to_regprocedure('pg_catalog.lo_create(oid)')),
@@ -190,6 +193,17 @@ _PROBLEMS = text(
        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend AS d
                         WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
                           AND d.objid = p.oid AND d.deptype = 'e')
+    """
+)
+# Hardening the installer cannot do (it touches only the survey database):
+# PUBLIC keeps TEMPORARY on postgres and the templates on a default cluster.
+_OTHER_TEMPORARY = text(
+    """
+    SELECT d.datname
+      FROM pg_catalog.pg_database AS d
+     WHERE d.datname <> pg_catalog.current_database()
+       AND pg_catalog.has_database_privilege(session_user, d.oid, 'TEMPORARY')
+     ORDER BY d.datname
     """
 )
 # The boundary's two entry points must be usable by the login without SET ROLE.
@@ -409,13 +423,19 @@ def verify_boundary(engine: Engine, agent_role: str) -> None:
     with engine.connect() as conn:
         problems = [problem for _, problem in sorted(conn.execute(_PROBLEMS, params).tuples().all())]
         access = conn.execute(_BOUNDARY_ACCESS, params).first()
+        other_temporary = conn.execute(_OTHER_TEMPORARY).scalars().all()
     if problems:
         raise BoundaryViolation(
             "Refusing to run: the database role is not confined to the agent boundary: "
             + "; ".join(problems[:10])
             + f". Connect as a login role that is only IN ROLE {agent_role}, with no role "
-            "settings and no TEMPORARY on any database (agent/README.md), and re-run "
-            "sdr-agent-boundary."
+            "settings (agent/README.md), and re-run sdr-agent-boundary."
+        )
+    if other_temporary:
+        logger.warning(
+            "The agent login has TEMPORARY on other databases (%s). Recommended hardening "
+            "(agent/README.md): REVOKE TEMPORARY, CONNECT ON DATABASE <each> FROM PUBLIC.",
+            ", ".join(other_temporary),
         )
     if access is None or not all(access):
         raise BoundaryViolation(

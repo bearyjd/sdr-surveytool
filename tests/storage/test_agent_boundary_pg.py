@@ -90,17 +90,8 @@ def boundary():
     admin_url = root_url.set(database=database)
     root = _engine(root_url, isolation_level="AUTOCOMMIT")
     with root.connect() as conn:
-        # What the operator documentation asks for: no TEMPORARY for PUBLIC on
-        # any other database (the self-check refuses a login that has it).
-        # Throwaway cluster only; restored afterwards.
-        temp_for_public = conn.execute(
-            text(
-                "SELECT datname FROM pg_catalog.pg_database"
-                " WHERE has_database_privilege('public', oid, 'TEMPORARY')"
-            )
-        ).scalars().all()
-        for other in temp_for_public:
-            conn.exec_driver_sql(f'REVOKE TEMPORARY ON DATABASE "{other}" FROM PUBLIC')
+        # A default cluster: PUBLIC keeps TEMPORARY on postgres and the
+        # templates, which the self-check only warns about.
         conn.exec_driver_sql(f"CREATE DATABASE {database}")
     try:
         admin = _engine(admin_url)
@@ -125,8 +116,6 @@ def boundary():
     finally:
         with root.connect() as conn:
             conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {database} WITH (FORCE)")
-            for other in temp_for_public:
-                conn.exec_driver_sql(f'GRANT TEMPORARY ON DATABASE "{other}" TO PUBLIC')
             leftovers = conn.execute(
                 text("SELECT rolname FROM pg_catalog.pg_roles WHERE rolname LIKE :pattern"),
                 {"pattern": f"sdr\\_%\\_{suffix}"},
@@ -749,11 +738,6 @@ BYPASSES = {
         "member of sdr_helper_{suffix}",
     ),
     "temporary": (["GRANT TEMPORARY ON DATABASE {database} TO {login}"], [], "{login} has TEMPORARY on database {database}"),
-    "temporary on another database": (
-        ["GRANT TEMPORARY ON DATABASE postgres TO {login}"],
-        ["REVOKE TEMPORARY ON DATABASE postgres FROM {login}"],
-        "{login} has TEMPORARY on database postgres",
-    ),
     "create on the database": (["GRANT CREATE ON DATABASE {database} TO {login}"], [], "{login} has CREATE on database {database}"),
     # The reviewer's bypass: a superuser login whose role setting switches it
     # to the agent role at connect, so current_user looks confined.
@@ -828,6 +812,19 @@ def test_self_check_refuses_a_login_that_is_not_confined(boundary, case):
             conn.exec_driver_sql(f"DROP ROLE IF EXISTS {login}")
         admin.dispose()
         root.dispose()
+
+
+def test_a_default_cluster_starts_the_agent_with_a_warning(boundary, caplog):
+    """PUBLIC keeps TEMPORARY on postgres and the template databases on a
+    default install. The installer only touches the survey database, so the
+    self-check fails only there and warns about the others."""
+    assert _admin_scalar(
+        boundary, "SELECT has_database_privilege('public', 'postgres', 'TEMPORARY')"
+    ), "the throwaway cluster is expected to be a default install"
+    with caplog.at_level("WARNING", logger="agent.db_gateway"):
+        connect_gateway(_url(boundary.agent_url), boundary.agent_role).close()
+    assert "TEMPORARY on other databases (postgres" in caplog.text
+    assert "agent/README.md" in caplog.text
 
 
 def test_self_check_rejects_a_login_outside_the_agent_role(boundary):
