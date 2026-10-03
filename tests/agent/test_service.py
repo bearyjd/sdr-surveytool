@@ -354,13 +354,42 @@ def test_a_transient_read_error_is_retried_by_id_up_to_the_attempt_cap(store, mo
 
     monkeypatch.setattr(service, "read_snippet", flaky)
     gateway = FakeGateway([_gone(_with_content(store), 1), _snippet_record(store, 2)])
-    agent = _agent(gateway, ScriptedClient([GOOD]), store)
+    clock = [START]
+    agent = _agent(gateway, ScriptedClient([GOOD]), store, now=lambda: clock[0])
     for _ in range(12):
         agent.run_batch()
+        clock[0] += timedelta(minutes=10)  # past any backoff
     assert [s[0] for s in gateway.submitted] == [2]
     assert sum(path.endswith("gone1.sigmf-data") for path in reads) == 10
     assert gateway.by_id == [[1]] * 9
     assert [after for after, _ in gateway.fetches][:2] == [0, 2]
+
+
+def test_deferred_retries_are_spaced_by_a_capped_backoff(store, monkeypatch):
+    """The reviewer's probe: retries counted as fetched records, so the loop
+    never slept and 10 attempts went by in milliseconds. Each deferred
+    record now waits 2, 4, 8, ... s (capped at 300 s) between attempts, and
+    while only not-yet-due records remain, the run loop sleeps its poll."""
+    attempts: list[datetime] = []
+    clock = [START]
+
+    def eio(path, *args):
+        attempts.append(clock[0])
+        raise SnippetUnreadable(f"Cannot read {path}: OSError(5, 'I/O error')", transient=True)
+
+    monkeypatch.setattr(service, "read_snippet", eio)
+    gateway = FakeGateway([_gone(_with_content(store), 1)])
+    agent = _agent(gateway, ScriptedClient([]), store, now=lambda: clock[0])
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += timedelta(seconds=seconds)
+
+    run(agent, 1.0, lambda: len(sleeps) >= 70, sleep)
+    gaps = [(later - earlier).total_seconds() for earlier, later in zip(attempts, attempts[1:])]
+    assert gaps == [2.0, 4.0, 8.0, 16.0, 32.0]
+    assert set(sleeps) == {1.0}  # the poll, never a busy loop
 
 
 def test_a_spectrum_with_no_region_after_the_self_floor_fallback_is_judged(store):
@@ -613,9 +642,13 @@ def test_a_write_rejected_by_the_database_halts(store):
 def test_a_timed_out_write_is_retried_by_id_without_asking_again(store):
     gateway = FakeGateway([_snippet_record(store, 1), _snippet_record(store, 2)], timed_out_once={1})
     client = ScriptedClient([GOOD, GOOD])
-    agent = _agent(gateway, client, store)
+    clock = [START]
+    agent = _agent(gateway, client, store, now=lambda: clock[0])
     agent.run_batch()
     assert [s[0] for s in gateway.submitted] == [2]
+    agent.run_batch()  # not due yet
+    assert [s[0] for s in gateway.submitted] == [2]
+    clock[0] += timedelta(seconds=2)
     agent.run_batch()
     assert [s[0] for s in gateway.submitted] == [2, 1] and len(client.requests) == 2
 
@@ -623,9 +656,11 @@ def test_a_timed_out_write_is_retried_by_id_without_asking_again(store):
 def test_a_write_that_keeps_timing_out_stops_at_the_attempt_cap(store):
     gateway = FakeGateway([_snippet_record(store, 1)], timed_out={1})
     client = ScriptedClient([GOOD])
-    agent = _agent(gateway, client, store)
+    clock = [START]
+    agent = _agent(gateway, client, store, now=lambda: clock[0])
     for _ in range(12):
         agent.run_batch()
+        clock[0] += timedelta(minutes=10)
     assert gateway.submitted == [] and len(client.requests) == 1
     assert gateway.by_id == [[1]] * 9  # attempts 2-10; then left pending for the next run
 
@@ -636,9 +671,11 @@ def test_a_held_verdict_is_kept_until_its_write_succeeds(store):
     lost, never re-asked."""
     gateway = FakeGateway([_snippet_record(store, 1), _snippet_record(store, 2)], timed_out_once={1})
     client = ScriptedClient([REFUSAL, GOOD])
-    agent = _agent(gateway, client, store)
+    clock = [START]
+    agent = _agent(gateway, client, store, now=lambda: clock[0])
     agent.run_batch()
     assert [s[0] for s in gateway.submitted] == [2]
+    clock[0] += timedelta(seconds=2)
     agent.run_batch()
     assert [(s[0], s[1], s[2]) for s in gateway.submitted] == [(2, AUTO, "ism_902_928:lora"), (1, REVIEW, None)]
     assert len(client.requests) == 2

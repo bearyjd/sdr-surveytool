@@ -17,8 +17,9 @@ Every outcome falls in one of three classes (agent/README.md has the table):
   makes every snippet missing), no occupied region even against the self
   floor, an analysis that fails twice;
 - transient per-record: the record, with its verdict if one was decided, is
-  kept in an in-run deferred set that later batches retry by id, so the
-  advancing cursor never strands it. A transient read error, a write
+  kept in an in-run deferred set that later batches retry by id once due
+  (a capped exponential backoff per record), so the advancing cursor never
+  strands it and the loop never spins on it. A transient read error, a write
   timeout, a transient API error (which also backs off, capped, before the
   next batch). After max_attempts_per_record attempts the record is left
   pending for the next run;
@@ -105,6 +106,7 @@ class _Backoff(Exception):
 class _Deferred:
     attempts: int  # transient failures so far
     verdict: Decision | None  # decided and awaiting a successful write; None: decide again
+    due: datetime  # not retried before this
 
 
 def backoff_delay(streak: int, base_seconds: float, cap_seconds: float) -> float:
@@ -246,9 +248,10 @@ class ClassificationAgent:
         return delay
 
     def run_batch(self) -> int:
-        """Retry the deferred records by id, then process the next pending
-        records above the cursor; returns how many records were looked at.
-        Raises SystemicFault to halt."""
+        """Retry the deferred records that are due, by id, then process the
+        next pending records above the cursor; returns how many records were
+        looked at (0 when only not-yet-due deferred records remain, so the
+        run loop sleeps). Raises SystemicFault to halt."""
         looked_at = 0
         try:
             looked_at += self._retry_deferred()
@@ -269,12 +272,14 @@ class ClassificationAgent:
         return looked_at
 
     def _retry_deferred(self) -> int:
-        if not self._deferred:
+        now = self._now()
+        due = sorted(record_id for record_id, entry in self._deferred.items() if entry.due <= now)
+        if not due:
             return 0
-        still_pending = {record.id: record for record in self._gateway.fetch_by_ids(sorted(self._deferred))}
-        for record_id in sorted(self._deferred):
+        still_pending = {record.id: record for record in self._gateway.fetch_by_ids(due)}
+        for record_id in due:
             if record_id not in still_pending:  # written meanwhile, or a human tagged it
-                del self._deferred[record_id]
+                self._deferred.pop(record_id, None)
                 continue
             verdict = self._deferred[record_id].verdict
             if verdict is not None:
@@ -358,12 +363,16 @@ class ClassificationAgent:
 
     def _remember(self, record_id: int, verdict: Decision) -> None:
         entry = self._deferred.get(record_id)
-        self._deferred[record_id] = _Deferred(0 if entry is None else entry.attempts, verdict)
+        if entry is None:
+            entry = _Deferred(0, None, self._now())
+        self._deferred[record_id] = _Deferred(entry.attempts, verdict, entry.due)
 
-    def _defer(self, record_id: int, why: str) -> None:
+    def _defer(self, record_id: int, why: str, backoff: bool = True) -> None:
         """A transient failure: keep the record (and any verdict) for a later
-        batch, up to max_attempts_per_record attempts."""
-        entry = self._deferred.get(record_id) or _Deferred(0, None)
+        batch, up to max_attempts_per_record attempts, each waiting 2, 4, 8,
+        ... s (capped) after the last. backoff=False when the whole agent
+        already waits (a transient API error)."""
+        entry = self._deferred.get(record_id) or _Deferred(0, None, self._now())
         attempts = entry.attempts + 1
         if attempts >= self._settings.max_attempts_per_record:
             self._deferred.pop(record_id, None)
@@ -373,8 +382,10 @@ class ClassificationAgent:
                 record_id, attempts, why,
             )
             return
-        self._deferred[record_id] = _Deferred(attempts, entry.verdict)
-        logger.warning("Record %d deferred (attempt %d): %s", record_id, attempts, why)
+        wait = backoff_delay(attempts, self._settings.backoff_seconds, self._settings.max_backoff_seconds)
+        due = self._now() + timedelta(seconds=wait if backoff else 0.0)
+        self._deferred[record_id] = _Deferred(attempts, entry.verdict, due)
+        logger.warning("Record %d deferred (attempt %d, retry after %s): %s", record_id, attempts, due, why)
 
     def _hold_missing(self, record_id: int, verdict: Decision) -> None:
         self._missing.append((record_id, verdict))
@@ -426,7 +437,7 @@ class ClassificationAgent:
             delay = backoff_delay(
                 self._transient_streak, self._settings.backoff_seconds, self._settings.max_backoff_seconds
             )
-            self._defer(record_id, f"transient API error {exc!r}; next batch in {delay:.0f} s")
+            self._defer(record_id, f"transient API error {exc!r}; next batch in {delay:.0f} s", backoff=False)
             raise _Backoff(delay) from exc
         self._transient_streak = 0
         self._tokens_today += result.tokens_used
