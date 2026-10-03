@@ -503,6 +503,9 @@ def test_database_down_keeps_the_adopted_snippet_it_cannot_check(tmp_path, caplo
 
 
 def _adopt_with_failing_save(tmp_path, monkeypatch, failing_save):
+    """Process a snippet record whose save fails, then (saving normally) a
+    plain record in the same grid cell; returns the stored snippet path, the
+    session factory and the second record's grid count."""
     staging, store_root = tmp_path / "staging", tmp_path / "snippets"
     staged = _stage_snippet(staging)
     socket_path, server, session_factory, service = _snippet_pipeline(
@@ -512,11 +515,14 @@ def _adopt_with_failing_save(tmp_path, monkeypatch, failing_save):
     try:
         with RecordEmitter(socket_path) as emitter:
             emitter.emit(_snippet_record(staged))
+            emitter.emit(_record(lat=10.0, lon=20.0, gps_fix_quality=1))
         with pytest.raises(RuntimeError):
             service.process_one(timeout=2)
+        monkeypatch.setattr("ingest.service.save_record", real_save_record)
+        next_count = service.process_one(timeout=2).metadata.sample_count_in_grid_cell
     finally:
         server.stop()
-    return store_root.resolve() / Path(staged).name, session_factory
+    return store_root.resolve() / Path(staged).name, session_factory, next_count
 
 
 def test_a_failure_after_commit_keeps_the_snippet_its_row_references(tmp_path, monkeypatch):
@@ -528,18 +534,21 @@ def test_a_failure_after_commit_keeps_the_snippet_its_row_references(tmp_path, m
         real_save_record(session, record)
         raise RuntimeError("connection lost after COMMIT")
 
-    stored, session_factory = _adopt_with_failing_save(tmp_path, monkeypatch, commit_then_fail)
+    stored, session_factory, next_count = _adopt_with_failing_save(tmp_path, monkeypatch, commit_then_fail)
     assert stored.is_file() and stored.with_suffix(".sigmf-meta").is_file()
     with session_factory() as session:
-        (row,) = session.query(SurveyRecord).all()
-        assert row.metadata_["iq_snippet_path"] == str(stored)
+        rows = session.query(SurveyRecord).order_by(SurveyRecord.id).all()
+        assert rows[0].metadata_["iq_snippet_path"] == str(stored)
+    # The row exists, so its density count must not have been reverted.
+    assert next_count == 2
 
 
 def test_a_failure_before_commit_discards_the_unreferenced_snippet(tmp_path, monkeypatch):
     def fail_before_commit(session, record):
         raise RuntimeError("constraint violation")
 
-    stored, session_factory = _adopt_with_failing_save(tmp_path, monkeypatch, fail_before_commit)
+    stored, session_factory, next_count = _adopt_with_failing_save(tmp_path, monkeypatch, fail_before_commit)
     assert not stored.exists() and not stored.with_suffix(".sigmf-meta").exists()
     with session_factory() as session:
-        assert session.query(SurveyRecord).count() == 0
+        assert session.query(SurveyRecord).count() == 1  # only the follow-up record
+    assert next_count == 1

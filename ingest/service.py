@@ -116,19 +116,27 @@ class IngestService:
             with self._session_factory() as session:
                 save_record(session, record)
         except Exception:
-            # Persistence failed: the record was never stored, so the grid
-            # count we optimistically bumped must be rolled back to stay
-            # consistent with what's actually in the DB. Log loudly instead
+            # The error may have come after COMMIT. A snippet record can be
+            # checked by its unique path; the optimistic grid-count bump and
+            # the adopted files are only rolled back once the row is confirmed
+            # absent (a record without a snippet can't be checked, so its
+            # failure is taken at face value, as before). Log loudly instead
             # of dropping the record silently.
-            with self._grid_lock:
-                self._grid_counts[grid_key] -= 1
-            if adopted is not None:
-                self._discard_if_unreferenced(adopted)
+            persisted = False if adopted is None else self._is_referenced(adopted)
+            if persisted is False:
+                with self._grid_lock:
+                    self._grid_counts[grid_key] -= 1
+                if adopted is not None:
+                    self._discard_adopted(adopted)
+            else:
+                logger.warning(
+                    "Record referencing snippet %r may have been persisted (%s); keeping "
+                    "its grid count and files",
+                    adopted,
+                    "row found" if persisted else "check failed",
+                )
             logger.error(
-                "Failed to persist record for grid cell %s; record dropped "
-                "and grid count reverted",
-                grid_key,
-                exc_info=True,
+                "Failed to persist record for grid cell %s", grid_key, exc_info=True
             )
             raise
         return record
@@ -151,18 +159,18 @@ class IngestService:
         updated_metadata = record.metadata.model_copy(update={"iq_snippet_path": final})
         return record.model_copy(update={"metadata": updated_metadata})
 
-    def _discard_if_unreferenced(self, stored_path: str) -> None:
-        """Prefer an orphan to a dangling reference. save_record() commits and
-        then refreshes, so its error may come after COMMIT (a refresh failure,
-        a connection lost during COMMIT): only discard the pair once a fresh
-        session confirms no persisted row references it. If even that check
-        fails, keep the files."""
+    def _is_referenced(self, stored_path: str) -> bool | None:
+        """Whether a persisted row references `stored_path`, checked with a
+        fresh session; None if that can't be determined. Prefer an orphan to
+        a dangling reference: save_record() commits and then refreshes, so
+        its error may come after COMMIT, and only a confirmed "no" lets the
+        caller discard the adopted pair."""
         factory = self._session_factory
-        if factory is None:  # no database to check against: keep the files
-            return
+        if factory is None:  # no database to check against
+            return None
         try:
             with factory() as session:
-                referenced = (
+                return (
                     session.execute(
                         select(SurveyRecord.id)
                         .where(SurveyRecord.metadata_["iq_snippet_path"].as_string() == stored_path)
@@ -172,17 +180,9 @@ class IngestService:
                 )
         except Exception:
             logger.error(
-                "Could not check whether snippet %r is referenced; keeping it", stored_path,
-                exc_info=True,
+                "Could not check whether snippet %r is referenced", stored_path, exc_info=True
             )
-            return
-        if referenced:
-            logger.warning(
-                "Snippet %r is referenced by a persisted row despite the error; keeping it",
-                stored_path,
-            )
-            return
-        self._discard_adopted(stored_path)
+            return None
 
     def _discard_adopted(self, stored_path: str) -> None:
         """The record referencing this pair was never persisted: remove the
