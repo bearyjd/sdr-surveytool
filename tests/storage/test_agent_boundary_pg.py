@@ -909,6 +909,38 @@ def test_deferred_records_are_fetched_by_id_while_pending(boundary):
         gateway.close()
 
 
+def _poison(boundary: Boundary, record_id: int, column: str) -> None:
+    """Append a JSON \\u0000 escape to a row's json column, as a writer
+    without the schema's NUL check could (json, unlike jsonb, stores it)."""
+    _admin_scalar(
+        boundary,
+        f"UPDATE survey_records SET {column} = (left({column}::text, -1) || ', \"poison\": \"a\\u0000b\"}}')::json"
+        " WHERE id = :id RETURNING id",
+        id=record_id,
+    )
+
+
+def test_a_row_holding_a_nul_escape_is_left_out_instead_of_failing_every_fetch(boundary):
+    """The reviewer's probe: one pending row with \\u0000 anywhere in its
+    metadata (or identifier, or signal) made every ->> on it, and so every
+    view fetch, fail with 22P05. Such rows are left out of the view (they
+    need manual cleanup), and classify_unknown treats them as not pending."""
+    watermark = _watermark(boundary)
+    good = _insert(boundary, Modality.UNKNOWN, None)
+    poisoned = {column: _insert(boundary, Modality.UNKNOWN, None) for column in ("metadata", "identifier", "signal")}
+    for column, record_id in poisoned.items():
+        _poison(boundary, record_id, column)
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        assert [r.id for r in gateway.fetch_pending(watermark, 100)] == [good]
+        assert gateway.fetch_by_ids(sorted(poisoned.values())) == []
+        for record_id in poisoned.values():
+            with pytest.raises(RecordNotPending):
+                gateway.submit_classification(record_id, ClassificationStatus.NEEDS_REVIEW, None, 0.0, "x")
+    finally:
+        gateway.close()
+
+
 def test_agent_classifies_a_real_row_through_the_boundary(boundary, tmp_path):
     """The whole agent against real PostgreSQL: a stored step-4 snippet, a
     pending row, the agent login role, a fake LLM; the row ends up

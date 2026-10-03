@@ -26,6 +26,7 @@ DEFAULT_AGENT_ROLE = "surveytool_agent"
 DEFAULT_STATEMENT_TIMEOUT_S = 30.0
 
 _NOT_PENDING = "P0002"  # classify_unknown's no_data_found
+_UNTRANSLATABLE = "22P05"  # a \u0000 escape in the row's json
 _TIMED_OUT = {"57014", "55P03"}  # query_canceled (statement_timeout), lock_not_available
 # Held for the agent's lifetime on its own session: one agent per database.
 _SINGLETON_LOCK = 0x5344_5241_4745_4E54 & 0x7FFF_FFFF_FFFF_FFFF  # "SDRAGENT", a positive bigint
@@ -129,8 +130,10 @@ _PROBLEMS = text(
       FROM pg_catalog.pg_rewrite AS rw
       JOIN pg_catalog.pg_depend AS d
         ON d.classid = 'pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid = rw.oid
+      JOIN pg_catalog.pg_proc AS p ON p.oid = d.refobjid
      WHERE rw.ev_class = pg_catalog.to_regclass('public.agent_pending_unknown')
        AND d.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+       AND p.pronamespace <> 'pg_catalog'::pg_catalog.regnamespace
        AND d.refobjid IS DISTINCT FROM pg_catalog.to_regprocedure(:predicate)
     UNION ALL
     SELECT 1, 'agent_pending_unknown does not filter through ' || :predicate
@@ -223,6 +226,11 @@ class RecordNotPending(RuntimeError):
 class SubmitRejected(RuntimeError):
     """The database refused the write's arguments (SQLSTATE class 22, such as
     classify_unknown's 22023): a bug in the agent, not a record judgment."""
+
+
+class SubmitUnwritable(RuntimeError):
+    """The row holds data PostgreSQL cannot process (22P05, a \\u0000 escape):
+    about that record, which is left pending for manual cleanup."""
 
 
 class SubmitTimedOut(RuntimeError):
@@ -346,6 +354,8 @@ class AgentGateway:
                 raise RecordNotPending(f"Record {record_id} is no longer pending") from exc
             if sqlstate in _TIMED_OUT:
                 raise SubmitTimedOut(f"Writing record {record_id} timed out ({sqlstate})") from exc
+            if sqlstate == _UNTRANSLATABLE:
+                raise SubmitUnwritable(f"Record {record_id} holds data PostgreSQL cannot convert ({sqlstate})") from exc
             if isinstance(driver_error, psycopg.DataError):
                 raise SubmitRejected(f"The database rejected the write for record {record_id}: {driver_error}") from exc
             raise

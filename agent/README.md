@@ -49,6 +49,12 @@ the LLM answers at most once per record per run. Every outcome falls in one clas
 | Transient per-record | a transient read error (EIO, EAGAIN, EINTR, ETIMEDOUT, ESTALE, ENOMEM, EBUSY); a write timeout (`statement_timeout`, lock timeout); a transient API error (connection, 408, 409, 429, >= 500) | kept, with its verdict if one was decided, in an in-run deferred set that later batches retry by id, whatever the cursor, once due: 2, 4, 8, ... s after the last attempt (capped at 300 s). While only not-yet-due records remain, the loop sleeps its poll. A record the model has answered is never asked again. An API error also backs off 2, 4, ... s (capped at 300 s) before the next batch. After 10 attempts the record is left pending for the next run |
 | Systemic: halt | the store root missing, not a directory, unreadable, or empty while records point into it; 5 missing snippets in a row with none read in between (a stale copy of the store); 5 batches in a row failing outside any record (the database unreachable); 5 invalid model answers in a row; a non-retryable API error; a write the database rejects | halt with nothing marked for it, exit status 3 (never auto-restarted, below); the message names the cause |
 
+A row whose JSON holds a `\u0000` escape (only a writer bypassing the schema's NUL check
+can store one) makes every `->>` on it fail, so the view leaves it out and
+`classify_unknown` refuses it; a write that still meets one (SQLSTATE 22P05) skips that
+record. Such rows stay pending until cleaned up by hand; find them with
+`SELECT id FROM survey_records WHERE strpos(metadata::text || identifier::text || signal::text, E'\\u0000') > 0;`.
+
 An invalid model answer (validation failure, refusal, `max_tokens`) is held until a later
 answer validates, then goes to review. A spent daily token budget pauses until UTC
 midnight. At startup the agent checks the store root and reads the newest pending

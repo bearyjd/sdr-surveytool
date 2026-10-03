@@ -4,7 +4,11 @@ function are exercised for real in tests/storage/test_agent_boundary_pg.py)."""
 
 import pytest
 
-from agent.db_gateway import PendingRecord, connect_gateway, parse_pending_row
+import psycopg
+from sqlalchemy.exc import DBAPIError
+
+from agent.db_gateway import AgentGateway, PendingRecord, SubmitUnwritable, connect_gateway, parse_pending_row
+from schema.records import ClassificationStatus
 
 
 @pytest.mark.parametrize("url", ["sqlite:///survey.db", "sqlite:///:memory:", "mysql://u:p@localhost/db"])
@@ -58,3 +62,18 @@ def test_a_malformed_value_marks_the_record_instead_of_failing_the_fetch(field, 
 def test_an_oversized_or_nul_bearing_path_is_malformed():
     assert "iq_snippet_path" in parse_pending_row(_row(iq_snippet_path="/" + "a" * 5000)).malformed
     assert "iq_snippet_path" in parse_pending_row(_row(iq_snippet_path="/srv/a\x00b")).malformed
+
+
+
+def test_an_untranslatable_character_on_submit_is_about_the_record():
+    """22P05 (a NUL escape PostgreSQL cannot convert) is about that row's
+    data: SubmitUnwritable, which the agent skips, never a halt."""
+    orig = psycopg.errors.UntranslatableCharacter("unsupported Unicode escape sequence")
+
+    class _Engine:
+        def begin(self):
+            raise DBAPIError("SELECT public.classify_unknown(...)", {}, orig)
+
+    gateway = AgentGateway(_Engine())  # type: ignore[arg-type]
+    with pytest.raises(SubmitUnwritable, match="Record 7"):
+        gateway.submit_classification(7, ClassificationStatus.NEEDS_REVIEW, None, 0.0, "x")

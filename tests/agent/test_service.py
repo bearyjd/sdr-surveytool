@@ -18,7 +18,7 @@ import pytest
 from anthropic.types import Message
 
 from agent.band_table import load_band_table
-from agent.db_gateway import PendingRecord, RecordNotPending, SubmitRejected, SubmitTimedOut
+from agent.db_gateway import PendingRecord, RecordNotPending, SubmitRejected, SubmitTimedOut, SubmitUnwritable
 from agent import service
 from agent.service import (
     EXIT_HALTED,
@@ -46,9 +46,10 @@ AUTO, REVIEW = ClassificationStatus.AUTO_CLASSIFIED, ClassificationStatus.NEEDS_
 
 
 class FakeGateway:
-    def __init__(self, records, not_pending=(), fail_once=(), timed_out=(), timed_out_once=(), rejected=()):
+    def __init__(self, records, not_pending=(), fail_once=(), timed_out=(), timed_out_once=(), rejected=(), unwritable=()):
         self.records = records
         self.not_pending, self.timed_out, self.rejected = set(not_pending), set(timed_out), set(rejected)
+        self.unwritable = set(unwritable)
         self.fail_once, self.timed_out_once = set(fail_once), set(timed_out_once)
         self.fetches: list[tuple[int, int]] = []
         self.by_id: list[list[int]] = []
@@ -77,7 +78,10 @@ class FakeGateway:
         if record_id in self.timed_out_once:
             self.timed_out_once.discard(record_id)
             raise SubmitTimedOut(f"record {record_id}")
-        for ids, error in ((self.not_pending, RecordNotPending), (self.timed_out, SubmitTimedOut), (self.rejected, SubmitRejected)):
+        for ids, error in (
+            (self.not_pending, RecordNotPending), (self.timed_out, SubmitTimedOut),
+            (self.rejected, SubmitRejected), (self.unwritable, SubmitUnwritable),
+        ):
             if record_id in ids:
                 raise error(f"record {record_id}")
         self.submitted.append((record_id, status, tag, confidence, reasoning))
@@ -612,6 +616,15 @@ def test_non_retryable_api_errors_halt_immediately(store, status):
     with pytest.raises(SystemicFault, match="Non-retryable Anthropic API error on record 1"):
         _agent(gateway, client, store).run_batch()
     assert gateway.submitted == [] and len(client.requests) == 1
+
+
+def test_a_row_the_database_cannot_write_is_skipped_not_halted(store):
+    gateway = FakeGateway([_snippet_record(store, 1), _snippet_record(store, 2)], unwritable={1})
+    client = ScriptedClient([GOOD, GOOD])
+    agent = _agent(gateway, client, store)
+    agent.run_batch()
+    agent.run_batch()
+    assert [s[0] for s in gateway.submitted] == [2] and len(client.requests) == 2
 
 
 def test_a_human_tag_that_wins_the_race_is_skipped(store):

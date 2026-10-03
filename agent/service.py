@@ -62,6 +62,7 @@ from agent.db_gateway import (
     RecordNotPending,
     SubmitRejected,
     SubmitTimedOut,
+    SubmitUnwritable,
     connect_gateway,
 )
 from agent.llm import (
@@ -466,6 +467,8 @@ class ClassificationAgent:
             )
         except RecordNotPending:
             logger.info("Record %d was no longer pending (a human got there first); skipped", record_id)
+        except SubmitUnwritable as exc:
+            logger.error("%s; left pending for manual cleanup", exc)
         except SubmitTimedOut as exc:
             self._defer(record_id, str(exc))
             return

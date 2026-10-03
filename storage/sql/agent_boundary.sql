@@ -138,7 +138,11 @@ GRANT EXECUTE ON FUNCTION public.agent_is_pending_unknown(text, json) TO {{agent
 -- non-leakproof condition a caller adds, so a caller's function can never see
 -- a hidden row. Every value is returned as text, uncast: one row holding a
 -- value no cast could take (3e9 ms, a string sample rate) must not fail every
--- fetch. The agent parses and bound-checks them per record.
+-- fetch. The agent parses and bound-checks them per record. Likewise a row
+-- whose json holds a \u0000 escape, which makes every ->> on it fail
+-- (22P05): it is left out, checked on the raw text first (CASE fixes the
+-- order), and needs manual cleanup (agent/README.md). The plain modality
+-- test keeps the modality index usable.
 CREATE VIEW public.agent_pending_unknown
     WITH (security_barrier = true) AS
 SELECT r.id,
@@ -150,7 +154,13 @@ SELECT r.id,
        r.metadata -> 'quality_flags' ->> 'snippet_rejected' AS snippet_rejected,
        r.metadata -> 'quality_flags' ->> 'snippet_dropped' AS snippet_dropped
   FROM public.survey_records AS r
- WHERE public.agent_is_pending_unknown(r.modality::text, r.metadata::json);
+ WHERE r.modality = 'unknown'
+   AND CASE
+           WHEN pg_catalog.strpos(r.metadata::text, E'\\u0000') > 0
+             OR pg_catalog.strpos(r.identifier::text, E'\\u0000') > 0
+             OR pg_catalog.strpos(r.signal::text, E'\\u0000') > 0 THEN false
+           ELSE public.agent_is_pending_unknown(r.modality::text, r.metadata::json)
+       END;
 ALTER VIEW public.agent_pending_unknown OWNER TO {{owner_role}};
 REVOKE ALL ON TABLE public.agent_pending_unknown FROM PUBLIC;
 GRANT SELECT ON TABLE public.agent_pending_unknown TO {{agent_role}};
@@ -208,7 +218,14 @@ BEGIN
                'confidence', p_confidence,
                'reasoning', p_reasoning))::json
      WHERE r.id = p_record_id
-       AND public.agent_is_pending_unknown(r.modality::text, r.metadata::json)
+       AND CASE
+               -- A \u0000 escape fails the jsonb cast below; such a row is
+               -- not one the agent may write, as the view leaves it out.
+               WHEN pg_catalog.strpos(r.metadata::text, E'\\u0000') > 0
+                 OR pg_catalog.strpos(r.identifier::text, E'\\u0000') > 0
+                 OR pg_catalog.strpos(r.signal::text, E'\\u0000') > 0 THEN false
+               ELSE public.agent_is_pending_unknown(r.modality::text, r.metadata::json)
+           END
     RETURNING r.id INTO v_id;
     IF v_id IS NULL THEN
         RAISE EXCEPTION 'classify_unknown: record % is not a pending unknown record', p_record_id
