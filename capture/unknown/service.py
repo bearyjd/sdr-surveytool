@@ -218,7 +218,20 @@ def _stage_and_emit(
     radio session. Below the free-disk floor the IQ is not written but the
     detection is still emitted, flagged. A snippet whose record could not be
     emitted has its staged pair deleted: nothing would ever adopt it."""
-    free = shutil.disk_usage(settings.staging_dir).free
+    try:
+        free = shutil.disk_usage(settings.staging_dir).free
+    except OSError:
+        drops["staging_unavailable"] += 1
+        logger.exception(
+            "Cannot check free space in staging dir %s; dropping the snippet "
+            "triggered at sample %d but keeping its detection",
+            settings.staging_dir,
+            snippet.trigger.sample_index,
+        )
+        _emit_without_snippet(
+            snippet, settings, emitter, survey_id, operator_id, "staging_unavailable"
+        )
+        return
     if free - snippet.iq.nbytes < settings.min_free_bytes:
         drops["low_disk"] += 1
         logger.warning(
@@ -314,8 +327,9 @@ def _open_session(
     drops: Counter[str],
 ) -> Iterator[Iterator[CapturedSnippet]]:
     """Open the SDR, start the flowgraph, and yield an iterator of completed
-    snippets; always stops the flowgraph on exit. Needs GNU Radio and a real
-    SDR, so tests replace it (see tests/capture/unknown/test_service.py)."""
+    snippets; always stops the flowgraph on exit. Needs GNU Radio; its tests
+    run it against the real scheduler with only _build_soapy_source replaced
+    (see tests/capture/unknown/test_session.py)."""
     # Deferred: GNU Radio is a system (dnf) package, not a pip dependency,
     # and the rest of this module must import without it.
     from capture.unknown.flowgraph import build_flowgraph

@@ -156,6 +156,22 @@ def test_drain_reraises_a_tap_failure():
     assert isinstance(excinfo.value.__cause__, ValueError)
 
 
+def test_missing_staging_dir_drops_only_the_snippet_not_the_session(tmp_path, caplog):
+    """If staging vanishes mid-survey, an exception escaping here would end
+    (and rebuild) the radio session on every snippet. Log it, keep the
+    detection without its IQ, and carry on."""
+    emitter = _FakeEmitter("/unused.sock")
+    drops: Counter = Counter()
+    with caplog.at_level(logging.ERROR):
+        service._stage_and_emit(_snippet(), _settings(tmp_path / "gone"), emitter, "s1", "op1", drops)
+
+    (record,) = emitter.records
+    assert record.metadata.iq_snippet_path is None
+    assert record.metadata.quality_flags["snippet_dropped"] == "staging_unavailable"
+    assert drops == Counter({"staging_unavailable": 1})
+    assert "staging" in caplog.text
+
+
 def test_full_snippet_queue_drops_and_counts_without_blocking():
     """The tap calls this on the GNU Radio scheduler thread, which must never
     block (the SDR would overflow): a full queue drops the snippet instead."""
