@@ -191,6 +191,27 @@ def test_run_survives_radio_failures_and_keeps_cooldown_across_rebuilds(tmp_path
     assert len(emitters[0].records) == 1
 
 
+def test_run_resolves_secures_and_logs_staging_dir_at_startup(tmp_path, monkeypatch, caplog):
+    monkeypatch.chdir(tmp_path)
+    seen = []
+
+    @contextmanager
+    def fake_open_session(settings, last_trigger_at, drops):
+        seen.append(settings.staging_dir)
+        raise KeyboardInterrupt
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(service, "_open_session", fake_open_session)
+    monkeypatch.setattr(service, "RecordEmitter", _FakeEmitter)
+    with caplog.at_level(logging.INFO), pytest.raises(KeyboardInterrupt):
+        service.run(_settings(Path("rel-staging")), "/unused.sock", "s1", "op1")
+
+    staging = (tmp_path / "rel-staging").resolve()
+    assert seen == [staging]
+    assert staging.stat().st_mode & 0o077 == 0
+    assert str(staging) in caplog.text
+
+
 def test_a_failed_emit_drops_only_that_snippet(tmp_path, caplog):
     class BrokenEmitter:
         def emit(self, record) -> None:

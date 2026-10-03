@@ -72,6 +72,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def _open_snippet_store(args: argparse.Namespace) -> LocalSnippetStore:
+    """Resolve, create and permission-check the snippet dirs, failing fast on
+    a misconfiguration before ingest accepts any record. The relative defaults
+    resolve against this process's working directory, so log the result."""
+    store = LocalSnippetStore(args.snippet_staging_dir, args.snippet_store_dir)
+    logger.info("Adopting snippets from %s into %s", store.staging_dir, store.root_dir)
+    return store
+
+
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     logging.basicConfig(level=logging.INFO)
@@ -89,9 +98,9 @@ def main(argv: list[str] | None = None) -> None:
         )
     )
 
+    snippet_store = _open_snippet_store(args)
     server = QueueServer(args.socket_path)
     server.start()
-    snippet_store = LocalSnippetStore(args.snippet_staging_dir, args.snippet_store_dir)
     service = IngestService(server, session_factory, gps_provider, snippet_store=snippet_store)
     logger.info("Ingest listening on %s -> %s", args.socket_path, args.database_url)
 

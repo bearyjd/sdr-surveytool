@@ -343,7 +343,7 @@ def test_attach_grid_density_keys_counts_per_cell():
 
 
 def _stage_snippet(staging_dir, stem: str = "snip") -> str:
-    staging_dir.mkdir(parents=True, exist_ok=True)
+    staging_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     (staging_dir / f"{stem}.sigmf-data").write_bytes(b"\x00" * 16)
     (staging_dir / f"{stem}.sigmf-meta").write_text("{}")
     return str((staging_dir / f"{stem}.sigmf-data").resolve())
@@ -407,7 +407,7 @@ def test_process_one_adopts_staged_snippet_and_persists_final_path(tmp_path):
 
 def test_process_one_rejects_snippet_outside_staging_without_persisting(tmp_path):
     staging = tmp_path / "staging"
-    staging.mkdir()
+    staging.mkdir(mode=0o700)
     outside = _stage_snippet(tmp_path / "elsewhere")
     socket_path, server, session_factory, service = _snippet_pipeline(
         tmp_path, LocalSnippetStore(staging, tmp_path / "snippets")

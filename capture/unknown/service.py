@@ -9,7 +9,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -21,6 +21,7 @@ from capture.unknown.snippet_assembler import CapturedSnippet, SnippetAssembler
 from capture.unknown.snippet_writer import write_sigmf_snippet
 from dsp.spectral import mean_burst_power_dbfs, occupied_bandwidth_hz, peak_power_dbfs
 from schema.records import UnifiedRecord
+from storage.snippet_store import ensure_private_dir
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,11 @@ def run(
     field surveys must survive transient faults unattended. Cooldown state
     is kept here, across sessions, as absolute trigger times.
     """
+    # The staging dir is the shared contract with ingest's snippet store, so
+    # it is checked with the store's own rule (owner-only, this uid).
+    staging_dir = ensure_private_dir(settings.staging_dir)
+    settings = replace(settings, staging_dir=staging_dir)
+    logger.info("Staging unknown-signal snippets in %s", staging_dir)
     backoff = _INITIAL_BACKOFF_SECONDS
     last_trigger_at: Mapping[float, datetime] = {}
     drops: Counter[str] = Counter()  # dropped snippets by cause, for the logs
