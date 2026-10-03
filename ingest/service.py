@@ -105,7 +105,8 @@ class IngestService:
         # Adopt before the grid-density bump: an I/O error raises here with
         # nothing to roll back (a rejected snippet doesn't raise; the record is
         # kept without it). If save_record later fails, the adopted pair is
-        # discarded again rather than left unreferenced in the store.
+        # discarded again only once no persisted row is confirmed to reference
+        # it (see _discard_if_unreferenced).
         staged = record.metadata.iq_snippet_path
         record = self._adopt_snippet_if_present(record)
         adopted = record.metadata.iq_snippet_path if staged is not None else None
@@ -122,7 +123,7 @@ class IngestService:
             with self._grid_lock:
                 self._grid_counts[grid_key] -= 1
             if adopted is not None:
-                self._discard_adopted(adopted)
+                self._discard_if_unreferenced(adopted)
             logger.error(
                 "Failed to persist record for grid cell %s; record dropped "
                 "and grid count reverted",
@@ -149,6 +150,39 @@ class IngestService:
             return self._without_snippet(record, rejection.reason, str(rejection))
         updated_metadata = record.metadata.model_copy(update={"iq_snippet_path": final})
         return record.model_copy(update={"metadata": updated_metadata})
+
+    def _discard_if_unreferenced(self, stored_path: str) -> None:
+        """Prefer an orphan to a dangling reference. save_record() commits and
+        then refreshes, so its error may come after COMMIT (a refresh failure,
+        a connection lost during COMMIT): only discard the pair once a fresh
+        session confirms no persisted row references it. If even that check
+        fails, keep the files."""
+        factory = self._session_factory
+        if factory is None:  # no database to check against: keep the files
+            return
+        try:
+            with factory() as session:
+                referenced = (
+                    session.execute(
+                        select(SurveyRecord.id)
+                        .where(SurveyRecord.metadata_["iq_snippet_path"].as_string() == stored_path)
+                        .limit(1)
+                    ).first()
+                    is not None
+                )
+        except Exception:
+            logger.error(
+                "Could not check whether snippet %r is referenced; keeping it", stored_path,
+                exc_info=True,
+            )
+            return
+        if referenced:
+            logger.warning(
+                "Snippet %r is referenced by a persisted row despite the error; keeping it",
+                stored_path,
+            )
+            return
+        self._discard_adopted(stored_path)
 
     def _discard_adopted(self, stored_path: str) -> None:
         """The record referencing this pair was never persisted: remove the

@@ -471,9 +471,10 @@ class _FailingAfterStartup:
         return self._real()
 
 
-def test_persist_failure_discards_the_snippet_it_just_adopted(tmp_path, caplog):
-    """During a database outage every record fails to persist; the snippet
-    adopted for it must not be left behind, unreferenced, in the store."""
+def test_database_down_keeps_the_adopted_snippet_it_cannot_check(tmp_path, caplog):
+    """With the database down, ingest can't confirm whether a row references
+    the adopted pair (the failure may have come after COMMIT), so it keeps the
+    files: an orphan is recoverable, a dangling reference is not."""
     staging, store_root = tmp_path / "staging", tmp_path / "snippets"
     staged = _stage_snippet(staging)
     socket_path = str(tmp_path / "ingest.sock")
@@ -496,5 +497,49 @@ def test_persist_failure_discards_the_snippet_it_just_adopted(tmp_path, caplog):
             service.process_one(timeout=2)
     finally:
         server.stop()
-    assert list(store_root.iterdir()) == []
-    assert repr(str(store_root.resolve() / Path(staged).name)) in caplog.text
+    stored = store_root.resolve() / Path(staged).name
+    assert stored.is_file() and stored.with_suffix(".sigmf-meta").is_file()
+    assert repr(str(stored)) in caplog.text
+
+
+def _adopt_with_failing_save(tmp_path, monkeypatch, failing_save):
+    staging, store_root = tmp_path / "staging", tmp_path / "snippets"
+    staged = _stage_snippet(staging)
+    socket_path, server, session_factory, service = _snippet_pipeline(
+        tmp_path, LocalSnippetStore(staging, store_root)
+    )
+    monkeypatch.setattr("ingest.service.save_record", failing_save)
+    try:
+        with RecordEmitter(socket_path) as emitter:
+            emitter.emit(_snippet_record(staged))
+        with pytest.raises(RuntimeError):
+            service.process_one(timeout=2)
+    finally:
+        server.stop()
+    return store_root.resolve() / Path(staged).name, session_factory
+
+
+def test_a_failure_after_commit_keeps_the_snippet_its_row_references(tmp_path, monkeypatch):
+    """save_record() commits and then refreshes: an error after COMMIT (a
+    refresh failure, a connection lost during COMMIT) must not delete the
+    IQ of a row that was in fact persisted."""
+
+    def commit_then_fail(session, record):
+        real_save_record(session, record)
+        raise RuntimeError("connection lost after COMMIT")
+
+    stored, session_factory = _adopt_with_failing_save(tmp_path, monkeypatch, commit_then_fail)
+    assert stored.is_file() and stored.with_suffix(".sigmf-meta").is_file()
+    with session_factory() as session:
+        (row,) = session.query(SurveyRecord).all()
+        assert row.metadata_["iq_snippet_path"] == str(stored)
+
+
+def test_a_failure_before_commit_discards_the_unreferenced_snippet(tmp_path, monkeypatch):
+    def fail_before_commit(session, record):
+        raise RuntimeError("constraint violation")
+
+    stored, session_factory = _adopt_with_failing_save(tmp_path, monkeypatch, fail_before_commit)
+    assert not stored.exists() and not stored.with_suffix(".sigmf-meta").exists()
+    with session_factory() as session:
+        assert session.query(SurveyRecord).count() == 0
