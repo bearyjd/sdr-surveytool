@@ -118,3 +118,16 @@ def test_files_are_fsynced_before_their_rename_and_the_dir_after(tmp_path, monke
         ("replace", ".sigmf-meta"),
         ("fsync", "dir"),
     ]
+
+
+def test_a_failed_final_directory_fsync_leaves_no_published_files(tmp_path, monkeypatch):
+    """The meta is already renamed into place when the staging dir is fsynced;
+    if that fails, cleanup must remove it too, not just the data file."""
+
+    def failing_fsync_dir(directory):
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr(snippet_writer, "_fsync_dir", failing_fsync_dir)
+    with pytest.raises(OSError, match="fsync failed"):
+        write_sigmf_snippet(IQ, tmp_path, 2e6, 915e6, START)
+    assert list(tmp_path.iterdir()) == []

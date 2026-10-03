@@ -81,6 +81,7 @@ def write_sigmf_snippet(
             meta.dump(meta_file, pretty=True)
             _flush_to_disk(meta_file)
         os.replace(tmp_meta, meta_path)
+        leftovers.append(meta_path)
         # Persist the two renames themselves.
         _fsync_dir(staging_dir)
     except BaseException:
