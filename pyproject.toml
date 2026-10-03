@@ -21,6 +21,7 @@ sdr-ingest = "ingest.main:main"
 sdr-capture-wifi = "capture.wifi.service:main"
 sdr-capture-bluetooth = "capture.bluetooth.service:main"
 sdr-capture-unknown = "capture.unknown.service:main"
+sdr-agent = "agent.service:main"
 sdr-agent-boundary = "storage.agent_boundary:main"
 
 [project.optional-dependencies]
