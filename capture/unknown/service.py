@@ -9,7 +9,7 @@ import shutil
 import signal
 import time
 from collections import Counter, deque
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -259,7 +259,9 @@ def run(
     logger.info("Staging unknown-signal snippets in %s", staging_dir)
     backoff = _INITIAL_BACKOFF_SECONDS
     escalate = False  # the previous session drifted soon after opening
-    last_trigger_at: Mapping[float, datetime] = {}
+    # Absolute trigger time per frequency, shared with every session: each one
+    # merges its assembler's triggers back in when it ends (see _open_session).
+    last_trigger_at: dict[float, datetime] = {}
     drops: Counter[str] = Counter()  # dropped snippets by cause, for the logs
     with RecordEmitter(socket_path) as emitter:
         while True:
@@ -270,7 +272,7 @@ def run(
                     if not escalate:
                         backoff = _INITIAL_BACKOFF_SECONDS  # the radio opened
                     for item in snippets:
-                        last_trigger_at = record_trigger(last_trigger_at, item.trigger)
+                        last_trigger_at.update(record_trigger(last_trigger_at, item.trigger))
                         if isinstance(item, _DroppedDetection):
                             _emit_without_snippet(
                                 _dropped_detection_record(item, settings, survey_id, operator_id),
@@ -480,12 +482,13 @@ def _offer_or_drop(
 @contextmanager
 def _open_session(
     settings: CaptureSettings,
-    last_trigger_at: Mapping[float, datetime],
+    last_trigger_at: MutableMapping[float, datetime],
     drops: Counter[str],
     wall_clock: Callable[[], datetime] = _utc_now,
 ) -> Iterator[Iterator[CapturedSnippet | _DroppedDetection]]:
     """Open the SDR, start the flowgraph, and yield an iterator of completed
-    snippets; always stops the flowgraph on exit. Needs GNU Radio; its tests
+    snippets; always stops the flowgraph on exit, then merges every trigger
+    the session saw into `last_trigger_at`. Needs GNU Radio; its tests
     run it against the real scheduler with only _build_soapy_source replaced
     (see tests/capture/unknown/test_session.py)."""
     # Deferred: GNU Radio is a system (dnf) package, not a pip dependency,
@@ -507,7 +510,7 @@ def _open_session(
         settings = replace(settings, sample_rate=actual_rate)
     source.set_min_output_buffer(settings.samples(_SOURCE_BUFFER_SECONDS))
     clock = SampleClock(anchor=wall_clock(), sample_rate=actual_rate)
-    last_trigger_at = _clamp_to_anchor(last_trigger_at, clock.anchor)
+    cooldowns = _clamp_to_anchor(last_trigger_at, clock.anchor)
     assembler = SnippetAssembler(
         clock=clock,
         center_freq_hz=settings.center_freq_hz,
@@ -517,7 +520,7 @@ def _open_session(
         ),
         pre_trigger_samples=settings.samples(settings.pre_trigger_seconds),
         post_trigger_samples=settings.samples(settings.post_trigger_seconds),
-        last_trigger_at=last_trigger_at,
+        last_trigger_at=cooldowns,
     )
     snippets: queue.Queue[CapturedSnippet] = queue.Queue(maxsize=_SNIPPET_QUEUE_MAXSIZE)
     dropped: deque[_DroppedDetection] = deque(maxlen=_DROPPED_DETECTIONS_MAXLEN)
@@ -542,6 +545,11 @@ def _open_session(
     finally:
         flowgraph.top_block.stop()
         flowgraph.top_block.wait()
+        # The assembler records a trigger when it fires, so this also keeps
+        # triggers whose capture never completed (or whose IQ was dropped)
+        # cooling down across the rebuild. Merged after wait(): the
+        # scheduler thread no longer touches the assembler.
+        last_trigger_at.update(assembler.last_trigger_at)
 
 
 class _ClockDrift(RuntimeError):

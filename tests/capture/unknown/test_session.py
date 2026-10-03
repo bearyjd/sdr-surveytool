@@ -165,3 +165,23 @@ def test_cooldowns_from_the_future_are_clamped_after_a_backward_clock_step(tmp_p
     assert snippet.trigger.time == anchor + timedelta(seconds=snippet.trigger.sample_index / FS)
     assert 150_000 <= snippet.trigger.sample_index < 150_100
     assert "stepped back" in caplog.text
+
+
+def test_a_trigger_whose_capture_never_completed_still_sets_the_cooldown(tmp_path, monkeypatch):
+    """The cooldown starts at the trigger, not when a finished snippet comes
+    out: a session that dies during post-trigger capture must still leave
+    the trigger in the service-level map, so the restart doesn't re-capture
+    the same emitter immediately."""
+    anchor = datetime(2026, 10, 3, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        service,
+        "_build_soapy_source",
+        lambda settings: (blocks.vector_source_c(_iq_with_burst_at(190_000, n=200_000), False), FS),
+    )
+    cooldowns: dict = {}
+    with pytest.raises(RuntimeError, match="stalled"):
+        with service._open_session(_settings(tmp_path), cooldowns, Counter(), wall_clock=lambda: anchor) as snippets:
+            next(snippets)  # 0.9 s of post-trigger samples never arrive
+
+    (when,) = cooldowns.values()
+    assert anchor + timedelta(seconds=1.9) <= when < anchor + timedelta(seconds=1.901)
