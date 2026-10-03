@@ -26,6 +26,7 @@ from sqlalchemy.pool import NullPool
 
 from agent.band_table import load_band_table
 from agent.db_gateway import (
+    AgentAlreadyRunning,
     BoundaryViolation,
     PendingRecord,
     RecordNotPending,
@@ -803,6 +804,18 @@ def test_malformed_rows_never_fail_the_fetch(boundary):
     assert "snippet_duration_ms '3000000000' is outside [0, 2147483647]" in records[huge].malformed
     assert "sample_rate 'bad' is not a number" in records[word].malformed
     assert records[good].malformed is None and records[good].snippet_duration_ms == 1000
+
+
+def test_a_second_agent_refuses_to_start_while_one_runs(boundary):
+    """Two replicas would each spend the token budget and race for the same
+    records: the first holds a session advisory lock until it closes."""
+    first = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        with pytest.raises(AgentAlreadyRunning, match="Another sdr-agent is running against this database"):
+            connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    finally:
+        first.close()
+    connect_gateway(_url(boundary.agent_url), boundary.agent_role).close()  # free again
 
 
 def test_deferred_records_are_fetched_by_id_while_pending(boundary):

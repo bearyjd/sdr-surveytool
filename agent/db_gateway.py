@@ -16,7 +16,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import psycopg
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Connection, Engine, create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
@@ -27,6 +27,8 @@ DEFAULT_STATEMENT_TIMEOUT_S = 30.0
 
 _NOT_PENDING = "P0002"  # classify_unknown's no_data_found
 _TIMED_OUT = {"57014", "55P03"}  # query_canceled (statement_timeout), lock_not_available
+# Held for the agent's lifetime on its own session: one agent per database.
+_SINGLETON_LOCK = 0x5344_5241_4745_4E54 & 0x7FFF_FFFF_FFFF_FFFF  # "SDRAGENT", a positive bigint
 _CLASSIFY = "public.classify_unknown(integer, text, text, double precision, text)"
 
 # The view returns its numbers as text (agent_boundary.sql); these bounds
@@ -163,6 +165,8 @@ _BY_IDS = text(
      ORDER BY id
     """
 )
+_TRY_LOCK = text("SELECT pg_catalog.pg_try_advisory_lock(:key)")
+_UNLOCK = text("SELECT pg_catalog.pg_advisory_unlock(:key)")
 _SUBMIT = text(
     """
     SELECT public.classify_unknown(
@@ -177,6 +181,10 @@ _SUBMIT = text(
 
 class BoundaryViolation(RuntimeError):
     """The connected role is not confined by the agent database boundary."""
+
+
+class AgentAlreadyRunning(RuntimeError):
+    """Another agent holds the single-instance advisory lock on this database."""
 
 
 class RecordNotPending(RuntimeError):
@@ -254,8 +262,9 @@ def parse_pending_row(row: Sequence) -> PendingRecord:
 
 
 class AgentGateway:
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, lock: Connection | None = None) -> None:
         self._engine = engine
+        self._lock = lock
 
     def fetch_pending(self, after_id: int, limit: int) -> list[PendingRecord]:
         """Pending unknown rows with id > after_id, lowest id first."""
@@ -314,6 +323,9 @@ class AgentGateway:
             raise
 
     def close(self) -> None:
+        if self._lock is not None:
+            self._lock.execute(_UNLOCK, {"key": _SINGLETON_LOCK})
+            self._lock.close()
         self._engine.dispose()
 
 
@@ -351,10 +363,30 @@ def connect_gateway(
     engine = create_engine(
         url.set(drivername="postgresql+psycopg"),
         connect_args={"options": f"-c statement_timeout={round(statement_timeout_s * 1000)}"},
+        # One session for the lock, one for the work: CONNECTION LIMIT 2.
+        pool_size=2,
+        max_overflow=0,
     )
     try:
         verify_boundary(engine, agent_role)
+        lock = _take_singleton_lock(engine)
     except BaseException:
         engine.dispose()
         raise
-    return AgentGateway(engine)
+    return AgentGateway(engine, lock)
+
+
+def _take_singleton_lock(engine: Engine) -> Connection:
+    """A session advisory lock held until close(): a second agent on the same
+    database would double the spend and race for the same records."""
+    conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        if not conn.execute(_TRY_LOCK, {"key": _SINGLETON_LOCK}).scalar_one():
+            raise AgentAlreadyRunning(
+                "Another sdr-agent is running against this database (it holds advisory lock "
+                f"{_SINGLETON_LOCK}); refusing to start a second one."
+            )
+    except BaseException:
+        conn.close()
+        raise
+    return conn

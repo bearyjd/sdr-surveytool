@@ -51,6 +51,7 @@ from agent.band_table import DEFAULT_BAND_TABLE, BandEntry, load_band_table
 from agent.classifier import ModulationClassifier, UnavailableClassifier
 from agent.db_gateway import (
     DEFAULT_AGENT_ROLE,
+    AgentAlreadyRunning,
     AgentGateway,
     BoundaryViolation,
     PendingRecord,
@@ -538,7 +539,7 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("SURVEYTOOL_AGENT_DATABASE_URL is not set")
     try:
         gateway = connect_gateway(database_url, args.agent_role)
-    except (BoundaryViolation, ValueError) as exc:
+    except (AgentAlreadyRunning, BoundaryViolation, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     settings = AgentSettings(
         snippet_root=Path(args.snippet_store_dir),

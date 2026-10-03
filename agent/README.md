@@ -131,6 +131,8 @@ RestartSec=60
 RestartPreventExitStatus=3
 ```
 
-SIGTERM stops the agent at once, even mid-sleep (a poll, a backoff or a budget pause).
+One agent runs per database: it holds a session advisory lock for its lifetime, and a
+second instance refuses to start, naming the lock. SIGTERM stops the agent at once, even
+mid-sleep (a poll, a backoff or a budget pause).
 The Anthropic client is pinned to `https://api.anthropic.com`; `ANTHROPIC_BASE_URL` is
 ignored.
