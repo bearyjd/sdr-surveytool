@@ -62,7 +62,9 @@ record. Such rows stay pending until cleaned up by hand; find them with
 
 An invalid model answer (validation failure, refusal, `max_tokens`) is held until a later
 answer validates, then goes to review. A spent daily token budget pauses until UTC
-midnight.
+midnight. At startup the agent checks the store root and reads the newest pending
+snippets until one reads; if none does, it halts. One broken snippet among readable ones
+never blocks startup.
 
 ### The daily token budget
 
@@ -74,9 +76,7 @@ times out keeps its reservation, since it may still have been billed. A call who
 reservation does not fit waits for UTC midnight; the day's first call always goes ahead.
 The budget lives in the process: a restart starts it over, so a crash loop could spend it
 again and again. That is why halts exit with status 3 and must never be auto-restarted
-(below), and why other restarts should be slow (`RestartSec`). At startup the agent checks the store root and reads the newest pending
-snippets until one reads; if none does, it halts. One broken snippet among readable ones
-never blocks startup.
+(below), and why other restarts should be slow (`RestartSec`).
 
 ## The boundary
 
