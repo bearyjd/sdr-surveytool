@@ -7,7 +7,8 @@ one. Features are measured on that region alone. Up to three other
 emitters go along as context: those already on before the trigger (found in
 the reference) and any other burst-time regions. The primary's absolute
 center and fine OBW are matched against the curated band table; the
-modulation classifier gets the capture. Anything that makes the
+modulation classifier gets the channelized primary region, and in v1 its
+label is shown to the LLM but never grounds a tag. Anything that makes the
 measurements less trustworthy is listed in reduced_confidence, keeps every
 band match ungrounded, and caps routing at needs_review.
 
@@ -28,7 +29,7 @@ from dataclasses import dataclass
 from agent.band_table import BandEntry, BandMatch, match_bands
 from agent.classifier import ModulationClassifier, ModulationPrediction
 from agent.snippet_reader import Snippet
-from dsp.features import RegionFeatures, region_features
+from dsp.features import RegionFeatures, channelize_region, region_features
 from dsp.segmentation import (
     MAX_CONTEXT_REGIONS,
     NFFT,
@@ -123,8 +124,16 @@ def analyse_snippet(
         signal_center_hz=signal_center,
         context=context,
         band_matches=matches,
-        modulation=classifier.predict(snippet.iq, snippet.sample_rate),
+        modulation=None if primary_region is None else _predict(classifier, snippet, segmentation, primary_region),
     )
+
+
+def _predict(
+    classifier: ModulationClassifier, snippet: Snippet, segmentation: Segmentation, region: SpectralRegion
+) -> ModulationPrediction | None:
+    """The classifier sees the primary emitter alone, at baseband."""
+    baseband, rate, _, _ = channelize_region(snippet.iq, segmentation, region)
+    return classifier.predict(baseband, rate)
 
 
 def _reduced_confidence(

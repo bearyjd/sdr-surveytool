@@ -112,11 +112,21 @@ def _passband(freqs: np.ndarray, passband_hz: float) -> np.ndarray:
     return 0.5 * (1 + np.cos(np.pi * over))
 
 
-def region_features(iq: np.ndarray, segmentation: Segmentation, region: SpectralRegion) -> RegionFeatures:
-    """Features of `region`, measured on its channelized baseband signal."""
+def channelize_region(
+    iq: np.ndarray, segmentation: Segmentation, region: SpectralRegion
+) -> tuple[np.ndarray, float, float, float]:
+    """`region` channelized to baseband: (complex64 signal, its rate, the
+    filter's noise bandwidth, the passband kept)."""
     coarse_bin = segmentation.sample_rate / NFFT
     passband = max(region.end_offset_hz - region.start_offset_hz, _MIN_PASSBAND_BINS * coarse_bin) * _MARGIN
     y, rate, noise_bandwidth = channelize(iq, segmentation.sample_rate, region.center_offset_hz, passband)
+    return y, rate, noise_bandwidth, passband
+
+
+def region_features(iq: np.ndarray, segmentation: Segmentation, region: SpectralRegion) -> RegionFeatures:
+    """Features of `region`, measured on its channelized baseband signal."""
+    coarse_bin = segmentation.sample_rate / NFFT
+    y, rate, noise_bandwidth, passband = channelize_region(iq, segmentation, region)
     # Noise power the coarse floor puts through the channel filter.
     noise = region.noise_per_bin * noise_bandwidth / coarse_bin
 

@@ -37,7 +37,11 @@ def _two_emitters() -> np.ndarray:
 
 
 class _AlwaysPredicts:
+    def __init__(self):
+        self.seen: list[tuple[int, float]] = []
+
     def predict(self, iq, sample_rate):
+        self.seen.append((len(iq), sample_rate))
         return ModulationPrediction(label="lora", confidence=0.7)
 
 
@@ -188,6 +192,19 @@ def test_out_of_table_signal_is_ungrounded_unless_the_classifier_predicts():
     assert (unpredicted.grounded_band_ids, unpredicted.modulation_label) == (frozenset(), None)
     analysis = analyse_snippet(snippet, BANDS, _AlwaysPredicts())
     assert analysis.band_matches == () and analysis.modulation_label == "lora"
+
+
+def test_the_classifier_sees_the_channelized_primary_region_not_the_capture():
+    """A model trained on one emitter's baseband would be confused by the
+    whole capture, the context emitters included."""
+    rng = np.random.default_rng(26)
+    burst = synthetic.gate(synthetic.band_limited(rng, N, FS, 20e3, 200e3, 1e-3), FS, [(0.05, 0.1)])
+    iq = synthetic.tone(N, FS, -250e3, 1e-4) + burst + synthetic.noise(rng, N, 1e-5)
+    classifier = _AlwaysPredicts()
+    analysis = analyse_snippet(_snippet(iq), BANDS, classifier)
+    ((length, rate),) = classifier.seen
+    assert rate == analysis.primary.analysis_rate_hz <= FS / 4
+    assert length <= N // 4
 
 
 def test_an_unreliable_bandwidth_grounds_nothing():

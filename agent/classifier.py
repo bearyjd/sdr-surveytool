@@ -3,7 +3,9 @@
 
 v1 ships only UnavailableClassifier. The TorchSig model trained on the DGX
 Spark and exported to the Jetson plugs in here later, behind the same
-protocol; until then routing can only ground a result in the band table.
+protocol. It is handed the channelized primary region (one emitter at
+baseband) and its rate. In v1 routing grounds a result only in the band
+table: a label never grounds a tag by itself.
 """
 
 from __future__ import annotations
