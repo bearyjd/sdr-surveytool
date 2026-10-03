@@ -33,6 +33,13 @@ The dBFS power stats and the occupied-bandwidth estimate live in the shared top-
   `signal.rssi` holds the mean in-burst power, `signal.peak_power` the peak of the
   1 ms moving-average power, and `signal.snr` is rssi minus `--noise-floor-dbfs`.
   Records carry `quality_flags: {"power_units": "dBFS"}`.
+- **Corrupt samples:** NaN/inf IQ samples (DMA or driver corruption) are left out of
+  every measurement and counted in `quality_flags.non_finite_samples`; the raw IQ is
+  still written. A snippet with no finite samples is dropped and logged rather than
+  emitted as a record ingest could not validate.
+- **Frequency:** `identifier.center_freq` (and the SigMF frequency, and the cooldown
+  key) is the frequency read back from the SDR after tuning. A mismatch with
+  `--center-freq` is logged.
 - `timestamp` is the trigger sample's time: the wall clock read once at stream start,
   plus sample_index / sample_rate. Cooldowns compare those same sample-derived times.
   The rate is the one read back from the SDR (drivers round unsupported rates); a
@@ -99,10 +106,12 @@ Ingest's `LocalSnippetStore` treats the path as untrusted:
   doesn't lose the detection. The record is still persisted, with
   `iq_snippet_path: null` and `quality_flags.snippet_rejected` set to the reason.
 - **Failed persist:** if persisting the record fails after its snippet was adopted,
-  ingest removes the adopted pair, and reverts the grid-density count, only once a
-  fresh query confirms no row references it. The error may have come after COMMIT,
-  so if the row is found, or the check fails too (e.g. the database is down), the
-  files and count are kept: an orphan is recoverable, a dangling reference is not.
+  ingest removes the adopted pair, and reverts the grid-density count, only when the
+  row is known absent. That means the failure came before COMMIT was issued and a
+  fresh query confirms no row references the snippet. Any failure during or after
+  COMMIT is in doubt (on Postgres the row can commit a moment after the connection
+  drops), and so is a failed check: in those cases the files and count are kept. An
+  orphan is recoverable; a dangling reference is not.
 
 **Deployment requirements** (checked at startup, which fails with an actionable
 message):
@@ -113,10 +122,13 @@ message):
 - **One filesystem and mount.** Staging and store must be on the same filesystem and
   mount, because hard links cannot cross either. Ingest proves this at startup with
   a real hard link.
-- **Matching paths.** Both services resolve their directories to absolute paths and
-  log them, since relative defaults resolve against each process's working
-  directory. Run both from the same directory, or pass the same absolute staging
-  path to both.
+- **Absolute, matching paths.** Staging and store directories must be absolute
+  paths; relative ones are rejected at startup, since capture and ingest would
+  resolve them against different working directories. The defaults are
+  `/var/lib/sdr-surveytool/snippet-staging` and `/var/lib/sdr-surveytool/snippets`.
+  Create the parent once for the service user, e.g.
+  `sudo install -d -o sdr -g sdr -m 700 /var/lib/sdr-surveytool`. Capture's
+  `--staging-dir` must equal ingest's `--snippet-staging-dir`.
 
 ## System dependencies (Fedora 43, verified)
 
@@ -141,7 +153,7 @@ the service logs `SoapySDR::Device::make() no match` and retries with backoff.
 ## Running
 
 ```bash
-sdr-ingest --gps-fix-quality 0            # stages from data/snippet-staging by default
+sdr-ingest --gps-fix-quality 0   # staging/store under /var/lib/sdr-surveytool by default
 sdr-capture-unknown --survey-id s1 --operator-id op1 \
     --center-freq 915e6 --noise-floor-dbfs -60
 ```
@@ -185,6 +197,19 @@ Disk and memory stay bounded:
 
 The service restarts the radio session when the stream stalls for 5 s. SIGTERM shuts
 it down the same way Ctrl-C does.
+
+## Known gaps (follow-ups)
+
+- **Ambiguous delivery:** when an emit fails after ingest actually received the
+  record, capture deletes the staged IQ that ingest is about to adopt. Fixing this
+  needs an acknowledgement or outbox protocol between capture and ingest, for all
+  modalities.
+- **Orphan cleanup:** no startup janitor removes staging or store orphans left by
+  crashes.
+- **Queue-full overflow:** beyond 64 queue-full summaries in one session, detections
+  are lost. That case is bounded and counted (`queue_full_summary_lost`).
+- **Same-uid tampering:** a process running as the service uid can tamper with
+  staged files. That is the documented trust boundary.
 
 ## Licenses
 

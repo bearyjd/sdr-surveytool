@@ -170,9 +170,17 @@ pipeline, §7 storage).
 >     is flagged unreliable;
 >   - SigMF annotations mark `pre_trigger` and `burst`;
 >   - the ingest grid count is reverted only when the row is confirmed absent.
-> - **Final counts:** the full suite gives `270 passed, 1 skipped`, and the
+> - **Final Codex pass:**
+>   - ingest persists via `add_record()` (add + flush) and then COMMIT, and never
+>     discards or reverts when COMMIT is in doubt;
+>   - NaN/inf samples are measured around and flagged (`non_finite_samples`), and
+>     snippets with no finite samples are dropped;
+>   - the normalizer refuses non-finite floats;
+>   - the tuned frequency is read back (`get_frequency(0)`);
+>   - snippet dirs default to `/var/lib/sdr-surveytool/...` and must be absolute.
+> - **Final counts:** the full suite gives `287 passed, 1 skipped`, and the
 >   `-W error` subset (`tests/capture/unknown tests/dsp
->   tests/storage/test_snippet_store.py`) gives `197 passed`.
+>   tests/storage/test_snippet_store.py`) gives `211 passed`.
 
 ## Verified facts (build-and-run spike, 2026-10-03)
 
