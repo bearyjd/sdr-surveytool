@@ -52,7 +52,9 @@ _MAX_PATH_CHARS = 4096
 # dangerous attribute, any privilege on survey_records, the right to create
 # objects anywhere, TEMPORARY on any database, or a large-object writer;
 # and the only SECURITY DEFINER function it may execute (outside
-# extensions) is classify_unknown.
+# extensions) is classify_unknown. Its definer (the owner role) must belong
+# to no role and hold nothing on survey_records beyond SELECT and UPDATE
+# (metadata), and own the view and both functions.
 # Each query returns one row per problem: a priority (attributes and role
 # tricks first, memberships last) and the problem as text.
 _PROBLEMS = text(
@@ -116,6 +118,40 @@ _PROBLEMS = text(
                    (pg_catalog.to_regprocedure('pg_catalog.lo_open(oid, integer)')),
                    (pg_catalog.to_regprocedure('pg_catalog.lo_put(oid, bigint, bytea)'))) AS w (fn)
      WHERE pg_catalog.has_function_privilege(session_user, w.fn, 'EXECUTE')
+    UNION ALL
+    SELECT 1, 'the definer ' || o.rolname || ' is a member of ' || g.rolname
+      FROM pg_catalog.pg_proc AS p
+      JOIN pg_catalog.pg_roles AS o ON o.oid = p.proowner
+      JOIN pg_catalog.pg_auth_members AS m ON m.member = o.oid
+      JOIN pg_catalog.pg_roles AS g ON g.oid = m.roleid
+     WHERE p.oid = pg_catalog.to_regprocedure(:classify)
+    UNION ALL
+    SELECT 1, 'the definer ' || o.rolname || ' can do more on survey_records than SELECT and UPDATE (metadata)'
+      FROM pg_catalog.pg_proc AS p
+      JOIN pg_catalog.pg_roles AS o ON o.oid = p.proowner
+     WHERE p.oid = pg_catalog.to_regprocedure(:classify)
+       AND (o.rolsuper OR o.rolbypassrls
+            OR pg_catalog.has_table_privilege(
+                   o.oid, pg_catalog.to_regclass('public.survey_records'),
+                   'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+            OR pg_catalog.has_any_column_privilege(
+                   o.oid, pg_catalog.to_regclass('public.survey_records'), 'INSERT, REFERENCES')
+            OR EXISTS (
+                   SELECT 1
+                     FROM pg_catalog.pg_attribute AS a
+                    WHERE a.attrelid = pg_catalog.to_regclass('public.survey_records')
+                      AND a.attnum > 0 AND NOT a.attisdropped AND a.attname <> 'metadata'
+                      AND pg_catalog.has_column_privilege(o.oid, a.attrelid, a.attnum, 'UPDATE')))
+    UNION ALL
+    SELECT 1, 'the view and the functions do not share one owner'
+     WHERE (SELECT c.relowner FROM pg_catalog.pg_class AS c
+             WHERE c.oid = pg_catalog.to_regclass('public.agent_pending_unknown'))
+           IS DISTINCT FROM (SELECT p.proowner FROM pg_catalog.pg_proc AS p
+                              WHERE p.oid = pg_catalog.to_regprocedure(:classify))
+        OR (SELECT p.proowner FROM pg_catalog.pg_proc AS p
+             WHERE p.oid = pg_catalog.to_regprocedure(:predicate))
+           IS DISTINCT FROM (SELECT p.proowner FROM pg_catalog.pg_proc AS p
+                              WHERE p.oid = pg_catalog.to_regprocedure(:classify))
     UNION ALL
     SELECT 1, 'unexpected overload ' || p.oid::pg_catalog.regprocedure::text
       FROM pg_catalog.pg_proc AS p

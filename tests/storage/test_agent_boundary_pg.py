@@ -666,6 +666,56 @@ def test_self_check_refuses_a_view_bound_to_another_function(boundary):
         admin.dispose()
 
 
+def test_the_installer_refuses_an_owner_that_belongs_to_another_role(boundary):
+    """classify_unknown runs as the owner (SECURITY DEFINER): an owner that
+    inherits a broader role would lend it to every write."""
+    owner = f"sdr_member_owner_{boundary.suffix}"
+    admin = _engine(boundary.admin_url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(f"CREATE ROLE {owner} NOLOGIN")
+            conn.exec_driver_sql(f"GRANT pg_write_all_data TO {owner}")
+        with pytest.raises(psycopg.errors.InvalidParameterValue, match=f"{owner} is a member of pg_write_all_data"):
+            install_agent_boundary(admin, boundary.agent_role, owner)
+    finally:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(f"DROP ROLE IF EXISTS {owner}")
+        admin.dispose()
+
+
+def test_the_installer_makes_the_owner_noinherit(boundary):
+    assert _admin_scalar(
+        boundary, "SELECT rolinherit FROM pg_catalog.pg_roles WHERE rolname = :r", r=boundary.owner_role
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "grant, revoke, problem",
+    [
+        ("GRANT DELETE ON public.survey_records TO {owner}", "REVOKE DELETE ON public.survey_records FROM {owner}",
+         "the definer {owner} can do more on survey_records than SELECT and UPDATE (metadata)"),
+        ("GRANT UPDATE (modality) ON public.survey_records TO {owner}",
+         "REVOKE UPDATE (modality) ON public.survey_records FROM {owner}",
+         "the definer {owner} can do more on survey_records than SELECT and UPDATE (metadata)"),
+        ("GRANT pg_read_all_data TO {owner}", "REVOKE pg_read_all_data FROM {owner}",
+         "the definer {owner} is a member of pg_read_all_data"),
+    ],
+)
+def test_self_check_refuses_a_definer_with_more_than_it_needs(boundary, grant, revoke, problem):
+    names = {"owner": boundary.owner_role}
+    admin = _engine(boundary.admin_url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(grant.format(**names))
+        with pytest.raises(BoundaryViolation, match="not confined") as excinfo:
+            connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+        assert problem.format(**names) in str(excinfo.value)
+    finally:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(revoke.format(**names))
+        admin.dispose()
+
+
 def test_self_check_rejects_a_superuser_url(boundary):
     with pytest.raises(BoundaryViolation, match="not confined.*has SUPERUSER"):
         connect_gateway(_url(boundary.admin_url), boundary.agent_role)

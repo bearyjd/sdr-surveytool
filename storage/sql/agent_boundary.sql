@@ -51,6 +51,22 @@ BEGIN
                 USING ERRCODE = 'invalid_parameter_value';
         END IF;
     END LOOP;
+    -- classify_unknown runs as the owner: an owner that belongs to another
+    -- role would lend that role's privileges to every write.
+    IF EXISTS (
+        SELECT 1
+          FROM pg_catalog.pg_auth_members AS m
+          JOIN pg_catalog.pg_roles AS r ON r.oid = m.member
+         WHERE r.rolname = '{{owner_role}}'
+    ) THEN
+        RAISE EXCEPTION 'agent boundary: owner role {{owner_role}} is a member of %; use a fresh role name',
+            (SELECT pg_catalog.string_agg(g.rolname, ', ')
+               FROM pg_catalog.pg_auth_members AS m
+               JOIN pg_catalog.pg_roles AS r ON r.oid = m.member
+               JOIN pg_catalog.pg_roles AS g ON g.oid = m.roleid
+              WHERE r.rolname = '{{owner_role}}')
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
 END
 $existing$;
 DO $roles$
@@ -64,7 +80,7 @@ BEGIN
 END
 $roles$;
 ALTER ROLE {{agent_role}} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-ALTER ROLE {{owner_role}} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE {{owner_role}} NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 
 -- Revokes. CREATE on public is revoked explicitly: clusters upgraded from
 -- before PostgreSQL 15 keep the old PUBLIC CREATE default. TEMPORARY is

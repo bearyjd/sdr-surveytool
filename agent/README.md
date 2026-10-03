@@ -81,7 +81,10 @@ to the cellular/WiFi/BT decode modules.
   login itself (`session_user`): the session must run as the login (no `SET ROLE`), the
   login must have no role settings (`ALTER ROLE ... SET`), no membership but that role, no
   dangerous role attribute, no privilege on the table, no CREATE anywhere, no TEMPORARY on
-  **any** database, and no other executable SECURITY DEFINER function. The installer only
+  **any** database, and no other executable SECURITY DEFINER function. It also checks the
+  definer: the owner role (NOINHERIT, set by the installer) belongs to no role, holds
+  nothing on `survey_records` beyond SELECT and UPDATE (metadata), and owns the view and
+  both functions, which have no other overloads. The installer only
   touches the survey database, so operators must revoke TEMPORARY and CONNECT from PUBLIC
   (and from the login) on every other database in the cluster, `postgres` included:
   `REVOKE TEMPORARY, CONNECT ON DATABASE postgres FROM PUBLIC;`. The installer also revokes
