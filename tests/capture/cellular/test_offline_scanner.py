@@ -269,6 +269,17 @@ def test_parse_cellsearch_output_prefers_nearest_row_within_radius():
     assert cells[0]["n_rb_dl"] == 100
 
 
+def test_parse_cellsearch_output_matches_duplex_mode():
+    """An FDD detection never takes a TDD row's MIB, even with the same cell
+    ID at the same frequency listed first."""
+    stdout = _synthetic_stdout(
+        [_block_at("1815.3")],
+        [_synthetic_row(duplex="TDD", n_rb=50), _synthetic_row(duplex="FDD")],
+    )
+    cells = parse_cellsearch_output(stdout)
+    assert cells[0]["n_rb_dl"] == 100
+
+
 def test_parse_cellsearch_output_ignores_row_one_mhz_or_more_away():
     stdout = _synthetic_stdout([_block_at("1815.3")], [_synthetic_row(fc="1816.3")])
     cells = parse_cellsearch_output(stdout)

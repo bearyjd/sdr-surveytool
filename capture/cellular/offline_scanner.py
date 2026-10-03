@@ -20,7 +20,7 @@ _CELL_BLOCK = re.compile(
 # resource) are decoded MIB fields. The U/UNK placeholders for unknown
 # values deliberately don't match.
 _SUMMARY_ROW = re.compile(
-    r"^(?:FDD|TDD)\s+(?P<cell_id>\d+)\s+(?P<n_ports>[124])\s+"
+    r"^(?P<duplex>FDD|TDD)\s+(?P<cell_id>\d+)\s+(?P<n_ports>[124])\s+"
     r"(?P<freq_mhz>[\d.]+)M\s+\S+\s+\S+\s+"
     r"(?P<cp_type>[NE])\s+(?P<n_rb_dl>6|15|25|50|75|100)\s+"
     r"(?P<phich_duration>[NE])\s+(?P<phich_resource>1/6|1/2|one|two)\s+\S+$",
@@ -53,6 +53,7 @@ def _parse_summary_rows(stdout: str) -> list[dict]:
         n_rb_dl = int(match.group("n_rb_dl"))
         rows.append(
             {
+                "duplex": match.group("duplex"),
                 "cell_id": int(match.group("cell_id")),
                 "freq_mhz": float(match.group("freq_mhz")),
                 "n_ports": int(match.group("n_ports")),
@@ -67,13 +68,15 @@ def _parse_summary_rows(stdout: str) -> list[dict]:
 
 
 def _mib_fields_for(cell: dict, rows: list[dict]) -> dict:
-    """MIB fields from the summary row for the same cell: same cell ID, and
-    the nearest frequency within _SAME_CELL_MHZ. All None if there is no
-    such row, e.g. when the output was cut off before the table."""
+    """MIB fields from the summary row for the same cell: same duplex mode
+    and cell ID, and the nearest frequency within _SAME_CELL_MHZ. All None
+    if there is no such row, e.g. when the output was cut off before the
+    table."""
     candidates = [
         row
         for row in rows
-        if row["cell_id"] == cell["cell_id"]
+        if row["duplex"] == cell["duplex"]
+        and row["cell_id"] == cell["cell_id"]
         and abs(row["freq_mhz"] - cell["freq_mhz"]) < _SAME_CELL_MHZ
     ]
     if not candidates:
