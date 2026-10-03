@@ -10,6 +10,7 @@ dependencies = [
     "bleak>=0.22",
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    "numpy>=1.26",  # capture/unknown DSP; also capture/cellular/testdata/generate_fixture.py
 ]
 
 [project.scripts]
@@ -21,7 +22,6 @@ sdr-capture-bluetooth = "capture.bluetooth.service:main"
 dev = [
     "pytest>=8.0",
     "httpx>=0.27",
-    "numpy>=1.26",  # capture/cellular/testdata/generate_fixture.py only
 ]
 
 [tool.setuptools]
@@ -32,6 +32,7 @@ packages = [
     "capture.wifi",
     "capture.bluetooth",
     "capture.cellular",
+    "capture.unknown",
     "ingest",
     "storage",
     "viz",
