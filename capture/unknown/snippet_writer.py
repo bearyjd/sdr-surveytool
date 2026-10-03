@@ -29,9 +29,11 @@ def write_sigmf_snippet(
     Atomic: each file is written under a hidden temporary name and renamed
     into place, data first and meta last, so a `.sigmf-meta` is never
     visible without its complete `.sigmf-data` (the meta is the completeness
-    marker the snippet store requires). On failure, the temporaries and any
-    already-renamed data file are removed. Files are created 0o600, and a
-    staging directory created here is 0o700.
+    marker the snippet store requires). Each file is fsynced before its
+    rename and the directory after both, so a crash can't leave a visible
+    pair whose contents never reached the disk. On failure, the temporaries
+    and any already-renamed data file are removed. Files are created 0o600,
+    and a staging directory created here is 0o700.
 
     `capture_start` is the sample-derived UTC time of iq[0] and becomes the
     SigMF capture's core:datetime. The basename carries a random suffix, so
@@ -52,6 +54,7 @@ def write_sigmf_snippet(
         with _create_private(tmp_data, "wb") as data_file:
             # '<c8' = little-endian complex64, exactly SigMF's cf32_le.
             np.asarray(iq, dtype="<c8").tofile(data_file)
+            _flush_to_disk(data_file)
         os.replace(tmp_data, data_path)
         leftovers.append(data_path)
 
@@ -76,7 +79,10 @@ def write_sigmf_snippet(
         meta.validate()
         with _create_private(tmp_meta, "w") as meta_file:
             meta.dump(meta_file, pretty=True)
+            _flush_to_disk(meta_file)
         os.replace(tmp_meta, meta_path)
+        # Persist the two renames themselves.
+        _fsync_dir(staging_dir)
     except BaseException:
         for leftover in leftovers:
             leftover.unlink(missing_ok=True)
@@ -87,3 +93,16 @@ def write_sigmf_snippet(
 def _create_private(path: Path, mode: str) -> IO:
     """Create `path` exclusively, readable and writable by the owner only."""
     return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), mode)
+
+
+def _flush_to_disk(file: IO) -> None:
+    file.flush()
+    os.fsync(file.fileno())
+
+
+def _fsync_dir(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)

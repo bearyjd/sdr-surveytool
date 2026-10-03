@@ -1,6 +1,7 @@
 # tests/capture/unknown/test_snippet_writer.py
 import json
 import os
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -90,3 +91,30 @@ def test_written_names_match_what_the_snippet_store_accepts(tmp_path):
     sides of that contract together."""
     data_path = write_sigmf_snippet(IQ, tmp_path, 2e6, 915e6, START)
     assert STAGED_DATA_NAME.fullmatch(data_path.name)
+
+
+def test_files_are_fsynced_before_their_rename_and_the_dir_after(tmp_path, monkeypatch):
+    """A crash after os.replace() but before writeback could otherwise leave
+    a visible pair whose contents (or whose directory entries) never reached
+    the disk."""
+    events = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def recording_fsync(fd):
+        events.append(("fsync", "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"))
+        real_fsync(fd)
+
+    def recording_replace(src, dst):
+        events.append(("replace", Path(dst).suffix))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(snippet_writer.os, "fsync", recording_fsync)
+    monkeypatch.setattr(snippet_writer.os, "replace", recording_replace)
+    write_sigmf_snippet(IQ, tmp_path, 2e6, 915e6, START)
+    assert events == [
+        ("fsync", "file"),
+        ("replace", ".sigmf-data"),
+        ("fsync", "file"),
+        ("replace", ".sigmf-meta"),
+        ("fsync", "dir"),
+    ]
