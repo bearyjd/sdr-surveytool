@@ -68,6 +68,14 @@ def test_settings_reject_non_positive_cooldown(tmp_path):
         _settings(tmp_path, cooldown_seconds=0.0)
 
 
+def test_settings_reject_a_drift_threshold_inside_normal_buffering_lag(tmp_path):
+    """Sample time normally lags wall time by ~100 ms of buffering; a tighter
+    threshold would rebuild the radio session on every poll."""
+    with pytest.raises(ValueError, match="max_clock_drift_seconds"):
+        _settings(tmp_path, max_clock_drift_seconds=0.05)
+    assert _settings(tmp_path, max_clock_drift_seconds=0.5).max_clock_drift_seconds == 0.5
+
+
 def test_settings_reject_windows_shorter_than_one_sample(tmp_path):
     with pytest.raises(ValueError, match="at least one sample"):
         _settings(tmp_path, averaging_seconds=1e-7)

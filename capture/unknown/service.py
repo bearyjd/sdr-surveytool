@@ -44,6 +44,7 @@ _SNIPPET_QUEUE_MAXSIZE = 2
 # overflowing. Verified on GNU Radio 3.10.12 up to 5.6M items (100 ms at
 # 56 MS/s, 42.7 MiB of complex64).
 _SOURCE_BUFFER_SECONDS = 0.1
+_MIN_CLOCK_DRIFT_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -88,8 +89,14 @@ class CaptureSettings:
             )
         if self.min_free_bytes < 0:
             raise ValueError("min_free_bytes must be >= 0")
-        if self.stall_seconds <= 0 or self.max_clock_drift_seconds <= 0:
-            raise ValueError("stall_seconds and max_clock_drift_seconds must be > 0")
+        if self.stall_seconds <= 0:
+            raise ValueError("stall_seconds must be > 0")
+        if self.max_clock_drift_seconds < _MIN_CLOCK_DRIFT_SECONDS:
+            raise ValueError(
+                f"max_clock_drift_seconds must be >= {_MIN_CLOCK_DRIFT_SECONDS}: sample "
+                "time normally lags wall time by ~100 ms of buffering, and a tighter "
+                "threshold would rebuild the radio session on every poll"
+            )
         if self.samples(self.averaging_seconds) < 1 or self.samples(self.post_trigger_seconds) < 1:
             raise ValueError(
                 "averaging_seconds and post_trigger_seconds must each span at least one sample"
