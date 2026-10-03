@@ -2,6 +2,9 @@ import logging
 
 import pytest
 
+from sqlalchemy import create_engine
+
+from ingest import main as ingest_main
 from ingest.main import _open_snippet_store, _parse_args, database_url
 from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES
 
@@ -132,3 +135,41 @@ def test_a_passwordless_url_on_argv_is_not_warned_about(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         database_url(args)
     assert caplog.text == ""
+
+
+class _StubServer:
+    def __init__(self, socket_path):
+        pass
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+
+class _StoppingService:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def process_one(self, timeout):
+        raise KeyboardInterrupt
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://ingest:s3cret@db.example/surveytool?sslmode=verify-full",
+        "postgresql://ingest@db.example/surveytool?password=s3cret&sslmode=verify-full",
+    ],
+)
+def test_ingest_startup_never_logs_the_database_password(monkeypatch, caplog, url):
+    monkeypatch.setenv("SURVEYTOOL_DATABASE_URL", url)
+    monkeypatch.setattr(ingest_main, "make_engine", lambda _url: create_engine("sqlite://"))
+    monkeypatch.setattr(ingest_main, "QueueServer", _StubServer)
+    monkeypatch.setattr(ingest_main, "IngestService", _StoppingService)
+    with caplog.at_level(logging.DEBUG):
+        ingest_main.main(["--gps-fix-quality", "0"])
+    assert "Ingest listening on /tmp/sdr-ingest.sock -> postgresql://ingest" in caplog.text
+    assert "db.example/surveytool" in caplog.text
+    assert "s3cret" not in caplog.text

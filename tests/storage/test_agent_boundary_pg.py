@@ -8,10 +8,12 @@ all of them afterwards.
 """
 
 import json
+import logging
 import os
 import secrets
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -21,7 +23,7 @@ import pytest
 from anthropic.types import Message
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.pool import NullPool
 
 from agent.band_table import load_band_table
@@ -34,6 +36,7 @@ from agent.db_gateway import (
     SubmitTimedOut,
     connect_gateway,
 )
+from agent import service as agent_service
 from agent.service import AgentSettings, ClassificationAgent, SystemicFault
 from capture.unknown.snippet_writer import write_sigmf_snippet
 from dsp import synthetic
@@ -1214,3 +1217,35 @@ def test_agent_classifies_a_real_row_through_the_boundary(boundary, tmp_path):
     dropped = _metadata(boundary, dropped_id)
     assert (dropped["classification_status"], dropped["tag"], dropped["confidence"]) == ("needs_review", None, 0.0)
     assert "snippet_dropped = 'low_disk'" in dropped["reasoning"]
+
+
+@pytest.mark.parametrize("right_password", [True, False], ids=["starts", "refused"])
+def test_agent_startup_never_logs_the_database_password(boundary, tmp_path, monkeypatch, caplog, capsys, right_password):
+    """A full start (connect, self-check, lock, startup probe, stop) and a
+    refused login: the password reaches neither the logs nor the exit."""
+    password = boundary.password if right_password else f"wrong{boundary.password}"
+    monkeypatch.setenv("SURVEYTOOL_AGENT_DATABASE_URL", _url(boundary.agent_url.set(password=password)))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-used")
+    stopped = threading.Event()
+    stopped.set()
+    monkeypatch.setattr(agent_service, "install_stop_signal", lambda: stopped)
+    argv = ["--agent-role", boundary.agent_role, "--snippet-store-dir", str(tmp_path), "--start-after-id", str(2**62)]
+    with caplog.at_level(logging.DEBUG):
+        if right_password:
+            agent_service.main(argv)
+            ended = ""
+        else:
+            with pytest.raises(OperationalError, match="password authentication failed") as excinfo:
+                agent_service.main(argv)
+            ended = "".join(traceback.format_exception(excinfo.value))
+    assert password not in caplog.text + capsys.readouterr().err + ended
+
+
+def test_installer_never_prints_the_admin_password(boundary, monkeypatch, capsys):
+    password = f"wrong{boundary.password}"
+    monkeypatch.setenv("SURVEYTOOL_ADMIN_DATABASE_URL", _url(boundary.admin_url.set(password=password)))
+    with pytest.raises((OperationalError, SystemExit)) as excinfo:
+        boundary_main([])
+    captured = capsys.readouterr()
+    assert "password authentication failed" in str(excinfo.value)
+    assert password not in captured.out + captured.err + "".join(traceback.format_exception(excinfo.value))

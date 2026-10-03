@@ -15,7 +15,7 @@ from sqlalchemy.engine import make_url
 from ingest.gps_fix import GpsFix, StaticGpsFixProvider
 from ingest.queue_server import QueueServer
 from ingest.service import IngestService
-from storage.db import init_db, make_engine, make_session_factory
+from storage.db import init_db, make_engine, make_session_factory, redacted_url
 from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES, LocalSnippetStore, require_absolute
 
 logger = logging.getLogger(__name__)
@@ -178,7 +178,7 @@ def main(argv: list[str] | None = None) -> None:
     server = QueueServer(args.socket_path)
     server.start()
     service = IngestService(server, session_factory, gps_provider, snippet_store=snippet_store)
-    logger.info("Ingest listening on %s -> %s", args.socket_path, url)
+    logger.info("Ingest listening on %s -> %s", args.socket_path, redacted_url(url))
 
     try:
         while True:

@@ -2,12 +2,16 @@
 """Gateway checks that need no PostgreSQL (the self-check, view and
 function are exercised for real in tests/storage/test_agent_boundary_pg.py)."""
 
+import logging
+import traceback
+
 import pytest
 
 import psycopg
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, OperationalError
 
+from agent import service
 from agent.db_gateway import (
     AgentGateway,
     PendingRecord,
@@ -124,3 +128,17 @@ def test_tls_settings_that_are_accepted(url, monkeypatch):
 def test_pgsslmode_counts_when_the_url_sets_none(monkeypatch):
     monkeypatch.setenv("PGSSLMODE", "verify-full")
     require_tls_for_remote(make_url("postgresql://agent@db.example.com/surveytool"))
+
+
+def test_agent_startup_never_logs_the_database_password(monkeypatch, caplog, capsys, tmp_path):
+    """Nothing listens on port 1, so the connection fails: neither the logs
+    nor the exception that ends the process may carry the password."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-used")
+    monkeypatch.setenv(
+        "SURVEYTOOL_AGENT_DATABASE_URL", "postgresql://agent_login:s3cret-pw@127.0.0.1:1/surveytool"
+    )
+    with caplog.at_level(logging.DEBUG), pytest.raises(OperationalError) as excinfo:
+        service.main(["--snippet-store-dir", str(tmp_path)])
+    told = caplog.text + capsys.readouterr().err + "".join(traceback.format_exception(excinfo.value))
+    assert "127.0.0.1" in told
+    assert "s3cret-pw" not in told
