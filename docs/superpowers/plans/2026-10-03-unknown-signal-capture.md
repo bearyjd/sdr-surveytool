@@ -137,9 +137,20 @@ pipeline, §7 storage).
 >     tolerates a vanished source after both links;
 >   - the store constructor proves staging-to-store hard links with a real probe
 >     instead of comparing `st_dev`.
-> - **Final counts:** the full suite gives `172 passed, 1 skipped`, and the
+> - **Adversarial review round:**
+>   - ingest discards an adopted pair when its record fails to persist
+>     (`SnippetStore.discard`);
+>   - SigMF files are fsynced before rename, and the staging dir after;
+>   - adopt checks the cf32 size (`bad_size`, `--max-snippet-bytes`);
+>   - `RecordEmitter` connects lazily, so capture can start before ingest;
+>   - cooldowns from the future are clamped to a new session's anchor;
+>   - snippets are measured before anything is written, and a write failure emits
+>     a `processing_error` record;
+>   - settings must be finite, with `sample_rate <= 61.44e6` and windows `<= 5 s`;
+>   - queue-full drops keep a summary emitted as a `queue_full` record.
+> - **Final counts:** the full suite gives `230 passed, 1 skipped`, and the
 >   `-W error` subset (`tests/capture/unknown tests/dsp
->   tests/storage/test_snippet_store.py`) gives `106 passed`.
+>   tests/storage/test_snippet_store.py`) gives `160 passed`.
 
 ## Verified facts (build-and-run spike, 2026-10-03)
 
