@@ -13,6 +13,7 @@ for the full architecture design.
 - `capture/bluetooth/` — bleak-based BLE scanner + normalizer
 - `capture/unknown/` — custom GNU Radio flowgraph (gr-soapy) + trigger/IQ capture + normalizer
 - `gps/` — u-blox M8N reader, shared GPS fix service
+- `dsp/` — shared numpy-only signal math (power, occupied bandwidth), no I/O; reused by `agent/`
 - `schema/` — unified record schema (versioned) + validators
 - `ingest/` — normalizer/geotagger — the only writer to storage
 - `agent/` — Part 4 agentic signal-characterization (tools, feature extraction, routing)
