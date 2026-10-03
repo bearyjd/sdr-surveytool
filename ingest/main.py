@@ -5,8 +5,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import queue
 import time
+from pathlib import Path
+
+from sqlalchemy.engine import make_url
 
 from ingest.gps_fix import GpsFix, StaticGpsFixProvider
 from ingest.queue_server import QueueServer
@@ -15,6 +19,11 @@ from storage.db import init_db, make_engine, make_session_factory
 from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES, LocalSnippetStore, require_absolute
 
 logger = logging.getLogger(__name__)
+
+DATABASE_URL_ENV = "SURVEYTOOL_DATABASE_URL"
+# The name LoadCredential= gives it: systemd puts the file in $CREDENTIALS_DIRECTORY.
+DATABASE_URL_CREDENTIAL = "database_url"
+_DEFAULT_DATABASE_URL = "sqlite:///survey.db"
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -26,8 +35,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--database-url",
-        default="sqlite:///survey.db",
-        help="SQLAlchemy database URL.",
+        default=None,
+        help=f"SQLAlchemy database URL. Never put a password here: the command line is "
+        f"readable by every local user. Use {DATABASE_URL_ENV} or the systemd credential "
+        f"{DATABASE_URL_CREDENTIAL} instead (default: {_DEFAULT_DATABASE_URL}).",
     )
     parser.add_argument(
         "--poll-timeout",
@@ -95,6 +106,36 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def database_url(args: argparse.Namespace) -> str:
+    """--database-url, else $SURVEYTOOL_DATABASE_URL, else the systemd
+    credential database_url (LoadCredential=), else the local SQLite file.
+    A password belongs in the environment or the credential: the command
+    line is readable by every local user (ps, /proc/<pid>/cmdline), so one
+    there still works but is warned about."""
+    if args.database_url is not None:
+        url = make_url(args.database_url)
+        if url.password is not None or "password" in url.query:
+            logger.warning(
+                "--database-url carries a password, which is visible to every local user "
+                "(ps, /proc/<pid>/cmdline); pass the URL in %s or the systemd credential %s",
+                DATABASE_URL_ENV,
+                DATABASE_URL_CREDENTIAL,
+            )
+        return args.database_url
+    from_env = os.environ.get(DATABASE_URL_ENV)
+    if from_env:
+        return from_env
+    credentials = os.environ.get("CREDENTIALS_DIRECTORY")
+    if credentials:
+        try:
+            from_credential = (Path(credentials) / DATABASE_URL_CREDENTIAL).read_text().strip()
+        except FileNotFoundError:
+            from_credential = ""
+        if from_credential:
+            return from_credential
+    return _DEFAULT_DATABASE_URL
+
+
 def _open_snippet_store(args: argparse.Namespace) -> LocalSnippetStore | None:
     """The snippet store if the operator opted in (both snippet dirs given),
     else None: ingest then runs exactly as without unknown-signal capture,
@@ -119,7 +160,8 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     logging.basicConfig(level=logging.INFO)
 
-    engine = make_engine(args.database_url)
+    url = database_url(args)
+    engine = make_engine(url)
     init_db(engine)
     session_factory = make_session_factory(engine)
 
@@ -136,7 +178,7 @@ def main(argv: list[str] | None = None) -> None:
     server = QueueServer(args.socket_path)
     server.start()
     service = IngestService(server, session_factory, gps_provider, snippet_store=snippet_store)
-    logger.info("Ingest listening on %s -> %s", args.socket_path, args.database_url)
+    logger.info("Ingest listening on %s -> %s", args.socket_path, url)
 
     try:
         while True:
