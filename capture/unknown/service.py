@@ -132,6 +132,16 @@ def process_snippet(
         settings.center_freq_hz,
         snippet.start_time,
     )
+    return _snippet_record(snippet, settings, str(data_path), survey_id, operator_id)
+
+
+def _snippet_record(
+    snippet: CapturedSnippet,
+    settings: CaptureSettings,
+    snippet_path: str | None,
+    survey_id: str,
+    operator_id: str,
+) -> UnifiedRecord:
     event = SnippetCaptureEvent(
         timestamp=snippet.trigger.time,
         center_freq_hz=settings.center_freq_hz,
@@ -142,7 +152,7 @@ def process_snippet(
         peak_power_dbfs=peak_power_dbfs(snippet.power),
         mean_power_dbfs=mean_burst_power_dbfs(snippet.power, settings.threshold_dbfs),
         noise_floor_dbfs=settings.noise_floor_dbfs,
-        snippet_path=str(data_path),
+        snippet_path=snippet_path,
         snippet_duration_ms=round(len(snippet.iq) * 1000 / snippet.sample_rate),
     )
     return normalize_snippet_event(event, survey_id, operator_id)
@@ -205,8 +215,9 @@ def _stage_and_emit(
     drops: Counter[str],
 ) -> None:
     """A full disk or a dead ingest socket loses this one snippet, not the
-    radio session. A snippet whose record could not be emitted has its staged
-    pair deleted: nothing would ever adopt it."""
+    radio session. Below the free-disk floor the IQ is not written but the
+    detection is still emitted, flagged. A snippet whose record could not be
+    emitted has its staged pair deleted: nothing would ever adopt it."""
     free = shutil.disk_usage(settings.staging_dir).free
     if free - snippet.iq.nbytes < settings.min_free_bytes:
         drops["low_disk"] += 1
@@ -219,6 +230,7 @@ def _stage_and_emit(
             snippet.trigger.sample_index,
             drops["low_disk"],
         )
+        _emit_without_snippet(snippet, settings, emitter, survey_id, operator_id, "low_disk")
         return
     try:
         record = process_snippet(snippet, settings, survey_id, operator_id)
@@ -237,6 +249,30 @@ def _stage_and_emit(
         logger.exception(
             "Failed to emit snippet triggered at sample %d; dropping it and "
             "deleting its staged files",
+            snippet.trigger.sample_index,
+        )
+
+
+def _emit_without_snippet(
+    snippet: CapturedSnippet,
+    settings: CaptureSettings,
+    emitter: RecordEmitter,
+    survey_id: str,
+    operator_id: str,
+    reason: str,
+) -> None:
+    """The detection and its measurements survive when the IQ can't be kept:
+    emit the record with no snippet path, flagged, like ingest does for a
+    rejected snippet."""
+    record = _snippet_record(snippet, settings, None, survey_id, operator_id)
+    metadata = record.metadata.model_copy(
+        update={"quality_flags": {**record.metadata.quality_flags, "snippet_dropped": reason}}
+    )
+    try:
+        emitter.emit(record.model_copy(update={"metadata": metadata}))
+    except Exception:
+        logger.exception(
+            "Failed to emit the snippet-less record triggered at sample %d",
             snippet.trigger.sample_index,
         )
 

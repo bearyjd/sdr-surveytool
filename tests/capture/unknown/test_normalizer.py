@@ -1,4 +1,5 @@
 # tests/capture/unknown/test_normalizer.py
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -49,3 +50,8 @@ def test_record_is_queued_for_part4_classification():
 def test_record_survives_the_queue_json_round_trip():
     record = normalize_snippet_event(EVENT, survey_id="s1", operator_id="op1")
     assert UnifiedRecord.model_validate_json(record.model_dump_json()) == record
+
+
+def test_event_without_a_snippet_normalizes_to_a_null_snippet_path():
+    record = normalize_snippet_event(replace(EVENT, snippet_path=None), survey_id="s1", operator_id="op1")
+    assert record.metadata.iq_snippet_path is None

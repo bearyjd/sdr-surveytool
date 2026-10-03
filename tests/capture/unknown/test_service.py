@@ -370,10 +370,11 @@ def test_a_failed_emit_drops_only_that_snippet(tmp_path, caplog):
     assert drops == Counter({"emit_failed": 1})
 
 
-def test_snippet_is_dropped_before_writing_when_disk_is_nearly_full(tmp_path, monkeypatch, caplog):
+def test_low_disk_drops_only_the_snippet_and_still_emits_the_detection(tmp_path, monkeypatch, caplog):
     """Staging, the snippet store and the database share one disk, and a
     continuous emitter writes ~19 GB/h at the default cooldown: below the
-    free-space floor the snippet is dropped, never written."""
+    free-space floor the IQ is never written, but the detection and its
+    measurements are still emitted, flagged (mirroring rejected snippets)."""
     monkeypatch.setattr(service.shutil, "disk_usage", lambda path: SimpleNamespace(free=3 * 1024**3))
     emitter = _FakeEmitter("/unused.sock")
     drops: Counter = Counter()
@@ -382,7 +383,10 @@ def test_snippet_is_dropped_before_writing_when_disk_is_nearly_full(tmp_path, mo
     with caplog.at_level(logging.WARNING):
         service._stage_and_emit(_snippet(), settings, emitter, "s1", "op1", drops)
 
-    assert emitter.records == []
+    (record,) = emitter.records
+    assert record.metadata.iq_snippet_path is None
+    assert record.metadata.quality_flags == {"power_units": "dBFS", "snippet_dropped": "low_disk"}
+    assert record.signal.peak_power == pytest.approx(-20.0, abs=0.01)
     assert not (tmp_path / "staging").exists()
     assert drops == Counter({"low_disk": 1})
     assert "free" in caplog.text

@@ -27,7 +27,7 @@ class SnippetCaptureEvent:
     peak_power_dbfs: float
     mean_power_dbfs: float
     noise_floor_dbfs: float
-    snippet_path: str  # absolute path of the staged .sigmf-data file
+    snippet_path: str | None  # staged .sigmf-data path; None if the IQ was dropped
     snippet_duration_ms: int
 
 
