@@ -23,6 +23,8 @@ from __future__ import annotations
 import errno
 import json
 import math
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +40,10 @@ MAX_SECONDS = 2.0
 MAX_SAMPLES = 1 << 25
 MIN_SAMPLES = 1024  # one coarse FFT frame (dsp.segmentation.NFFT)
 _MAX_META_BYTES = 1 << 20
+# Regular files only, opened without following a final symlink and without
+# blocking on a FIFO, then read a bounded chunk at a time.
+_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+_READ_CHUNK = 1 << 20
 # I/O errors that may pass (a flaky disk, NFS, memory pressure): the record
 # is retried later. Anything else (missing, permission, corrupt) is final.
 _TRANSIENT_ERRNOS = frozenset({errno.EIO, errno.EAGAIN, errno.EINTR, errno.ETIMEDOUT, errno.ESTALE, errno.ENOMEM, errno.EBUSY})
@@ -107,17 +113,15 @@ def read_snippet(
     if not path.is_absolute() or path.suffix != DATA_SUFFIX:
         raise SnippetOutsideStore(f"{snippet_path!r} is not an absolute {DATA_SUFFIX} path")
     data = _contained(path, root)
-    meta = _contained(path.with_suffix(META_SUFFIX), root)
+    meta = path.with_suffix(META_SUFFIX)
+    _contained(meta, root)
     try:
-        with meta.open("rb") as handle:
-            raw = handle.read(_MAX_META_BYTES + 1)
-        if len(raw) > _MAX_META_BYTES:
-            raise SnippetUnreadable(f"{meta} is larger than {_MAX_META_BYTES} bytes")
-        metadata = json.loads(raw)
+        metadata = json.loads(_read_meta(meta))
         if sigmf.DATASET_KEY in metadata[sigmf.SigMFFile.GLOBAL_KEY]:
             raise SnippetUnreadable(f"{meta} names a non-conforming dataset; step 4 never writes one")
-        recording = sigmffile.SigMFFile(metadata=metadata, data_file=str(data), skip_checksum=True)
-        return _samples(recording, data, record_sample_rate, record_center_hz)
+        # Metadata only: the samples are read below, from a checked regular file.
+        recording = sigmffile.SigMFFile(metadata=metadata, skip_checksum=True)
+        return _samples(recording, path, data, record_sample_rate, record_center_hz)
     except SnippetUnreadable:
         raise
     except Exception as exc:  # the files are untrusted: any parse or read failure is "unreadable"
@@ -126,8 +130,50 @@ def read_snippet(
         raise SnippetUnreadable(f"Cannot read {data}: {exc!r}", transient, missing) from exc
 
 
+def _open_regular(path: Path) -> tuple[int, os.stat_result]:
+    """A read-only fd on `path`, which must be a regular file: not a symlink,
+    FIFO, socket or device (a FIFO would block the reader, and the agent,
+    forever). Checked before opening and again on the fd."""
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        raise SnippetUnreadable(f"{path} is not a regular file")
+    fd = os.open(path, _OPEN_FLAGS)
+    try:
+        status = os.fstat(fd)
+        if not stat.S_ISREG(status.st_mode):  # swapped since the lstat
+            raise SnippetUnreadable(f"{path} is not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, status
+
+
+def _read_fd(fd: int, nbytes: int) -> np.ndarray:
+    """Exactly `nbytes` from `fd` into one fresh buffer, a chunk at a time."""
+    out = np.empty(nbytes, dtype=np.uint8)
+    view = memoryview(out)
+    got = 0
+    while got < nbytes:
+        chunk = os.read(fd, min(_READ_CHUNK, nbytes - got))
+        if not chunk:
+            raise SnippetUnreadable(f"the file ended after {got} of {nbytes} bytes")
+        view[got : got + len(chunk)] = chunk
+        got += len(chunk)
+    return out
+
+
+def _read_meta(meta: Path) -> bytes:
+    fd, status = _open_regular(meta)
+    try:
+        if status.st_size > _MAX_META_BYTES:
+            raise SnippetUnreadable(f"{meta} is larger than {_MAX_META_BYTES} bytes")
+        return _read_fd(fd, status.st_size).tobytes()
+    finally:
+        os.close(fd)
+
+
 def _samples(
     recording: sigmffile.SigMFFile,
+    path: Path,
     data: Path,
     record_sample_rate: float | None,
     record_center_hz: float | None,
@@ -149,10 +195,15 @@ def _samples(
         sample_rate = record_sample_rate
     if record_center_hz is not None:
         center = record_center_hz
-    count = min(recording.sample_count, round(MAX_SECONDS * sample_rate), MAX_SAMPLES)
-    if count < MIN_SAMPLES:
-        raise SnippetUnreadable(f"{data}: {recording.sample_count} samples, need {MIN_SAMPLES}")
-    iq = np.asarray(recording.read_samples(0, count), dtype=np.complex64)
+    fd, status = _open_regular(path)
+    try:
+        sample_count = status.st_size // np.dtype("<c8").itemsize
+        count = min(sample_count, round(MAX_SECONDS * sample_rate), MAX_SAMPLES)
+        if count < MIN_SAMPLES:
+            raise SnippetUnreadable(f"{data}: {sample_count} samples, need {MIN_SAMPLES}")
+        iq = _read_fd(fd, count * np.dtype("<c8").itemsize).view("<c8").astype(np.complex64, copy=False)
+    finally:
+        os.close(fd)
     finite = np.isfinite(iq)
     non_finite = int(iq.size - np.count_nonzero(finite))
     if non_finite == iq.size:
@@ -162,7 +213,7 @@ def _samples(
         iq=np.where(finite, iq, 0).astype(np.complex64) if non_finite else iq,
         sample_rate=float(sample_rate),
         center_freq_hz=float(center),
-        truncated=recording.sample_count > count,
+        truncated=sample_count > count,
         pre_trigger_samples=pre_trigger_samples,
         non_finite_samples=non_finite,
         trigger_threshold_dbfs=threshold,

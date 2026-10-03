@@ -24,7 +24,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 ALLOWED_MODULES = {
     "__future__", "argparse", "collections", "dataclasses", "datetime", "enum", "errno", "functools",
-    "json", "logging", "math", "os", "pathlib", "re", "signal", "statistics", "threading", "time",
+    "json", "logging", "math", "os", "pathlib", "re", "signal", "stat", "statistics", "threading", "time",
     "typing",
     "anthropic", "numpy", "pydantic", "sigmf",
     "agent", "dsp", "schema",
@@ -34,11 +34,16 @@ DATABASE_GATEWAY = "agent/db_gateway.py"
 BANNED_NAMES = {"__import__", "exec", "eval", "compile", "getattr", "open", "__builtins__"}
 BANNED_LOGGING = {"config", "handlers"}  # file and network log handlers
 OS_ALLOWED = {"environ", "getenv"}
+# The snippet reader alone may open, check and read files by descriptor
+# (regular files only, no symlink, no blocking on a FIFO).
+SNIPPET_READER = "agent/snippet_reader.py"
+READER_OS = {"lstat", "fstat", "open", "read", "close", "stat_result", "O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"}
 BANNED_ATTRIBUTES = {"os", "subprocess"}  # reached through another module: pathlib.os
 
 
 def violations(source: str, path: str = "agent/example.py") -> list[str]:
     allowed = ALLOWED_MODULES | (DATABASE_MODULES if path == DATABASE_GATEWAY else set())
+    os_allowed = OS_ALLOWED | (READER_OS if path == SNIPPET_READER else set())
     found = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
@@ -54,7 +59,7 @@ def violations(source: str, path: str = "agent/example.py") -> list[str]:
             if top not in allowed:
                 found.append(f"from {node.module} import ...")
             elif top == "os":
-                found += [f"from os import {a.name}" for a in node.names if a.name not in OS_ALLOWED]
+                found += [f"from os import {a.name}" for a in node.names if a.name not in os_allowed]
             elif node.module in ("logging.config", "logging.handlers") or (
                 node.module == "logging" and any(a.name in BANNED_LOGGING for a in node.names)
             ):
@@ -64,7 +69,7 @@ def violations(source: str, path: str = "agent/example.py") -> list[str]:
         elif isinstance(node, ast.Attribute) and node.attr in BANNED_ATTRIBUTES:
             found.append(f"attribute chain .{node.attr}")
         elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            if node.value.id == "os" and node.attr not in OS_ALLOWED:
+            if node.value.id == "os" and node.attr not in os_allowed:
                 found.append(f"os.{node.attr}")
             elif node.value.id == "logging" and node.attr in BANNED_LOGGING:
                 found.append(f"logging.{node.attr}")

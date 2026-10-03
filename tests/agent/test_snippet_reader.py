@@ -1,6 +1,8 @@
 # tests/agent/test_snippet_reader.py
 import errno
 import json
+import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -92,6 +94,7 @@ def test_step4s_pre_trigger_annotation_is_the_noise_reference(store):
     [
         {"core:label": "pre_trigger", "core:sample_start": 5, "core:sample_count": 100},
         {"core:label": "pre_trigger", "core:sample_start": 0, "core:sample_count": True},
+        {"core:label": "pre_trigger", "core:sample_start": 0, "core:sample_count": "9"},
         {"core:label": "noise", "core:sample_start": 0, "core:sample_count": 100},
     ],
 )
@@ -134,7 +137,7 @@ def test_a_transient_io_error_is_flagged_transient(store, monkeypatch):
     def eio(*args, **kwargs):
         raise OSError(errno.EIO, "Input/output error")
 
-    monkeypatch.setattr(sigmf.sigmffile.SigMFFile, "read_samples", eio)
+    monkeypatch.setattr(agent.snippet_reader, "_read_fd", eio)
     with pytest.raises(SnippetUnreadable) as excinfo:
         read_snippet(str(data), store)
     assert excinfo.value.transient
@@ -208,6 +211,48 @@ def test_rejects_a_symlink_out_of_the_store(store, tmp_path):
         read_snippet(str(link), store)
 
 
+def _read_in_thread(path: Path, store: Path) -> BaseException | None:
+    """read_snippet in a thread: a FIFO would block a plain open() forever."""
+    outcome: list[BaseException | None] = []
+
+    def target():
+        try:
+            read_snippet(str(path), store)
+            outcome.append(None)
+        except BaseException as exc:  # noqa: BLE001 - handed back to the test
+            outcome.append(exc)
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive(), "read_snippet hung on a non-regular file"
+    return outcome[0]
+
+
+@pytest.mark.parametrize("which", [".sigmf-meta", ".sigmf-data"])
+def test_a_fifo_in_the_store_is_unreadable_and_never_hangs(store, which):
+    """A FIFO (or a device) planted in the store would block the reader, and
+    with it the whole agent. Only regular files are read."""
+    data = _write(store)
+    target = data.with_suffix(which)
+    target.unlink()
+    os.mkfifo(target)
+    outcome = _read_in_thread(data, store)
+    assert isinstance(outcome, SnippetUnreadable) and "not a regular file" in str(outcome)
+    assert not outcome.transient and not outcome.missing
+
+
+def test_a_symlink_inside_the_store_is_unreadable(store):
+    """Step 4 hard-links snippets into the store; a symlink is not one of
+    its files, even when it points at one."""
+    real = _write(store / "real")
+    link = store / real.name
+    link.symlink_to(real)
+    store.joinpath(real.with_suffix(".sigmf-meta").name).symlink_to(real.with_suffix(".sigmf-meta"))
+    with pytest.raises(SnippetUnreadable, match="not a regular file"):
+        read_snippet(str(link), store)
+
+
 def test_a_meta_naming_another_dataset_is_never_followed(store, tmp_path):
     """sigmf's fromfile() follows core:dataset (relative to the meta, or
     absolute), so a crafted meta inside the store could make it read any
@@ -238,8 +283,6 @@ def test_missing_files_are_unreadable_not_outside(store):
         lambda m: m["global"].pop("core:sample_rate"),
         lambda m: m["captures"][0].pop("core:frequency"),
         lambda m: m.pop("global"),
-        # sigmf itself cannot sort annotations with a non-integer length:
-        lambda m: m.update({"annotations": [{"core:label": "pre_trigger", "core:sample_start": 0, "core:sample_count": "9"}]}),
     ],
 )
 def test_malformed_metadata_is_unreadable(store, edit):
