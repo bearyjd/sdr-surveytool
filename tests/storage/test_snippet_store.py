@@ -101,6 +101,73 @@ def test_discard_never_touches_anything_outside_the_store(dirs, where):
     assert data.exists() and meta.exists()
 
 
+def _record_fs_calls(monkeypatch, store, events, fail_fsync_of=None):
+    names = {os.stat(store.staging_dir).st_ino: "staging", os.stat(store.root_dir).st_ino: "store"}
+    real_link, real_fsync, real_unlink = os.link, os.fsync, os.unlink
+
+    def link(src, dst, *, follow_symlinks=True):
+        events.append(("link", Path(dst).suffix))
+        real_link(src, dst, follow_symlinks=follow_symlinks)
+
+    def fsync(fd):
+        which = names.get(os.fstat(fd).st_ino, "file")
+        events.append(("fsync", which))
+        if which == fail_fsync_of:
+            raise OSError(errno.EIO, "I/O error")
+        real_fsync(fd)
+
+    def unlink(path, *args, **kwargs):
+        events.append(("unlink", Path(path).suffix))
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(snippet_store.os, "link", link)
+    monkeypatch.setattr(snippet_store.os, "fsync", fsync)
+    monkeypatch.setattr(snippet_store.os, "unlink", unlink)
+
+
+def test_adopt_makes_the_store_links_durable_before_returning(dirs, monkeypatch):
+    """A durable database row must never reference a store name that a power
+    cut could lose: fsync the store dir after linking (before returning), and
+    the staging dir after its names are removed."""
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    data, _ = _stage(staging)
+    events: list = []
+    _record_fs_calls(monkeypatch, store, events)
+    store.adopt(str(data))
+    monkeypatch.undo()
+    assert events == [
+        ("link", ".sigmf-data"),
+        ("link", ".sigmf-meta"),
+        ("fsync", "store"),
+        ("unlink", ".sigmf-data"),
+        ("unlink", ".sigmf-meta"),
+        ("fsync", "staging"),
+    ]
+
+
+def test_a_failed_store_fsync_rolls_the_links_back(dirs, monkeypatch):
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    data, meta = _stage(staging)
+    _record_fs_calls(monkeypatch, store, [], fail_fsync_of="store")
+    _rejected(store, data, "os_error")
+    monkeypatch.undo()
+    assert list(root.iterdir()) == []
+    assert data.exists() and meta.exists()
+
+
+def test_a_failed_staging_fsync_after_adoption_still_succeeds(dirs, monkeypatch):
+    """The pair is already durable in the store; staging cleanup is best effort."""
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    data, _ = _stage(staging)
+    _record_fs_calls(monkeypatch, store, [], fail_fsync_of="staging")
+    final = store.adopt(str(data))
+    monkeypatch.undo()
+    assert Path(final).is_file() and Path(final).with_suffix(".sigmf-meta").is_file()
+
+
 def test_adopt_rejects_a_path_outside_staging(dirs, tmp_path):
     """iq_snippet_path arrives over the ingest socket, so it is untrusted:
     ingest must never move an arbitrary file into the store."""

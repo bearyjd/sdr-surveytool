@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import re
 import stat
 import uuid
 from pathlib import Path
 from typing import Protocol
+
+logger = logging.getLogger(__name__)
 
 _DATA_SUFFIX = ".sigmf-data"
 _META_SUFFIX = ".sigmf-meta"
@@ -183,15 +186,33 @@ class LocalSnippetStore:
                         "multiple_links",
                         f"Staged snippet file {source.name!r} gained a hard link while being adopted",
                     )
+            # Durable before returning: a database row is about to reference
+            # these names, and a power cut must not be able to lose them.
+            _fsync_dir(self._root_dir)
         except BaseException:
             for final in linked:
                 final.unlink(missing_ok=True)
             raise
-        # Both are stored now; a staged name that already vanished must not
-        # orphan the stored pair by failing this cleanup.
-        for source, _ in sources:
-            source.unlink(missing_ok=True)
+        # The pair is durably stored now. Removing the staged names is best
+        # effort: a vanished name or a failed unlink/fsync must not orphan the
+        # stored pair or fail the adoption.
+        try:
+            for source, _ in sources:
+                source.unlink(missing_ok=True)
+            _fsync_dir(self._staging_dir)
+        except OSError:
+            logger.warning(
+                "Adopted snippet %r but could not fully clean up staging", data.name, exc_info=True
+            )
         return str(self._root_dir / data.name)
+
+
+def _fsync_dir(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _probe_hard_link(staging_dir: Path, root_dir: Path) -> None:
