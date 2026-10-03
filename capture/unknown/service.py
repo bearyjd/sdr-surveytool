@@ -224,8 +224,14 @@ def _snippet_record(
     survey_id: str,
     operator_id: str,
 ) -> UnifiedRecord:
+    # The pre-trigger samples are below threshold by construction: the
+    # per-bin noise reference for the burst that follows the trigger.
+    pre_trigger = snippet.trigger.sample_index - snippet.start_index
     bandwidth: OccupiedBandwidth = occupied_bandwidth(
-        snippet.iq, snippet.sample_rate, settings.threshold_dbfs
+        snippet.iq[pre_trigger:],
+        snippet.sample_rate,
+        settings.threshold_dbfs,
+        reference_iq=snippet.iq[:pre_trigger],
     )
     event = SnippetCaptureEvent(
         timestamp=snippet.trigger.time,

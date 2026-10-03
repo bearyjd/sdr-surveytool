@@ -185,9 +185,28 @@ def test_record_describes_the_snippet_at_its_actual_sample_rate(tmp_path):
     assert record.metadata.snippet_duration_ms == 2000  # 100_000 samples at 50 kS/s
 
 
+def test_bandwidth_is_measured_on_the_burst_against_the_pre_trigger_noise(tmp_path, monkeypatch):
+    """The pre-trigger samples are below threshold by construction: they are
+    the per-bin noise reference for the post-trigger burst."""
+    calls = []
+
+    def spy(iq, sample_rate, threshold_dbfs, *, reference_iq=None):
+        calls.append((iq, reference_iq))
+        return service.OccupiedBandwidth(hz=20_000.0, reliable=True)
+
+    monkeypatch.setattr(service, "occupied_bandwidth", spy)
+    snippet = _snippet(trigger_index=60_000, pre=10_000, post=90_000)
+    process_snippet(snippet, _settings(tmp_path), "s1", "op1")
+    ((burst, reference),) = calls
+    np.testing.assert_array_equal(reference, snippet.iq[:10_000])
+    np.testing.assert_array_equal(burst, snippet.iq[10_000:])
+
+
 def test_record_flags_an_unreliable_bandwidth_estimate(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        service, "occupied_bandwidth", lambda *args: service.OccupiedBandwidth(hz=95_000.0, reliable=False)
+        service,
+        "occupied_bandwidth",
+        lambda *args, **kwargs: service.OccupiedBandwidth(hz=95_000.0, reliable=False),
     )
     record = process_snippet(_snippet(), _settings(tmp_path), "s1", "op1")
     assert record.identifier.bandwidth_estimate == 95_000.0
@@ -248,7 +267,7 @@ def test_a_measurement_failure_writes_nothing(tmp_path, monkeypatch, caplog):
     staging = tmp_path / "staging"
     staging.mkdir(mode=0o700)
 
-    def broken_bandwidth(*args):
+    def broken_bandwidth(*args, **kwargs):
         raise FloatingPointError("injected DSP failure")
 
     monkeypatch.setattr(service, "occupied_bandwidth", broken_bandwidth)
