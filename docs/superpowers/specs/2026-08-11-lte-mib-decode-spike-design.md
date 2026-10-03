@@ -129,11 +129,17 @@ design's conclusions. The implementation follows
      committed 80 ms fixture already shows `FDD 301 2 1815.3M ... N 100 N one`.
    - `decode_mib()` also computes the SFN (`searcher.cpp:3998-3999`), but CellSearch
      never prints it.
-2. **MIB decode needs 40 ms of IQ, not 160 ms.** LTE-Tracker's `do_mib_decode()` buffers
-   only slot 1, symbols 0–3 of each frame (`tracker_thread.cpp:570`). So
-   `mib_fifo.size()==16` (`tracker_thread.cpp:581`) is 4 frames, one 40 ms PBCH TTI.
-   CellSearch decodes the MIB from the 80 ms fixture.
-3. **`f2585_s19.2_bw20_1s_hackrf.bin` is a TDD cell, and LTE-Tracker is FDD-only.**
+2. **The PBCH TTI is 40 ms, not the 160 ms assumed above.** LTE-Tracker's
+   `do_mib_decode()` buffers only slot 1, symbols 0–3 of each frame
+   (`tracker_thread.cpp:570`), so `mib_fifo.size()==16` (`tracker_thread.cpp:581`) is
+   4 frames, one 40 ms PBCH TTI. CellSearch's blind frame-timing search over
+   `frame_timing_guess` 0–3 (`searcher.cpp:3861-3863`) needs roughly 60 ms+ of IQ: each
+   guess takes 3 frames plus one subframe of OFDM symbols starting up to 3 frames in.
+   The 80 ms fixture suffices.
+3. **`f2585_s19.2_bw20_1s_hackrf.bin` is a TDD cell, and LTE-Tracker's tracker-side MIB
+   path has no TDD handling.** LTE-Tracker's searcher does run a `tdd_flag` search and
+   passes the detected duplex mode to the tracker (`searcher_thread.cpp:218-292`); it is
+   the tracker thread that ignores it.
    - The file is from the big-file repo @ 0791cb339a8e88fc531494f2e447ff03bb48ff04,
      SHA-256 ea453bba4fe4edb6c5fa458b3067e4eeb4ef77defbf6acfa3a426371b0850fba. It is a
      plain git blob, not LFS.
