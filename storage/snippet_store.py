@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import stat
+import time
 import uuid
 from pathlib import Path
 from typing import Protocol
@@ -26,6 +27,11 @@ STAGED_DATA_NAME = re.compile(
 # AD9361 maximum) x (5 s pre + 5 s post, the window caps) x 8 bytes (cf32).
 DEFAULT_MAX_SNIPPET_BYTES = 4_915_200_000
 _CF32_BYTES = 8
+# adopt() retries these a few times (they pass: a signal, a full fd table)
+# before treating the failure as a rejection; every other OSError is final.
+_TRANSIENT_ERRNOS = frozenset({errno.EINTR, errno.EAGAIN, errno.EMFILE, errno.ENFILE})
+_ADOPT_ATTEMPTS = 3
+_RETRY_SLEEP_SECONDS = 0.05
 
 
 def ensure_private_dir(path: Path | str) -> Path:
@@ -141,13 +147,21 @@ class LocalSnippetStore:
             raise SnippetRejected(
                 "bad_name", f"Snippet name {data.name!r} is not one capture writes"
             )
-        try:
-            return self._link_pair(data)
-        except OSError as error:
-            code = errno.errorcode.get(error.errno or 0, str(error.errno))
-            raise SnippetRejected(
-                "os_error", f"Could not adopt snippet {data.name!r}: {type(error).__name__} ({code})"
-            ) from error
+        attempt = 1
+        while True:
+            try:
+                # Safe to retry: a failed _link_pair() unlinks whatever it linked.
+                return self._link_pair(data)
+            except OSError as error:
+                if error.errno in _TRANSIENT_ERRNOS and attempt < _ADOPT_ATTEMPTS:
+                    time.sleep(_RETRY_SLEEP_SECONDS * attempt)
+                    attempt += 1
+                    continue
+                code = errno.errorcode.get(error.errno or 0, str(error.errno))
+                raise SnippetRejected(
+                    "os_error",
+                    f"Could not adopt snippet {data.name!r}: {type(error).__name__} ({code})",
+                ) from error
 
     def discard(self, stored_data_path: str) -> None:
         """Remove a pair this store adopted (ingest's compensation when the

@@ -168,6 +168,55 @@ def test_a_failed_staging_fsync_after_adoption_still_succeeds(dirs, monkeypatch)
     assert Path(final).is_file() and Path(final).with_suffix(".sigmf-meta").is_file()
 
 
+def _link_failing_with(monkeypatch, codes):
+    """os.link that raises the given errnos on successive calls, then works."""
+    real_link = os.link
+    calls = []
+    pending = list(codes)
+
+    def link(src, dst, *, follow_symlinks=True):
+        calls.append(Path(dst).suffix)
+        if pending:
+            raise OSError(pending.pop(0), "injected")
+        real_link(src, dst, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(snippet_store.os, "link", link)
+    monkeypatch.setattr(snippet_store.time, "sleep", lambda seconds: None)
+    return calls
+
+
+def test_transient_errors_are_retried(dirs, monkeypatch):
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    data, _ = _stage(staging)
+    calls = _link_failing_with(monkeypatch, [errno.EINTR, errno.EMFILE])
+    final = store.adopt(str(data))
+    monkeypatch.undo()
+    assert Path(final).is_file() and Path(final).with_suffix(".sigmf-meta").is_file()
+    assert len(calls) == 4  # two failed attempts, then data + meta
+
+
+def test_persistent_transient_errors_give_up_after_three_attempts(dirs, monkeypatch):
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    data, meta = _stage(staging)
+    calls = _link_failing_with(monkeypatch, [errno.EAGAIN] * 3)
+    _rejected(store, data, "os_error")
+    monkeypatch.undo()
+    assert len(calls) == 3
+    assert data.exists() and meta.exists() and list(root.iterdir()) == []
+
+
+def test_other_errors_are_not_retried(dirs, monkeypatch):
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    data, _ = _stage(staging)
+    calls = _link_failing_with(monkeypatch, [errno.EIO])
+    _rejected(store, data, "os_error")
+    monkeypatch.undo()
+    assert len(calls) == 1
+
+
 def test_adopt_rejects_a_path_outside_staging(dirs, tmp_path):
     """iq_snippet_path arrives over the ingest socket, so it is untrusted:
     ingest must never move an arbitrary file into the store."""
