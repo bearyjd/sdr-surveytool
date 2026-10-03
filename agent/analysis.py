@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from agent.band_table import BandEntry, BandMatch, match_bands
 from agent.classifier import ModulationClassifier, ModulationPrediction
 from agent.snippet_reader import Snippet
-from dsp.features import RegionFeatures, channelize_region, region_features
+from dsp.features import ChannelizedRegion, RegionFeatures, baseband_features, channelize_region
 from dsp.segmentation import (
     MAX_CONTEXT_REGIONS,
     NFFT,
@@ -97,7 +97,12 @@ def analyse_snippet(
     reference = snippet.iq[: snippet.pre_trigger_samples] if snippet.pre_trigger_samples else None
     segmentation = segment_spectrum(snippet.iq, snippet.sample_rate, reference, snippet.trigger_threshold_dbfs)
     primary_region = segmentation.primary
-    primary = None if primary_region is None else region_features(snippet.iq, segmentation, primary_region)
+    channelized: ChannelizedRegion | None = None
+    primary: RegionFeatures | None = None
+    if primary_region is not None:
+        # Channelized once: the features and the classifier both use the baseband.
+        channelized = channelize_region(snippet.iq, segmentation, primary_region)
+        primary = baseband_features(channelized, segmentation, primary_region)
     reasons = _reduced_confidence(
         segmentation, snippet.non_finite_samples, primary_region, primary, allow_self_floor_grounding
     )
@@ -124,16 +129,9 @@ def analyse_snippet(
         signal_center_hz=signal_center,
         context=context,
         band_matches=matches,
-        modulation=None if primary_region is None else _predict(classifier, snippet, segmentation, primary_region),
+        # The classifier sees the primary emitter alone, at baseband.
+        modulation=None if channelized is None else classifier.predict(channelized.iq, channelized.rate_hz),
     )
-
-
-def _predict(
-    classifier: ModulationClassifier, snippet: Snippet, segmentation: Segmentation, region: SpectralRegion
-) -> ModulationPrediction | None:
-    """The classifier sees the primary emitter alone, at baseband."""
-    baseband, rate, _, _ = channelize_region(snippet.iq, segmentation, region)
-    return classifier.predict(baseband, rate)
 
 
 def _reduced_confidence(

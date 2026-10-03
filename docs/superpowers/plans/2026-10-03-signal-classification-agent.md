@@ -379,7 +379,9 @@ disagree with this list, this list wins.
     table: `route(classification, grounded_band_ids, reduced_confidence=())`
     (`5fd5eda`).
   - The classifier receives the channelized primary region from
-    `dsp.features.channelize_region` (`95734b5`).
+    `dsp.features.channelize_region` (`95734b5`). The analysis channelizes it once for
+    both (`baseband_features`), keeping a 1 s, 20 MS/s snippet at 0.82 s of analysis
+    and 386 MB peak RSS.
 - **Import guard** (`fc053be`). It flags `.os` and `.subprocess` attribute chains, and its
   docstring now lists what it does not see. `errno` and `threading` joined the agent's
   stdlib allowlist.

@@ -112,21 +112,35 @@ def _passband(freqs: np.ndarray, passband_hz: float) -> np.ndarray:
     return 0.5 * (1 + np.cos(np.pi * over))
 
 
-def channelize_region(
-    iq: np.ndarray, segmentation: Segmentation, region: SpectralRegion
-) -> tuple[np.ndarray, float, float, float]:
-    """`region` channelized to baseband: (complex64 signal, its rate, the
-    filter's noise bandwidth, the passband kept)."""
+@dataclass(frozen=True)
+class ChannelizedRegion:
+    iq: np.ndarray  # complex64 baseband
+    rate_hz: float
+    noise_bandwidth_hz: float  # the channel filter's
+    passband_hz: float
+
+
+def channelize_region(iq: np.ndarray, segmentation: Segmentation, region: SpectralRegion) -> ChannelizedRegion:
+    """`region` channelized to baseband, as region_features measures it."""
     coarse_bin = segmentation.sample_rate / NFFT
     passband = max(region.end_offset_hz - region.start_offset_hz, _MIN_PASSBAND_BINS * coarse_bin) * _MARGIN
     y, rate, noise_bandwidth = channelize(iq, segmentation.sample_rate, region.center_offset_hz, passband)
-    return y, rate, noise_bandwidth, passband
+    return ChannelizedRegion(y, rate, noise_bandwidth, passband)
 
 
 def region_features(iq: np.ndarray, segmentation: Segmentation, region: SpectralRegion) -> RegionFeatures:
     """Features of `region`, measured on its channelized baseband signal."""
+    return baseband_features(channelize_region(iq, segmentation, region), segmentation, region)
+
+
+def baseband_features(
+    channelized: ChannelizedRegion, segmentation: Segmentation, region: SpectralRegion
+) -> RegionFeatures:
+    """region_features on an already channelized region (channelize once
+    when the baseband is needed elsewhere too)."""
     coarse_bin = segmentation.sample_rate / NFFT
-    y, rate, noise_bandwidth, passband = channelize_region(iq, segmentation, region)
+    y, rate = channelized.iq, channelized.rate_hz
+    noise_bandwidth, passband = channelized.noise_bandwidth_hz, channelized.passband_hz
     # Noise power the coarse floor puts through the channel filter.
     noise = region.noise_per_bin * noise_bandwidth / coarse_bin
 
