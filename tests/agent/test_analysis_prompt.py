@@ -170,6 +170,17 @@ def test_a_resolved_narrowband_signal_still_grounds_frs():
     assert analysis.reduced_confidence == () and analysis.grounded_band_ids == {"frs_gmrs_462"}
 
 
+def test_a_truncated_snippet_grounds_nothing():
+    """Only the first 2 s (or 2^25 samples) were analysed: the duty cycle,
+    bursts and even the primary may not describe the whole capture."""
+    snippet = Snippet(
+        iq=_two_emitters(), sample_rate=FS, center_freq_hz=TUNED, truncated=True, pre_trigger_samples=PRE
+    )
+    analysis = analyse_snippet(snippet, BANDS, UnavailableClassifier())
+    assert analysis.reduced_confidence == ("truncated",)
+    assert [(m.entry.id, m.grounded) for m in analysis.band_matches] == [("ism_902_928", False)]
+
+
 def test_non_finite_samples_reduce_confidence():
     analysis = analyse_snippet(_snippet(_two_emitters(), non_finite=3), BANDS, UnavailableClassifier())
     assert analysis.reduced_confidence == ("non_finite_samples",)

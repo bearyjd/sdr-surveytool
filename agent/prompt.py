@@ -27,7 +27,8 @@ frequency falls in. Call record_classification exactly once.
   (noise_reference "self"), which is blind to the receiver's roll-off;
   edge_region_unreliable means that, in that case, the primary emitter reaches the outer
   band edges, where the receiver's noise roll-off can pose as a signal; low_snr means the
-  primary emitter is less than 10 dB above the noise; obw_unresolved means its occupied
+  primary emitter is less than 10 dB above the noise; truncated means only the start of a
+  longer capture was analysed; obw_unresolved means its occupied
   bandwidth is within 4 analysis bins of the resolution, so the true width may be
   narrower (a bare carrier looks like this).
   Other emitters with present_before_trigger true were already on before the capture

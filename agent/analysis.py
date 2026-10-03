@@ -103,9 +103,7 @@ def analyse_snippet(
         # Channelized once: the features and the classifier both use the baseband.
         channelized = channelize_region(snippet.iq, segmentation, primary_region)
         primary = baseband_features(channelized, segmentation, primary_region)
-    reasons = _reduced_confidence(
-        segmentation, snippet.non_finite_samples, primary_region, primary, allow_self_floor_grounding
-    )
+    reasons = _reduced_confidence(segmentation, snippet, primary_region, primary, allow_self_floor_grounding)
     context = () if primary_region is None else _context(snippet, segmentation, primary_region)
     signal_center: float | None = None
     matches: tuple[BandMatch, ...] = ()
@@ -136,7 +134,7 @@ def analyse_snippet(
 
 def _reduced_confidence(
     segmentation: Segmentation,
-    non_finite: int,
+    snippet: Snippet,
     primary_region: SpectralRegion | None,
     primary: RegionFeatures | None,
     allow_self_floor_grounding: bool,
@@ -147,8 +145,10 @@ def _reduced_confidence(
             reasons.append(NO_QUIET_NOISE_REFERENCE)  # the self floor is blind to roll-off
         elif primary_region is not None and touches_edge_zone(primary_region, segmentation.sample_rate):
             reasons.append(EDGE_REGION_UNRELIABLE)  # may be the receiver's roll-off, not a signal
-    if non_finite:
+    if snippet.non_finite_samples:
         reasons.append("non_finite_samples")
+    if snippet.truncated:
+        reasons.append("truncated")  # only the first MAX_SECONDS / MAX_SAMPLES were analysed
     if primary is not None and not primary.bandwidth_reliable:
         reasons.append("bandwidth_unreliable")
     if primary is not None and primary.snr_db < _MIN_GROUNDING_SNR_DB:
