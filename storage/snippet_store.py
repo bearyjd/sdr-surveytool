@@ -1,7 +1,9 @@
 # storage/snippet_store.py
 from __future__ import annotations
 
+import errno
 import os
+import re
 import stat
 from pathlib import Path
 from typing import Protocol
@@ -9,6 +11,11 @@ from typing import Protocol
 _DATA_SUFFIX = ".sigmf-data"
 _META_SUFFIX = ".sigmf-meta"
 _PRIVATE_DIR_MODE = 0o700
+
+# The only staged names adopt() accepts: exactly what
+# capture.unknown.snippet_writer writes ("<%Y%m%dT%H%M%S%f>Z_<Hz>Hz_<8 hex>").
+# Bounded, so a null byte or an over-long name is rejected before any syscall.
+STAGED_DATA_NAME = re.compile(r"\d{8}T\d{12}Z_\d{1,12}Hz_[0-9a-f]{8}\.sigmf-data")
 
 
 def ensure_private_dir(path: Path | str) -> Path:
@@ -110,6 +117,19 @@ class LocalSnippetStore:
             raise SnippetRejected(
                 "not_sigmf_data", f"Snippet {staged_data_path!r} is not a {_DATA_SUFFIX} file"
             )
+        if not STAGED_DATA_NAME.fullmatch(data.name):
+            raise SnippetRejected(
+                "bad_name", f"Snippet name {data.name!r} is not one capture writes"
+            )
+        try:
+            return self._link_pair(data)
+        except OSError as error:
+            code = errno.errorcode.get(error.errno or 0, str(error.errno))
+            raise SnippetRejected(
+                "os_error", f"Could not adopt snippet {data.name!r}: {type(error).__name__} ({code})"
+            ) from error
+
+    def _link_pair(self, data: Path) -> str:
         meta = data.with_suffix(_META_SUFFIX)
         sources = [(data, _single_regular_file(data)), (meta, _single_regular_file(meta))]
         linked: list[Path] = []

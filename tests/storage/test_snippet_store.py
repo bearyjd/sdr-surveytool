@@ -7,8 +7,12 @@ import pytest
 from storage import snippet_store
 from storage.snippet_store import LocalSnippetStore, SnippetRejected, ensure_private_dir
 
+# Names in capture.unknown.snippet_writer's scheme; adopt() rejects any other.
+STEM = "20261003T120000123456Z_915000000Hz_0123abcd"
+OTHER_STEM = "20261003T120001000000Z_915000000Hz_89abcdef"
 
-def _stage(directory, stem: str = "snip") -> tuple:
+
+def _stage(directory, stem: str = STEM) -> tuple:
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     data = directory / f"{stem}.sigmf-data"
     meta = directory / f"{stem}.sigmf-meta"
@@ -35,9 +39,9 @@ def test_adopt_moves_both_files_and_returns_final_data_path(dirs):
 
     final = LocalSnippetStore(staging, root).adopt(str(data))
 
-    assert final == str((root / "snip.sigmf-data").resolve())
-    assert (root / "snip.sigmf-data").read_bytes() == b"\x00\x01\x02\x03"
-    assert (root / "snip.sigmf-meta").read_text() == '{"global": {}}'
+    assert final == str((root / f"{STEM}.sigmf-data").resolve())
+    assert (root / f"{STEM}.sigmf-data").read_bytes() == b"\x00\x01\x02\x03"
+    assert (root / f"{STEM}.sigmf-meta").read_text() == '{"global": {}}'
     assert not data.exists() and not meta.exists()
 
 
@@ -55,7 +59,7 @@ def test_adopt_rejects_dot_dot_traversal_out_of_staging(dirs, tmp_path):
     staging, root = dirs
     store = LocalSnippetStore(staging, root)
     victim, _ = _stage(tmp_path / "elsewhere")
-    _rejected(store, staging / ".." / "elsewhere" / "snip.sigmf-data", "outside_staging")
+    _rejected(store, staging / ".." / "elsewhere" / f"{STEM}.sigmf-data", "outside_staging")
     assert victim.exists()
 
 
@@ -63,9 +67,9 @@ def test_adopt_rejects_a_data_symlink(dirs, tmp_path):
     staging, root = dirs
     store = LocalSnippetStore(staging, root)
     victim, _ = _stage(tmp_path / "elsewhere")
-    os.symlink(victim, staging / "link.sigmf-data")
-    (staging / "link.sigmf-meta").write_text("{}")
-    _rejected(store, staging / "link.sigmf-data", "not_regular_file")
+    os.symlink(victim, staging / f"{OTHER_STEM}.sigmf-data")
+    (staging / f"{OTHER_STEM}.sigmf-meta").write_text("{}")
+    _rejected(store, staging / f"{OTHER_STEM}.sigmf-data", "not_regular_file")
     assert victim.exists() and list(root.iterdir()) == []
 
 
@@ -96,7 +100,7 @@ def test_adopt_rejects_anything_but_a_sigmf_data_file(dirs, suffix):
     staging, root = dirs
     store = LocalSnippetStore(staging, root)
     _stage(staging)
-    other = staging / f"snip{suffix}"
+    other = staging / f"{STEM}{suffix}"
     other.touch()
     _rejected(store, other, "not_sigmf_data")
 
@@ -114,9 +118,9 @@ def test_adopt_refuses_to_overwrite_an_existing_snippet(dirs):
     staging, root = dirs
     store = LocalSnippetStore(staging, root)
     data, _ = _stage(staging)
-    (root / "snip.sigmf-data").write_bytes(b"original")
+    (root / f"{STEM}.sigmf-data").write_bytes(b"original")
     _rejected(store, data, "already_stored")
-    assert (root / "snip.sigmf-data").read_bytes() == b"original"
+    assert (root / f"{STEM}.sigmf-data").read_bytes() == b"original"
     assert data.exists()
 
 
@@ -124,10 +128,10 @@ def test_existing_meta_destination_rolls_back_the_data_link(dirs):
     staging, root = dirs
     store = LocalSnippetStore(staging, root)
     data, meta = _stage(staging)
-    (root / "snip.sigmf-meta").write_text("original")
+    (root / f"{STEM}.sigmf-meta").write_text("original")
     _rejected(store, data, "already_stored")
-    assert sorted(p.name for p in root.iterdir()) == ["snip.sigmf-meta"]
-    assert (root / "snip.sigmf-meta").read_text() == "original"
+    assert sorted(p.name for p in root.iterdir()) == [f"{STEM}.sigmf-meta"]
+    assert (root / f"{STEM}.sigmf-meta").read_text() == "original"
     assert data.exists() and meta.exists()
 
 
@@ -164,9 +168,41 @@ def test_failed_meta_link_rolls_back_the_data_link(dirs, monkeypatch):
         real_link(src, dst, follow_symlinks=follow_symlinks)
 
     monkeypatch.setattr(snippet_store.os, "link", failing_meta_link)
-    with pytest.raises(OSError, match="I/O error"):
-        store.adopt(str(data))
+    error = _rejected(store, data, "os_error")
+    assert "EIO" in str(error)
     assert list(root.iterdir()) == []
+    assert data.exists() and meta.exists()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "snip.sigmf-data",  # not the capture writer's scheme
+        f"{STEM[:-1]}\x00.sigmf-data",  # null byte: ValueError from any syscall
+        "20261003T120000123456Z_" + "9" * 300 + "Hz_0123abcd.sigmf-data",  # > 255 bytes
+        STEM.replace("abcd", "ABCD") + ".sigmf-data",
+    ],
+)
+def test_adopt_rejects_names_capture_never_writes(dirs, name):
+    """Only the capture writer's naming scheme is accepted, so odd names fail
+    as a rejection (record kept, flagged) instead of escaping as ValueError or
+    ENAMETOOLONG and making ingest drop the record and back off."""
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    _rejected(store, staging / name, "bad_name")
+
+
+def test_other_os_errors_become_rejections(dirs, monkeypatch):
+    staging, root = dirs
+    store = LocalSnippetStore(staging, root)
+    data, meta = _stage(staging)
+
+    def denied(path, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(snippet_store.os, "lstat", denied)
+    _rejected(store, data, "os_error")
+    monkeypatch.undo()
     assert data.exists() and meta.exists()
 
 
@@ -185,7 +221,7 @@ def test_rejection_messages_quote_untrusted_names(dirs):
     """A newline in a staged name must not be able to forge a log line."""
     staging, root = dirs
     store = LocalSnippetStore(staging, root)
-    error = _rejected(store, staging / "evil\nINFO forged.sigmf-data", "missing_file")
+    error = _rejected(store, staging / "evil\nINFO forged.sigmf-data", "bad_name")
     assert "\n" not in str(error)
 
 

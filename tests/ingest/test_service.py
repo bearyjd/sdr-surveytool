@@ -342,7 +342,7 @@ def test_attach_grid_density_keys_counts_per_cell():
     assert result_a_again.metadata.sample_count_in_grid_cell == 2
 
 
-def _stage_snippet(staging_dir, stem: str = "snip") -> str:
+def _stage_snippet(staging_dir, stem: str = "20261003T120000123456Z_915000000Hz_0123abcd") -> str:
     staging_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     (staging_dir / f"{stem}.sigmf-data").write_bytes(b"\x00" * 16)
     (staging_dir / f"{stem}.sigmf-meta").write_text("{}")
@@ -391,9 +391,9 @@ def test_process_one_adopts_staged_snippet_and_persists_final_path(tmp_path):
 
         processed = service.process_one(timeout=2)
 
-        final = str((store_root / "snip.sigmf-data").resolve())
+        final = str((store_root / "20261003T120000123456Z_915000000Hz_0123abcd.sigmf-data").resolve())
         assert processed.metadata.iq_snippet_path == final
-        assert (store_root / "snip.sigmf-meta").is_file()
+        assert (store_root / "20261003T120000123456Z_915000000Hz_0123abcd.sigmf-meta").is_file()
         assert list(staging.iterdir()) == []
         # The emitted record object is never mutated; ingest works on copies.
         assert original.metadata.iq_snippet_path == staged

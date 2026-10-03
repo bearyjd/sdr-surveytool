@@ -11,6 +11,7 @@ from sigmf import sigmffile
 
 from capture.unknown import snippet_writer
 from capture.unknown.snippet_writer import write_sigmf_snippet
+from storage.snippet_store import STAGED_DATA_NAME
 
 START = datetime(2026, 10, 3, 12, 0, 0, 123456, tzinfo=timezone.utc)
 IQ = (np.arange(1_000) * (1 - 2j) / 1_000).astype(np.complex64)
@@ -82,3 +83,10 @@ def test_failed_meta_rename_never_leaves_a_half_pair(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="meta rename"):
         write_sigmf_snippet(IQ, tmp_path, 2e6, 915e6, START)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_written_names_match_what_the_snippet_store_accepts(tmp_path):
+    """The store only adopts names in the writer's scheme; this pins the two
+    sides of that contract together."""
+    data_path = write_sigmf_snippet(IQ, tmp_path, 2e6, 915e6, START)
+    assert STAGED_DATA_NAME.fullmatch(data_path.name)
