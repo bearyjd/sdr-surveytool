@@ -325,3 +325,22 @@ def test_a_reference_shorter_than_eight_frames_is_not_used():
 def test_too_short_capture_is_rejected():
     with pytest.raises(ValueError, match="at least"):
         segment_spectrum(np.zeros(NFFT - 1, dtype=np.complex64), FS)
+
+
+@pytest.mark.parametrize("above_db", [0.5, 1.0])
+def test_an_always_on_emitter_at_the_threshold_falls_back_to_the_self_floor(above_db):
+    """An always-on emitter 0.5-2 dB above the recorded trigger threshold
+    (the reviewer's 20 MS/s probe): its weaker frames dip below the
+    threshold, so the quiet reference holds the emitter itself and the
+    reference floor subtracts it. Rather than 'no region' -- which used to
+    leave the record pending and count toward a halt -- segmentation falls
+    back to the self floor and finds it. Over 20 seeds: 20/20 at 0.5 and
+    1 dB; at 2 dB, 7/20 fall back and 13/20 keep a residue under 6 dB SNR."""
+    fs, n, pre, threshold = 20e6, 1 << 21, 250_000, -40.0
+    rng = np.random.default_rng(31)
+    band_power = 10 ** ((threshold + above_db) / 10)
+    iq = synthetic.noise(rng, n, NOISE) + synthetic.band_limited(rng, n, fs, 200e3, 1.5e6, band_power - NOISE)
+    segmentation = segment_spectrum(iq, fs, iq[:pre], threshold_dbfs=threshold)
+    assert segmentation.floor_source == "self" and segmentation.before_trigger == ()
+    assert segmentation.primary.center_offset_hz == pytest.approx(1.5e6, abs=2 * fs / NFFT)
+    assert segmentation.primary.obw_hz == pytest.approx(200e3, abs=2 * fs / NFFT)  # coarse bins: 19.5 kHz

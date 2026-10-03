@@ -288,6 +288,26 @@ def test_self_floor_grounding_is_off_unless_the_flag_is_given(tmp_path):
     assert _parse_args([*args, "--allow-self-floor-grounding"]).allow_self_floor_grounding is True
 
 
+def test_an_always_on_emitter_at_the_trigger_threshold_always_closes(store):
+    """The reviewer's probe: a 200 kHz always-on emitter 0.5-2 dB above the
+    recorded trigger threshold at 20 MS/s. Its quiet frames hold the emitter
+    itself, so the reference floor subtracts it; the self-floor fallback
+    finds it again. Every record closes (20 seeds), and the agent never halts."""
+    fs, n, pre, threshold = 20e6, 1 << 19, 1 << 17, -40.0
+    records = []
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        band_power = 10 ** ((threshold + (0.5, 1.0, 2.0)[seed % 3]) / 10)
+        iq = synthetic.noise(rng, n, 1e-5) + synthetic.band_limited(rng, n, fs, 200e3, 1.5e6, band_power - 1e-5)
+        path = write_sigmf_snippet(iq, store, fs, TUNED, START, trigger_offset=pre, threshold_dbfs=threshold)
+        records.append(PendingRecord(seed + 1, str(path), fs, TUNED, None, None))
+    gateway = FakeGateway(records)
+    client = ScriptedClient([{**GOOD, "confidence": 0.5}] * 20)
+    assert _agent(gateway, client, store, batch_size=20).run_batch() == 20
+    assert [s[0] for s in gateway.submitted] == list(range(1, 21))
+    assert len(client.requests) == 20
+
+
 def test_a_malformed_record_is_closed_without_an_llm_call_and_never_halts(store):
     """A record whose view values cannot be parsed is a judgment about that
     record: needs_review, NULL tag, no LLM call, and no halt however many."""

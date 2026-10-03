@@ -19,6 +19,7 @@ sliding 65-bin window), and are context only.
 
 Without at least 8 quiet frames (no annotation, too short, or a continuous
 emitter retriggering after its cooldown, which fills its own pre-trigger),
+or when nothing stands above the reference (it held the emitter itself),
 a self floor is estimated from the burst-time PSD -- a bias-corrected
 percentile, never the median, which sits inside any signal occupying half
 the band or more and erases it. That floor is flat, so it is blind to
@@ -317,19 +318,26 @@ def segment_spectrum(
     active = active_frame_mask(powers)
     psd = _bridge_dc(welch_psd(iq, NFFT, active))
     quiet = _quiet_reference(reference_iq, float(np.mean(powers[active])), threshold_dbfs)
-    if quiet is None:
-        regions = _regions(psd, _self_floor(psd, int(active.sum())), sample_rate)
-        before: tuple[SpectralRegion, ...] = ()
-    else:
+    regions: tuple[SpectralRegion, ...] = ()
+    before: tuple[SpectralRegion, ...] = ()
+    if quiet is not None:
         quiet_frames = len(quiet) // NFFT
         reference_psd = _bridge_dc(welch_psd(quiet, NFFT, np.ones(quiet_frames, dtype=bool)))
         floor = np.maximum(np.fft.fftshift(noise_floor_psd(quiet, NFFT)) * psd_scale(NFFT), reference_psd)
         regions = _regions(psd, floor, sample_rate)
         before = _regions(reference_psd, local_floor(reference_psd, quiet_frames), sample_rate)
+    # Nothing new above the reference: its quiet frames held the triggering
+    # emitter itself (an always-on emitter hovering at the threshold dips
+    # below it), so the reference floor subtracted it. Something triggered
+    # capture, so measure against the self floor instead.
+    reference_used = bool(regions)
+    if not reference_used:
+        regions = _regions(psd, _self_floor(psd, int(active.sum())), sample_rate)
+        before = ()
     return Segmentation(
         regions=regions,
         before_trigger=before,
-        floor_source="self" if quiet is None else "pre_trigger",
+        floor_source="pre_trigger" if reference_used else "self",
         sample_rate=sample_rate,
         active_frames=int(active.sum()),
         total_frames=len(powers),
