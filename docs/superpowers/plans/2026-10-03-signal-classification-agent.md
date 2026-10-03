@@ -460,6 +460,13 @@ disagree with this list, this list wins.
     - Five missing snippets in a row halt by design.
     - How to find a lock squatter.
     - The budget's per-process limits (`02d1d1c`).
+- **Two last fixes** (on top of `f113701`).
+  - A tag's signal and the typical signals are compared lower-cased, with -, _, . and
+    spaces stripped. The signal must equal a word, or a run of up to 4 consecutive
+    words, of one typical-signal clause. `typical_signals` gained short aliases (WBFM,
+    NFM, PPM, 1090ES, NR, the 802.11 amendments) (`2b36f6b`).
+  - The CLI refuses a `--daily-token-budget` below `minimum_daily_budget(max_tokens)`,
+    one call's reservation (`a408506`).
 - **Import guard** (`fc053be`). It flags `.os` and `.subprocess` attribute chains, and its
   docstring now lists what it does not see. `errno` and `threading` joined the agent's
   stdlib allowlist.
