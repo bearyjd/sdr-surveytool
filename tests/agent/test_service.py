@@ -6,6 +6,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import os
+import signal
+import threading
+import time
 
 import anthropic
 import httpx
@@ -16,7 +19,19 @@ from anthropic.types import Message
 from agent.band_table import load_band_table
 from agent.db_gateway import PendingRecord, RecordNotPending, SubmitRejected, SubmitTimedOut
 from agent import service
-from agent.service import AgentSettings, ClassificationAgent, SystemicFault, _parse_args, backoff_delay, main, run
+from agent.service import (
+    EXIT_HALTED,
+    AgentSettings,
+    ClassificationAgent,
+    SystemicFault,
+    _parse_args,
+    backoff_delay,
+    install_stop_signal,
+    main,
+    make_client,
+    run,
+    serve,
+)
 from agent.snippet_reader import SnippetUnreadable
 from capture.unknown.snippet_writer import write_sigmf_snippet
 from dsp import synthetic
@@ -576,6 +591,9 @@ class _Batches:
         delay, self.delay = getattr(self, "delay", None), None
         return delay
 
+    def check_snippet_root(self):
+        pass
+
 
 def test_run_survives_a_failing_batch_and_stops_on_request():
     agent = _Batches([ConnectionError("database went away"), (0, None)])
@@ -600,6 +618,33 @@ def test_run_sleeps_the_agents_retry_delay():
 def test_run_lets_a_systemic_fault_through():
     with pytest.raises(SystemicFault):
         run(_Batches([SystemicFault("outage")]), 1.0, lambda: False, lambda s: None)
+
+
+def test_a_halt_exits_with_its_own_status_so_it_is_never_auto_restarted(caplog):
+    """systemd's RestartPreventExitStatus keys on it (agent/README.md): a
+    restart would reset the daily token budget and retry the fault."""
+    with pytest.raises(SystemExit) as excinfo:
+        serve(_Batches([SystemicFault("the snippet store is unusable")]), 1.0, threading.Event())
+    assert excinfo.value.code == EXIT_HALTED == 3
+    assert "Agent halted: the snippet store is unusable" in caplog.text
+
+
+def test_sigterm_interrupts_the_agents_sleeps():
+    previous = signal.getsignal(signal.SIGTERM)
+    try:
+        stop = install_stop_signal()
+        agent = _Batches([(0, None)] * 10)
+        threading.Timer(0.2, os.kill, (os.getpid(), signal.SIGTERM)).start()
+        started = time.monotonic()
+        serve(agent, 60.0, stop)
+        assert time.monotonic() - started < 5 and agent.calls == 1
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def test_the_client_talks_only_to_api_anthropic_com(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://attacker.example")
+    assert str(make_client("sk-test").base_url) == "https://api.anthropic.com"
 
 
 @pytest.mark.parametrize(

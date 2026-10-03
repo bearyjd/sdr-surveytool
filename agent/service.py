@@ -36,6 +36,7 @@ import argparse
 import logging
 import os
 import signal
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -74,6 +75,12 @@ logger = logging.getLogger(__name__)
 
 _SDK_MAX_RETRIES = 2  # inside each of our calls, before our own backoff
 _SDK_TIMEOUT_SECONDS = 60.0
+# Pinned: ANTHROPIC_BASE_URL in the environment must not redirect the agent.
+_API_BASE_URL = "https://api.anthropic.com"
+# A halt's exit status. Never auto-restart on it (RestartPreventExitStatus,
+# agent/README.md): the fault would recur, and the daily token budget, which
+# lives in the process, would start over.
+EXIT_HALTED = 3
 _STARTUP_PROBES = 5
 _MAX_BACKOFF_EXPONENT = 30  # 2 s * 2**30 is far past any cap; 2**2000 would overflow a float
 
@@ -176,7 +183,7 @@ class ClassificationAgent:
         settings: AgentSettings,
         bands: tuple[BandEntry, ...],
         classifier: ModulationClassifier | None = None,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], object] = time.sleep,
         now: Callable[[], datetime] = _utc_now,
         start_after_id: int = 0,
     ) -> None:
@@ -425,7 +432,7 @@ def run(
     agent: ClassificationAgent,
     poll_seconds: float,
     stopping: Callable[[], bool],
-    sleep: Callable[[float], None],
+    sleep: Callable[[float], object],
     max_failed_batches: int = 5,
 ) -> None:
     """Loop until `stopping()`. A batch that fails outside any record (the
@@ -490,6 +497,34 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def install_stop_signal() -> threading.Event:
+    """An event SIGTERM sets. Waiting on it is how the agent sleeps, so a stop
+    request ends a poll, backoff or budget pause at once."""
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda signum, frame: stop.set())
+    return stop
+
+
+def make_client(api_key: str) -> MessagesClient:
+    client = anthropic.Anthropic(
+        api_key=api_key, base_url=_API_BASE_URL, max_retries=_SDK_MAX_RETRIES, timeout=_SDK_TIMEOUT_SECONDS
+    )
+    # The SDK's overloaded messages.create (streaming variants included) is
+    # wider than the one call MessagesClient describes.
+    return cast(MessagesClient, client)
+
+
+def serve(agent: ClassificationAgent, poll_seconds: float, stop: threading.Event) -> None:
+    """Probe the store, then loop until `stop` is set. A halt logs its cause
+    and exits with EXIT_HALTED."""
+    try:
+        agent.check_snippet_root()
+        run(agent, poll_seconds, stop.is_set, stop.wait)
+    except SystemicFault as exc:
+        logger.critical("Agent halted: %s", exc)
+        raise SystemExit(EXIT_HALTED) from exc
+
+
 def main(argv: list[str] | None = None) -> None:
     """Secrets come from the environment only, never the command line:
     SURVEYTOOL_AGENT_DATABASE_URL (the agent login role) and ANTHROPIC_API_KEY."""
@@ -512,23 +547,17 @@ def main(argv: list[str] | None = None) -> None:
         daily_token_budget=args.daily_token_budget,
         allow_self_floor_grounding=args.allow_self_floor_grounding,
     )
-    client = anthropic.Anthropic(api_key=api_key, max_retries=_SDK_MAX_RETRIES, timeout=_SDK_TIMEOUT_SECONDS)
+    stop = install_stop_signal()
     agent = ClassificationAgent(
         gateway,
-        # The SDK's overloaded messages.create (streaming variants included)
-        # is wider than the one call MessagesClient describes.
-        cast(MessagesClient, client),
+        make_client(api_key),
         settings,
         load_band_table(Path(args.band_table)).entries,
+        sleep=stop.wait,
         start_after_id=args.start_after_id,
     )
-    stop_requested: list[int] = []
-    signal.signal(signal.SIGTERM, lambda signum, frame: stop_requested.append(signum))
     try:
-        agent.check_snippet_root()
-        run(agent, args.poll_seconds, lambda: bool(stop_requested), time.sleep)
-    except SystemicFault as exc:
-        raise SystemExit(f"Agent halted: {exc}") from exc
+        serve(agent, args.poll_seconds, stop)
     except KeyboardInterrupt:
         logger.info("Interrupted; shutting down")
     finally:

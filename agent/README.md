@@ -43,7 +43,7 @@ the LLM answers at most once per record per run. Every outcome falls in one clas
 |---|---|---|
 | Per-record judgment | malformed record (`malformed_record`); no snippet (the `snippet_rejected` / `snippet_dropped` flag named); snippet outside the store (`snippet_outside_store`); snippet missing or corrupt while the store root is healthy (`snippet_unreadable`); no region even against the self floor (`no_occupied_region`); an analysis that fails twice (`analysis_failed`) | `needs_review` at once, NULL tag, confidence 0, the reason named, no LLM call, never counted toward a halt |
 | Transient per-record | a transient read error (EIO, EAGAIN, EINTR, ETIMEDOUT, ESTALE, ENOMEM, EBUSY); a write timeout (`statement_timeout`, lock timeout); a transient API error (connection, 408, 409, 429, >= 500) | kept, with its verdict if one was decided, in an in-run deferred set that later batches retry by id, whatever the cursor. A decided verdict is never re-asked. An API error also backs off 2, 4, ... s (capped at 300 s) before the next batch. After 10 attempts the record is left pending for the next run |
-| Systemic: halt | the store root missing, not a directory, unreadable, or empty while records point into it; 5 batches in a row failing outside any record (the database unreachable); 5 invalid model answers in a row; a non-retryable API error; a write the database rejects | halt with nothing marked for it; the message names the cause |
+| Systemic: halt | the store root missing, not a directory, unreadable, or empty while records point into it; 5 batches in a row failing outside any record (the database unreachable); 5 invalid model answers in a row; a non-retryable API error; a write the database rejects | halt with nothing marked for it, exit status 3 (never auto-restarted, below); the message names the cause |
 
 An invalid model answer (validation failure, refusal, `max_tokens`) is held until a later
 answer validates, then goes to review. A spent daily token budget pauses until UTC
@@ -112,6 +112,25 @@ export ANTHROPIC_API_KEY=...
 sdr-agent --snippet-store-dir /absolute/path/of/ingest/data/snippets
 ```
 
-Each record's id is logged before its snippet is read. If the agent halts, or a snippet
-crashes it, the message or the last log line names the records; restart with
-`--start-after-id <id>` to skip them once the cause is understood.
+Each record's id is logged before its snippet is read. If a snippet crashes the agent,
+the last log line names the record; restart with `--start-after-id <id>` to skip it once
+the cause is understood.
+
+### Halts are terminal
+
+A halt (the systemic class above) logs `Agent halted: <cause>` and exits with status
+**3**. Never restart on it automatically: the fault would recur, and the daily token
+budget, which lives in the process, would start over with every restart. Other exits (a
+crash, a lost database at startup) may restart, slowly. With systemd:
+
+```ini
+[Service]
+ExecStart=/usr/local/bin/sdr-agent --snippet-store-dir /srv/surveytool/snippets
+Restart=on-failure
+RestartSec=60
+RestartPreventExitStatus=3
+```
+
+SIGTERM stops the agent at once, even mid-sleep (a poll, a backoff or a budget pause).
+The Anthropic client is pinned to `https://api.anthropic.com`; `ANTHROPIC_BASE_URL` is
+ignored.
