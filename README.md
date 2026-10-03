@@ -25,8 +25,8 @@ for the full architecture design.
 
 - `ingest` and `capture/unknown` must run as **one dedicated uid**. The snippet
   staging and store directories must be owned by it with mode `0700`, and both must
-  be on **one filesystem**. Snippets are hard-linked from staging into the store.
-  Both services check this at startup.
+  be on **one filesystem and mount**. Snippets are hard-linked from staging into the
+  store. Both services check this at startup.
 - Unknown-signal capture flags such as `--min-free-bytes` (disk floor, default
   2 GiB) and `--max-clock-drift-s` (re-anchor threshold, default 2 s) are documented
   in [capture/unknown/README.md](capture/unknown/README.md).

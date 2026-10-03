@@ -124,8 +124,22 @@ pipeline, §7 storage).
 >   - pyright narrowing and types added, and CLI parsing split.
 > - **Task 11 Step 3:** `cooldown_seconds=0.0` is now rejected by `CaptureSettings`.
 >   Use `1.0` to see `assert [0.5, 2.0, 4.0] == [0.5, 4.0]`.
-> - **Final counts:** the full suite gives `156 passed, 1 skipped`, and the `-W error`
->   subset gives `90 passed`.
+> - **Second review round:**
+>   - drift is judged only while samples advance (a stall stays a stall);
+>   - `--max-clock-drift-s` must be at least 0.5 s;
+>   - the sample rate is read back from the SDR (`get_sample_rate(0)`) and carried
+>     on `CapturedSnippet.sample_rate`;
+>   - quick drift rebuilds (within 60 s) escalate the backoff;
+>   - low disk or an unavailable staging dir drops only the IQ: the record is
+>     emitted with `quality_flags.snippet_dropped`;
+>   - `adopt()` accepts only `STAGED_DATA_NAME`, maps any `OSError` to
+>     `SnippetRejected("os_error")`, requires `st_nlink == 2` after linking, and
+>     tolerates a vanished source after both links;
+>   - the store constructor proves staging-to-store hard links with a real probe
+>     instead of comparing `st_dev`.
+> - **Final counts:** the full suite gives `172 passed, 1 skipped`, and the
+>   `-W error` subset (`tests/capture/unknown tests/dsp
+>   tests/storage/test_snippet_store.py`) gives `106 passed`.
 
 ## Verified facts (build-and-run spike, 2026-10-03)
 

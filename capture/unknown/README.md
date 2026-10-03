@@ -35,9 +35,15 @@ The dBFS power stats and the occupied-bandwidth estimate live in the shared top-
   Records carry `quality_flags: {"power_units": "dBFS"}`.
 - `timestamp` is the trigger sample's time: the wall clock read once at stream start,
   plus sample_index / sample_rate. Cooldowns compare those same sample-derived times.
-  Dropped samples (SDR overflow) make sample time lag wall time, and an NTP/GPS step
-  moves wall time. Once they differ by more than `--max-clock-drift-s` (default 2 s),
-  the radio session is rebuilt, which re-anchors sample time.
+  The rate is the one read back from the SDR (drivers round unsupported rates); a
+  mismatch with `--sample-rate` is logged. Dropped samples (SDR overflow) make
+  sample time lag wall time, and an NTP/GPS step moves wall time.
+  - **Drift rebuild:** while samples are arriving and the two differ by more than
+    `--max-clock-drift-s` (default 2 s, minimum 0.5 s), the radio session is
+    rebuilt, which re-anchors sample time. A stream with no samples at all is the
+    stall watchdog's case instead (5 s).
+  - **Backoff:** sessions that keep drifting within 60 s of opening escalate the
+    restart backoff rather than rebuilding in a tight loop.
 - `identifier.bandwidth_estimate` is the 99%-power occupied bandwidth of the burst
   (resolution sample_rate / 1024). It is within +-5% at >= 15 dB SNR and up to +24% at
   the 10 dB trigger margin. Bursts shorter than 1024 samples are overestimated.
@@ -50,13 +56,18 @@ Each file is written under a hidden temporary name and renamed into place, data 
 and meta last, so a `.sigmf-meta` never appears without its complete data. If the
 record cannot be emitted, the staged pair is deleted.
 
-Ingest's `LocalSnippetStore` treats the path as untrusted. It accepts only a
-`.sigmf-data` file directly inside ingest's `--snippet-staging-dir` (absolute path,
-symlinks not followed). Both files must be regular files with a single hard link. It
-hard-links both into `--snippet-store-dir` without replacing anything there, checks
-that the linked inodes are the ones it checked, and only then removes the staged
-names. A rejected snippet doesn't lose the detection: the record is still persisted,
-with `iq_snippet_path: null` and `quality_flags.snippet_rejected` set to the reason.
+Ingest's `LocalSnippetStore` treats the path as untrusted:
+
+- **What it accepts:** only a `.sigmf-data` file directly inside ingest's
+  `--snippet-staging-dir` (absolute path, symlinks not followed), named exactly as the
+  capture writer names it (`storage.snippet_store.STAGED_DATA_NAME`).
+- **File checks:** both files must be regular files with a single hard link.
+- **How it adopts:** it hard-links both into `--snippet-store-dir` without replacing
+  anything there. It checks that each linked inode is the one it checked and has
+  exactly two links, and only then removes the staged names.
+- **Rejections:** a rejected snippet, including any I/O error during adoption,
+  doesn't lose the detection. The record is still persisted, with
+  `iq_snippet_path: null` and `quality_flags.snippet_rejected` set to the reason.
 
 **Deployment requirements** (checked at startup, which fails with an actionable
 message):
@@ -64,8 +75,9 @@ message):
 - **One dedicated uid.** Capture and ingest must run as the same dedicated user. The
   staging and store directories must be owned by that uid with no group/other access
   (created `0700`; snippet files are `0600`).
-- **One filesystem.** Staging and store must be on the same filesystem, because
-  hard links cannot cross filesystems.
+- **One filesystem and mount.** Staging and store must be on the same filesystem and
+  mount, because hard links cannot cross either. Ingest proves this at startup with
+  a real hard link.
 - **Matching paths.** Both services resolve their directories to absolute paths and
   log them, since relative defaults resolve against each process's working
   directory. Run both from the same directory, or pass the same absolute staging
@@ -108,9 +120,13 @@ A 1 s snippet is 160 MB on disk at 20 MS/s (448 MB at 56 MS/s). In memory it is
 Disk and memory stay bounded:
 
 - **Low disk:** a snippet that would leave less than `--min-free-bytes` (default
-  2 GiB) free on the staging disk is dropped with a warning. Staging, the store and
-  the database share that disk. A continuous emitter at the default 30 s cooldown
+  2 GiB) free on the staging disk is not written. Staging, the store and the
+  database share that disk. A continuous emitter at the default 30 s cooldown
   writes ~19 GB/h at 20 MS/s.
+- **Dropped IQ keeps its detection:** when the IQ isn't written (low disk, or an
+  unavailable staging dir), the detection and its measurements are still emitted,
+  with `iq_snippet_path: null` and `quality_flags.snippet_dropped` set to
+  `low_disk` or `staging_unavailable`.
 - **Slow consumer:** at most two completed snippets wait between the radio thread and
   the writer; further ones are dropped and counted rather than blocking the radio.
 - **Source buffering:** the SDR source gets 100 ms of output buffer, so a briefly
