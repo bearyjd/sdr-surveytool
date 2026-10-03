@@ -15,12 +15,15 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+import numpy as np
 import pytest
+from anthropic.types import Message
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.pool import NullPool
 
+from agent.band_table import load_band_table
 from agent.db_gateway import (
     BoundaryViolation,
     PendingRecord,
@@ -29,6 +32,9 @@ from agent.db_gateway import (
     SubmitTimedOut,
     connect_gateway,
 )
+from agent.service import AgentSettings, ClassificationAgent
+from capture.unknown.snippet_writer import write_sigmf_snippet
+from dsp import synthetic
 from schema.records import (
     ClassificationStatus,
     Identifier,
@@ -40,6 +46,7 @@ from schema.records import (
 from storage.agent_boundary import install_agent_boundary
 from storage.db import init_db, make_session_factory
 from storage.repository import save_record
+from storage.snippet_store import LocalSnippetStore
 
 ADMIN_URL = os.environ.get("SURVEYTOOL_TEST_PG_URL")
 pytestmark = pytest.mark.skipif(
@@ -642,3 +649,68 @@ def test_newest_pending_snippets_for_the_startup_probe(boundary):
         assert [r.id for r in gateway.fetch_newest_with_snippet(watermark, 1)] == [newer]
     finally:
         gateway.close()
+
+
+def test_agent_classifies_a_real_row_through_the_boundary(boundary, tmp_path):
+    """The whole agent against real PostgreSQL: a stored step-4 snippet, a
+    pending row, the agent login role, a fake LLM; the row ends up
+    auto_classified and nothing else in it changes. A second pending row
+    whose snippet capture dropped is closed out as needs_review."""
+    rng = np.random.default_rng(42)
+    n = 1 << 18
+    iq = synthetic.noise(rng, n, 1e-5) + synthetic.gate(
+        synthetic.band_limited(rng, n, 1e6, 125e3, 200e3, 1e-3), 1e6, [(0.05, 0.1)]
+    )
+    staging, store_root = tmp_path / "staging", tmp_path / "snippets"
+    staged = write_sigmf_snippet(
+        iq, staging, 1e6, 915e6, datetime(2026, 10, 3, 12, tzinfo=timezone.utc), trigger_offset=50_000
+    )
+    stored = LocalSnippetStore(staging, store_root).adopt(str(staged))
+    watermark = _watermark(boundary)
+    record_id = _insert(
+        boundary, Modality.UNKNOWN, ClassificationStatus.UNCLASSIFIED, path=stored, sample_rate=1e6
+    )
+    before = _metadata(boundary, record_id)
+    dropped_id = _insert(
+        boundary, Modality.UNKNOWN, None, path=None, sample_rate=1e6, flags={"snippet_dropped": "low_disk"}
+    )
+    answer = {"tag": "ism_902_928:lora", "confidence": 0.92, "reasoning": "125 kHz at 915.2 MHz."}
+
+    class FakeLlm:
+        messages = None
+
+        def create(self, **kwargs):
+            return Message.model_validate(
+                {
+                    "id": "m", "type": "message", "role": "assistant", "model": kwargs["model"],
+                    "stop_reason": "tool_use", "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                    "content": [{"type": "tool_use", "id": "t", "name": "record_classification", "input": answer}],
+                }
+            )
+
+    llm = FakeLlm()
+    llm.messages = llm
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        agent = ClassificationAgent(
+            gateway,
+            llm,
+            AgentSettings(snippet_root=store_root),
+            load_band_table().entries,
+            start_after_id=watermark,  # rows other tests left pending are not this test's
+        )
+        agent.check_snippet_root()
+        assert agent.run_batch() == 2
+    finally:
+        gateway.close()
+    assert _metadata(boundary, record_id) == {
+        **before,
+        "classification_status": "auto_classified",
+        "tag": "ism_902_928:lora",
+        "confidence": 0.92,
+        "reasoning": "125 kHz at 915.2 MHz.",
+    }
+    dropped = _metadata(boundary, dropped_id)
+    assert (dropped["classification_status"], dropped["tag"], dropped["confidence"]) == ("needs_review", None, 0.0)
+    assert "snippet_dropped = 'low_disk'" in dropped["reasoning"]
