@@ -16,6 +16,7 @@ from dsp.spectral import (
     occupied_bandwidth,
     occupied_bandwidth_hz,
     peak_power_dbfs,
+    quiet_reference,
 )
 
 FS = 100_000.0
@@ -146,6 +147,54 @@ def test_an_emitter_already_on_below_the_threshold_is_not_part_of_the_burst():
     reference, post = _split_snippet(rng, _band_limited(rng, 20_000, NOISE_POWER * 100, 20_000, 20_000))
     estimate = occupied_bandwidth(post + carrier[PRE:], FS, THRESHOLD_DBFS, reference_iq=reference + carrier[:PRE])
     assert estimate.hz == pytest.approx(20_000, rel=0.15)
+
+
+@pytest.mark.parametrize("kind", ["band", "tone"])
+def test_an_always_on_emitter_that_retriggered_is_flagged_not_cancelled(kind):
+    """The commonest real case: an emitter above the threshold (e.g. an LTE
+    downlink) retriggers as soon as its cooldown expires, so the pre-trigger
+    frames hold the signal at full power. Used as the noise reference they
+    would cancel it, leaving a random span marked reliable. Only quiet
+    frames may serve as reference; with none, fall back and flag it."""
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        if kind == "band":
+            emitter = _band_limited(rng, 100_000, NOISE_POWER * 10**1.5, 20_000, 10_000)
+        else:
+            emitter = (math.sqrt(NOISE_POWER * 10**1.5) * np.exp(2j * np.pi * 12_345 * np.arange(100_000) / FS)).astype(np.complex64)
+        reference, post = _split_snippet(rng, np.zeros(0, dtype=np.complex64))
+        estimate = occupied_bandwidth(post + emitter[PRE:], FS, THRESHOLD_DBFS, reference_iq=reference + emitter[:PRE])
+        assert not estimate.reliable, f"seed {seed}"
+        if kind == "band":
+            assert estimate.hz == pytest.approx(20_000, rel=0.15), f"seed {seed}"
+        else:
+            assert estimate.hz <= 5 * FS / 1024, f"seed {seed}"
+
+
+@pytest.mark.parametrize("frames, hot", [(20, 10), (40, 26)])
+def test_a_partly_contaminated_reference_is_measured_from_its_quiet_frames(frames, hot):
+    """Some pre-trigger frames hold a strong signal over the burst's band (an
+    emitter that had just switched off): only the quiet frames are a valid
+    noise reference. The per-bin median rides out half; at 65% hot only the
+    gating does."""
+    rng = np.random.default_rng(7)
+    reference = _noise(rng, frames * 1024, NOISE_POWER)
+    reference[: hot * 1024] += _band_limited(rng, hot * 1024, NOISE_POWER * 10**2.5, 20_000, 20_000)
+    _, post = _split_snippet(rng, _band_limited(rng, 20_000, NOISE_POWER * 100, 20_000, 20_000))
+    estimate = occupied_bandwidth(post, FS, THRESHOLD_DBFS, reference_iq=reference)
+    assert estimate.hz == pytest.approx(20_000, rel=0.15)
+    assert estimate.reliable
+
+
+def test_quiet_reference_keeps_only_frames_below_the_threshold():
+    rng = np.random.default_rng(7)
+    reference = _noise(rng, 20 * 1024, NOISE_POWER)
+    assert np.shares_memory(quiet_reference(reference, THRESHOLD_DBFS, 1024), reference)  # all quiet: no copy
+    reference[: 10 * 1024] += np.complex64(0.5)  # 10 hot frames
+    quiet = quiet_reference(reference, THRESHOLD_DBFS, 1024)
+    np.testing.assert_array_equal(quiet, reference[10 * 1024 :])
+    reference[: 15 * 1024] += np.complex64(0.5)  # only 5 quiet frames left
+    assert quiet_reference(reference, THRESHOLD_DBFS, 1024) is None
 
 
 @pytest.mark.parametrize("reference_frames", [None, 5])
