@@ -32,6 +32,7 @@ from agent.service import (
     make_client,
     run,
     serve,
+    serve_and_close,
 )
 from agent.snippet_reader import SnippetUnreadable
 from capture.unknown.snippet_writer import write_sigmf_snippet
@@ -54,6 +55,9 @@ class FakeGateway:
         self.fetches: list[tuple[int, int]] = []
         self.by_id: list[list[int]] = []
         self.submitted: list[tuple] = []
+
+    def lock_held(self):
+        return True
 
     def fetch_pending(self, after_id, limit):
         """Like the view: a written record is no longer pending."""
@@ -775,6 +779,20 @@ def test_a_halt_exits_with_its_own_status_so_it_is_never_auto_restarted(caplog):
         serve(_Batches([SystemicFault("the snippet store is unusable")]), 1.0, threading.Event())
     assert excinfo.value.code == EXIT_HALTED == 3
     assert "Agent halted: the snippet store is unusable" in caplog.text
+
+
+def test_a_halt_exits_3_even_when_closing_the_gateway_fails(caplog):
+    """The reviewer saw a halt exit 1: close() raised on a dead lock session
+    and replaced the SystemExit(3)."""
+
+    class _DeadGateway:
+        def close(self):
+            raise RuntimeError("the connection is closed")
+
+    with pytest.raises(SystemExit) as excinfo:
+        serve_and_close(_Batches([SystemicFault("lock lost")]), _DeadGateway(), 1.0, threading.Event())
+    assert excinfo.value.code == EXIT_HALTED
+    assert "Closing the database gateway failed" in caplog.text
 
 
 def test_sigterm_interrupts_the_agents_sleeps():

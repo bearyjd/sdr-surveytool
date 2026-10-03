@@ -147,7 +147,12 @@ RestartPreventExitStatus=3
 ```
 
 One agent runs per database: it holds a session advisory lock for its lifetime, and a
-second instance refuses to start, naming the lock. SIGTERM stops the agent at once, even
+second instance refuses to start, naming the lock and the query that finds its holder
+(`pg_locks` joined to `pg_stat_activity`). The agent checks the lock before every batch; if
+its lock session dies, it halts (status 3) rather than race a successor. Any role that can
+connect to the database can take the key first and block startup (lock-key squatting);
+the refusal's query names that session, and revoking CONNECT from PUBLIC (above) limits
+who can. SIGTERM stops the agent at once, even
 mid-sleep (a poll, a backoff or a budget pause).
 The Anthropic client is pinned to `https://api.anthropic.com`; `ANTHROPIC_BASE_URL` is
 ignored.

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import psycopg
 from sqlalchemy import Connection, Engine, create_engine, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from schema.records import ClassificationStatus
 
@@ -31,6 +31,13 @@ _UNTRANSLATABLE = "22P05"  # a \u0000 escape in the row's json
 _TIMED_OUT = {"57014", "55P03"}  # query_canceled (statement_timeout), lock_not_available
 # Held for the agent's lifetime on its own session: one agent per database.
 _SINGLETON_LOCK = 0x5344_5241_4745_4E54 & 0x7FFF_FFFF_FFFF_FFFF  # "SDRAGENT", a positive bigint
+# How pg_locks shows it: the key's high and low 32 bits.
+_LOCK_CLASSID, _LOCK_OBJID = _SINGLETON_LOCK >> 32, _SINGLETON_LOCK & 0xFFFF_FFFF
+_FIND_LOCK_HOLDER = (
+    "SELECT a.pid, a.usename, a.client_addr, a.backend_start FROM pg_locks AS l "
+    "JOIN pg_stat_activity AS a USING (pid) WHERE l.locktype = 'advisory' "
+    f"AND l.classid = {_LOCK_CLASSID} AND l.objid = {_LOCK_OBJID} AND l.granted"
+)
 _CLASSIFY = "public.classify_unknown(integer, text, text, double precision, text)"
 _PREDICATE = "public.agent_is_pending_unknown(text, json)"
 
@@ -247,6 +254,14 @@ _BY_IDS = text(
     """
 )
 _TRY_LOCK = text("SELECT pg_catalog.pg_try_advisory_lock(:key)")
+_LOCK_HELD = text(
+    """
+    SELECT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_locks
+         WHERE locktype = 'advisory' AND pid = pg_catalog.pg_backend_pid() AND granted
+           AND classid = :classid AND objid = :objid AND objsubid = 1)
+    """
+)
 _UNLOCK = text("SELECT pg_catalog.pg_advisory_unlock(:key)")
 _SUBMIT = text(
     """
@@ -410,10 +425,29 @@ class AgentGateway:
                 raise SubmitRejected(f"The database rejected the write for record {record_id}: {driver_error}") from exc
             raise
 
+    def lock_held(self) -> bool:
+        """Whether this gateway's session still holds the single-instance
+        lock. False when that session died (terminated, network lost): a
+        second agent may already be running."""
+        if self._lock is None:
+            return False
+        try:
+            return bool(self._lock.execute(_LOCK_HELD, {"classid": _LOCK_CLASSID, "objid": _LOCK_OBJID}).scalar_one())
+        except SQLAlchemyError:  # a dead session, or one SQLAlchemy has invalidated
+            return False
+
     def close(self) -> None:
+        """Release the lock and the pool. Tolerant of a dead lock session:
+        closing it releases the lock anyway."""
         if self._lock is not None:
-            self._lock.execute(_UNLOCK, {"key": _SINGLETON_LOCK})
-            self._lock.close()
+            try:
+                self._lock.execute(_UNLOCK, {"key": _SINGLETON_LOCK})
+            except SQLAlchemyError:
+                logger.warning("The lock session was already gone; nothing to unlock")
+            try:
+                self._lock.close()
+            except SQLAlchemyError:
+                logger.warning("Closing the dead lock session failed", exc_info=True)
         self._engine.dispose()
 
 
@@ -478,7 +512,8 @@ def _take_singleton_lock(engine: Engine) -> Connection:
         if not conn.execute(_TRY_LOCK, {"key": _SINGLETON_LOCK}).scalar_one():
             raise AgentAlreadyRunning(
                 "Another sdr-agent is running against this database (it holds advisory lock "
-                f"{_SINGLETON_LOCK}); refusing to start a second one."
+                f"{_SINGLETON_LOCK}); refusing to start a second one. Any role that can connect "
+                f"can also take the key; find the holder with: {_FIND_LOCK_HOLDER}"
             )
     except BaseException:
         conn.close()

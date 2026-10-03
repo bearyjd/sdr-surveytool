@@ -34,7 +34,7 @@ from agent.db_gateway import (
     SubmitTimedOut,
     connect_gateway,
 )
-from agent.service import AgentSettings, ClassificationAgent
+from agent.service import AgentSettings, ClassificationAgent, SystemicFault
 from capture.unknown.snippet_writer import write_sigmf_snippet
 from dsp import synthetic
 from schema.records import (
@@ -941,6 +941,43 @@ def test_a_second_agent_refuses_to_start_while_one_runs(boundary):
     finally:
         first.close()
     connect_gateway(_url(boundary.agent_url), boundary.agent_role).close()  # free again
+
+
+def _kill_the_lock_session(boundary: Boundary) -> None:
+    """Terminate whichever backend holds the agent's advisory lock."""
+    killed = _admin_scalar(
+        boundary,
+        "SELECT count(pg_terminate_backend(pid)) FROM pg_locks"
+        " WHERE locktype = 'advisory' AND classid = 1396986433 AND objid = 1195724372 AND granted",
+    )
+    assert killed == 1
+
+
+def test_a_lost_lock_is_noticed_and_halts_the_agent(boundary, tmp_path):
+    """The reviewer's probe: the lock session was killed, the agent went on
+    unlocked, a second agent started, and close() raised. The lock is
+    checked before every batch; losing it is systemic."""
+    gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        assert gateway.lock_held()
+        _kill_the_lock_session(boundary)
+        assert not gateway.lock_held()
+        agent = ClassificationAgent(gateway, None, AgentSettings(snippet_root=tmp_path), load_band_table().entries)
+        with pytest.raises(SystemicFault, match="single-instance lock was lost"):
+            agent.run_batch()
+        connect_gateway(_url(boundary.agent_url), boundary.agent_role).close()  # free for a successor
+    finally:
+        gateway.close()  # tolerant of the dead lock session
+
+
+def test_the_startup_refusal_says_how_to_find_the_lock_holder(boundary):
+    first = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    try:
+        with pytest.raises(AgentAlreadyRunning) as excinfo:
+            connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+        assert "pg_stat_activity" in str(excinfo.value) and "objid = 1195724372" in str(excinfo.value)
+    finally:
+        first.close()
 
 
 def test_deferred_records_are_fetched_by_id_while_pending(boundary):

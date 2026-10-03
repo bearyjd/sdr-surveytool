@@ -23,7 +23,8 @@ Every outcome falls in one of three classes (agent/README.md has the table):
   timeout, a transient API error (which also backs off, capped, before the
   next batch). After max_attempts_per_record attempts the record is left
   pending for the next run;
-- systemic: halt, with nothing marked for it. The store root unhealthy
+- systemic: halt, with nothing marked for it. The single-instance lock
+  lost (checked before every batch), the store root unhealthy
   (missing, not a directory, unreadable, or empty while records point into
   it), a run of missing snippets with none read in between, a run of failed
   batches (the database unreachable), a run of invalid model answers, a
@@ -253,6 +254,11 @@ class ClassificationAgent:
         next pending records above the cursor; returns how many records were
         looked at (0 when only not-yet-due deferred records remain, so the
         run loop sleeps). Raises SystemicFault to halt."""
+        if not self._gateway.lock_held():
+            raise SystemicFault(
+                "The single-instance lock was lost (its database session ended), so another agent "
+                "may be running; halting rather than racing it."
+            )
         looked_at = 0
         try:
             looked_at += self._retry_deferred()
@@ -578,6 +584,22 @@ def serve(agent: ClassificationAgent, poll_seconds: float, stop: threading.Event
         raise SystemExit(EXIT_HALTED) from exc
 
 
+def serve_and_close(
+    agent: ClassificationAgent, gateway: AgentGateway, poll_seconds: float, stop: threading.Event
+) -> None:
+    """serve(), then close the gateway whatever happened. A failure to close
+    is logged, never raised: it must not turn a halt's EXIT_HALTED into 1."""
+    try:
+        serve(agent, poll_seconds, stop)
+    except KeyboardInterrupt:
+        logger.info("Interrupted; shutting down")
+    finally:
+        try:
+            gateway.close()
+        except Exception:
+            logger.exception("Closing the database gateway failed")
+
+
 def main(argv: list[str] | None = None) -> None:
     """Secrets come from the environment only, never the command line:
     SURVEYTOOL_AGENT_DATABASE_URL (the agent login role) and ANTHROPIC_API_KEY."""
@@ -609,12 +631,7 @@ def main(argv: list[str] | None = None) -> None:
         sleep=stop.wait,
         start_after_id=args.start_after_id,
     )
-    try:
-        serve(agent, args.poll_seconds, stop)
-    except KeyboardInterrupt:
-        logger.info("Interrupted; shutting down")
-    finally:
-        gateway.close()
+    serve_and_close(agent, gateway, args.poll_seconds, stop)
 
 
 if __name__ == "__main__":

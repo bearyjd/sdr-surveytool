@@ -44,6 +44,9 @@ class RecordingGateway:
     def __init__(self, records):
         self.records, self.submitted = records, []
 
+    def lock_held(self):
+        return True
+
     def fetch_pending(self, after_id, limit):
         return [r for r in self.records if r.id > after_id][:limit]
 
