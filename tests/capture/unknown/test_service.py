@@ -1,8 +1,10 @@
 # tests/capture/unknown/test_service.py
+import gc
 import logging
 import os
 import queue
 import signal
+import weakref
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -363,3 +365,51 @@ def test_sigterm_shuts_down_cleanly_like_ctrl_c(monkeypatch, caplog):
     finally:
         signal.signal(signal.SIGTERM, original)
     assert "Shutting down" in caplog.text
+
+
+def test_run_releases_each_snippet_before_waiting_for_the_next(tmp_path, monkeypatch):
+    """A 1 s snippet can be ~670 MB in memory; holding the previous one while
+    the radio waits (up to a cooldown) for the next doubles peak memory."""
+    refs = []
+    alive_while_waiting = []
+
+    def new_snippet():
+        snippet = _snippet()
+        refs.append(weakref.ref(snippet))
+        return snippet
+
+    @contextmanager
+    def fake_open_session(settings, last_trigger_at, drops):
+        def snippets():
+            yield new_snippet()
+            gc.collect()
+            alive_while_waiting.append(refs[0]() is not None)
+            raise KeyboardInterrupt
+
+        yield snippets()
+
+    monkeypatch.setattr(service, "_open_session", fake_open_session)
+    monkeypatch.setattr(service, "RecordEmitter", _FakeEmitter)
+    with pytest.raises(KeyboardInterrupt):
+        service.run(_settings(tmp_path, min_free_bytes=0), "/unused.sock", "s1", "op1")
+    assert alive_while_waiting == [False]
+
+
+def test_drain_does_not_hold_a_delivered_snippet_while_polling():
+    snippets: queue.Queue = queue.Queue()
+    snippets.put(_snippet())
+    delivered = []
+    alive_while_polling = []
+
+    def monotonic():
+        if delivered:
+            gc.collect()
+            alive_while_polling.append(delivered[0]() is not None)
+            return 9.0  # past the stall threshold: ends the generator
+        return 0.0
+
+    drained = _drain(snippets, _FakeTap(), monotonic=monotonic)
+    delivered.append(weakref.ref(next(drained)))
+    with pytest.raises(RuntimeError, match="stalled"):
+        next(drained)
+    assert alive_while_polling == [False]

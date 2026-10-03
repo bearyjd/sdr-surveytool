@@ -158,6 +158,8 @@ def run(
                     for snippet in snippets:
                         last_trigger_at = record_trigger(last_trigger_at, snippet.trigger)
                         _stage_and_emit(snippet, settings, emitter, survey_id, operator_id, drops)
+                        # Up to ~670 MB: don't hold it while waiting for the next.
+                        del snippet
             except Exception:
                 logger.exception(
                     "Unknown-signal capture session failed; retrying in %.1fs", backoff
@@ -323,11 +325,11 @@ def _drain(
     last_progress = monotonic()
     while True:
         try:
-            snippet = snippets.get(timeout=poll_seconds)
+            # Yielded without binding a local, so this generator doesn't keep
+            # the last snippet alive while it polls for the next one.
+            yield snippets.get(timeout=poll_seconds)
         except queue.Empty:
             pass
-        else:
-            yield snippet
         failure = None
         if tap.error is not None:
             failure = "Snippet tap failed; flowgraph stopped"
