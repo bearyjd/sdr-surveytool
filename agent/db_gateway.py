@@ -40,18 +40,30 @@ _BOUNDS = {
 }
 _MAX_PATH_CHARS = 4096
 
-# The self-check is an allowlist. The connected role may be a member of
-# nothing but itself and the agent role; neither may carry a dangerous
-# attribute, any privilege on survey_records, or the right to create
-# objects anywhere; and the only SECURITY DEFINER function it may execute
-# (outside extensions) is classify_unknown. Each query returns one row per
-# problem, as text.
+# The self-check is an allowlist, run against the LOGIN (session_user): a
+# login whose role setting switches it to another role at connect would
+# otherwise be judged by that role, and could RESET ROLE back. The session
+# must run as the login itself, with no role settings. The login may be a
+# member of nothing but itself and the agent role; neither may carry a
+# dangerous attribute, any privilege on survey_records, the right to create
+# objects anywhere, or TEMPORARY on any database; and the only SECURITY
+# DEFINER function it may execute (outside extensions) is classify_unknown.
+# Each query returns one row per problem, as text.
 _PROBLEMS = text(
     """
+    SELECT 'the session runs as ' || current_user || ', not as the login ' || session_user
+     WHERE current_user <> session_user
+    UNION ALL
+    SELECT session_user || ' has role settings ('
+           || pg_catalog.array_to_string(s.setconfig, ', ') || ')'
+      FROM pg_catalog.pg_db_role_setting AS s
+      JOIN pg_catalog.pg_roles AS r ON r.oid = s.setrole
+     WHERE r.rolname = session_user
+    UNION ALL
     SELECT 'member of ' || r.rolname
       FROM pg_catalog.pg_roles AS r
-     WHERE pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER')
-       AND r.rolname NOT IN (current_user, :agent_role)
+     WHERE pg_catalog.pg_has_role(session_user, r.oid, 'MEMBER')
+       AND r.rolname NOT IN (session_user, :agent_role)
     UNION ALL
     SELECT r.rolname || ' has '
            || concat_ws(', ',
@@ -61,12 +73,12 @@ _PROBLEMS = text(
                         CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END,
                         CASE WHEN r.rolcreatedb THEN 'CREATEDB' END)
       FROM pg_catalog.pg_roles AS r
-     WHERE r.rolname IN (current_user, :agent_role)
+     WHERE r.rolname IN (session_user, :agent_role)
        AND (r.rolsuper OR r.rolreplication OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb)
     UNION ALL
     SELECT r.rolname || ' has a privilege on survey_records'
       FROM pg_catalog.pg_roles AS r
-     WHERE r.rolname IN (current_user, :agent_role)
+     WHERE r.rolname IN (session_user, :agent_role)
        AND (pg_catalog.has_table_privilege(
                 r.oid, pg_catalog.to_regclass('public.survey_records'),
                 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
@@ -76,32 +88,37 @@ _PROBLEMS = text(
     UNION ALL
     SELECT r.rolname || ' can create objects in schema ' || n.nspname
       FROM pg_catalog.pg_roles AS r, pg_catalog.pg_namespace AS n
-     WHERE r.rolname IN (current_user, :agent_role)
+     WHERE r.rolname IN (session_user, :agent_role)
        AND pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE')
     UNION ALL
-    SELECT r.rolname || ' has CREATE or TEMPORARY on the database'
+    SELECT r.rolname || ' has CREATE on database ' || pg_catalog.current_database()
       FROM pg_catalog.pg_roles AS r
-     WHERE r.rolname IN (current_user, :agent_role)
-       AND pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'CREATE, TEMPORARY')
+     WHERE r.rolname IN (session_user, :agent_role)
+       AND pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'CREATE')
+    UNION ALL
+    SELECT r.rolname || ' has TEMPORARY on database ' || d.datname
+      FROM pg_catalog.pg_roles AS r, pg_catalog.pg_database AS d
+     WHERE r.rolname IN (session_user, :agent_role)
+       AND pg_catalog.has_database_privilege(r.oid, d.oid, 'TEMPORARY')
     UNION ALL
     SELECT 'can execute SECURITY DEFINER function ' || p.oid::pg_catalog.regprocedure::text
       FROM pg_catalog.pg_proc AS p
      WHERE p.prosecdef
-       AND pg_catalog.has_function_privilege(current_user, p.oid, 'EXECUTE')
+       AND pg_catalog.has_function_privilege(session_user, p.oid, 'EXECUTE')
        AND p.oid IS DISTINCT FROM pg_catalog.to_regprocedure(:classify)
        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend AS d
                         WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
                           AND d.objid = p.oid AND d.deptype = 'e')
     """
 )
-# The boundary's two entry points must be usable without SET ROLE.
+# The boundary's two entry points must be usable by the login without SET ROLE.
 _BOUNDARY_ACCESS = text(
     """
-    SELECT pg_catalog.pg_has_role(current_user, r.oid, 'USAGE'),
+    SELECT pg_catalog.pg_has_role(session_user, r.oid, 'USAGE'),
            coalesce(pg_catalog.has_table_privilege(
-               pg_catalog.to_regclass('public.agent_pending_unknown'), 'SELECT'), false),
+               session_user, pg_catalog.to_regclass('public.agent_pending_unknown'), 'SELECT'), false),
            coalesce(pg_catalog.has_function_privilege(
-               pg_catalog.to_regprocedure(:classify), 'EXECUTE'), false)
+               session_user, pg_catalog.to_regprocedure(:classify), 'EXECUTE'), false)
       FROM pg_catalog.pg_roles AS r
      WHERE r.rolname = :agent_role
     """
@@ -284,7 +301,8 @@ def verify_boundary(engine: Engine, agent_role: str) -> None:
             "Refusing to run: the database role is not confined to the agent boundary: "
             # Attributes and privileges first: they matter more than memberships.
             + "; ".join(sorted(problems, key=lambda problem: (problem.startswith("member of "), problem))[:10])
-            + f". Connect as a login role that is only IN ROLE {agent_role}, and re-run "
+            + f". Connect as a login role that is only IN ROLE {agent_role}, with no role "
+            "settings and no TEMPORARY on any database (agent/README.md), and re-run "
             "sdr-agent-boundary."
         )
     if access is None or not all(access):

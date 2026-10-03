@@ -54,9 +54,14 @@ to the cellular/WiFi/BT decode modules.
 - **The database.** The agent's login role (`IN ROLE surveytool_agent`, and in nothing
   else) has no privilege on `survey_records`; it reads the `agent_pending_unknown` view and
   writes only through the `classify_unknown` function (`storage/sql/agent_boundary.sql`,
-  installed by `sdr-agent-boundary`). At startup the agent checks an allowlist: no
-  membership but that role, no dangerous role attribute, no privilege on the table, no
-  CREATE or TEMPORARY anywhere, no other executable SECURITY DEFINER function.
+  installed by `sdr-agent-boundary`). At startup the agent checks an allowlist against the
+  login itself (`session_user`): the session must run as the login (no `SET ROLE`), the
+  login must have no role settings (`ALTER ROLE ... SET`), no membership but that role, no
+  dangerous role attribute, no privilege on the table, no CREATE anywhere, no TEMPORARY on
+  **any** database, and no other executable SECURITY DEFINER function. The installer only
+  touches the survey database, so operators must revoke TEMPORARY and CONNECT from PUBLIC
+  (and from the login) on every other database in the cluster, `postgres` included:
+  `REVOKE TEMPORARY, CONNECT ON DATABASE postgres FROM PUBLIC;`.
 - **The LLM.** The model has exactly one tool, the forced output tool, and sees only
   numeric features and band-table entries: no SigMF free text, location, survey or
   operator IDs.

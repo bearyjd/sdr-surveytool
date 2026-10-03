@@ -88,6 +88,17 @@ def boundary():
     admin_url = root_url.set(database=database)
     root = _engine(root_url, isolation_level="AUTOCOMMIT")
     with root.connect() as conn:
+        # What the operator documentation asks for: no TEMPORARY for PUBLIC on
+        # any other database (the self-check refuses a login that has it).
+        # Throwaway cluster only; restored afterwards.
+        temp_for_public = conn.execute(
+            text(
+                "SELECT datname FROM pg_catalog.pg_database"
+                " WHERE has_database_privilege('public', oid, 'TEMPORARY')"
+            )
+        ).scalars().all()
+        for other in temp_for_public:
+            conn.exec_driver_sql(f'REVOKE TEMPORARY ON DATABASE "{other}" FROM PUBLIC')
         conn.exec_driver_sql(f"CREATE DATABASE {database}")
     try:
         admin = _engine(admin_url)
@@ -112,6 +123,8 @@ def boundary():
     finally:
         with root.connect() as conn:
             conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {database} WITH (FORCE)")
+            for other in temp_for_public:
+                conn.exec_driver_sql(f'GRANT TEMPORARY ON DATABASE "{other}" TO PUBLIC')
             leftovers = conn.execute(
                 text("SELECT rolname FROM pg_catalog.pg_roles WHERE rolname LIKE :pattern"),
                 {"pattern": f"sdr\\_%\\_{suffix}"},
@@ -553,8 +566,26 @@ BYPASSES = {
         ["DROP OWNED BY sdr_helper_{suffix}", "DROP ROLE IF EXISTS sdr_helper_{suffix}"],
         "member of sdr_helper_{suffix}",
     ),
-    "temporary": (["GRANT TEMPORARY ON DATABASE {database} TO {login}"], [], "CREATE or TEMPORARY on the database"),
-    "create on the database": (["GRANT CREATE ON DATABASE {database} TO {login}"], [], "CREATE or TEMPORARY on the database"),
+    "temporary": (["GRANT TEMPORARY ON DATABASE {database} TO {login}"], [], "{login} has TEMPORARY on database {database}"),
+    "temporary on another database": (
+        ["GRANT TEMPORARY ON DATABASE postgres TO {login}"],
+        ["REVOKE TEMPORARY ON DATABASE postgres FROM {login}"],
+        "{login} has TEMPORARY on database postgres",
+    ),
+    "create on the database": (["GRANT CREATE ON DATABASE {database} TO {login}"], [], "{login} has CREATE on database {database}"),
+    # The reviewer's bypass: a superuser login whose role setting switches it
+    # to the agent role at connect, so current_user looks confined.
+    "superuser switched to the agent role": (
+        ["ALTER ROLE {login} SUPERUSER", "ALTER ROLE {login} SET role = {agent_role}"],
+        [],
+        "{login} has SUPERUSER",
+    ),
+    "session switched to the agent role": (
+        ["ALTER ROLE {login} IN DATABASE {database} SET role = {agent_role}"],
+        [],
+        "the session runs as {agent_role}, not as the login {login}",
+    ),
+    "role setting": (["ALTER ROLE {login} SET work_mem = '64MB'"], [], "{login} has role settings (work_mem=64MB)"),
     "create on public": (["GRANT CREATE ON SCHEMA public TO {login}"], [], "can create objects in schema public"),
     "create on another schema": (
         ["CREATE SCHEMA sdr_extra_{suffix}", "GRANT CREATE ON SCHEMA sdr_extra_{suffix} TO {login}"],
