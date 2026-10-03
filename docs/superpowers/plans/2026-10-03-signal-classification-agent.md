@@ -24,9 +24,10 @@ record that step 4 stores:
     in the SigMF.
   - Without a usable reference, it uses a bias-corrected percentile self floor, never
     the median. The usual cause is an always-on emitter that fills its own pre-trigger.
-    A self-floor primary reaching the outer 15% of the band cannot be told from
-    receiver roll-off. It is flagged `edge_region_unreliable` and capped at
-    `needs_review`.
+    By default nothing measured against the self floor grounds, so such records go to
+    `needs_review`. The opt-in `--allow-self-floor-grounding` lets an interior primary
+    ground; one reaching the outer 15% of the band, where receiver roll-off poses as a
+    signal, still cannot (`edge_region_unreliable`).
   - It treats the band as circular: a signal straddling the ±fs/2 edge is one region.
   - `dsp/features.py` channelizes the primary region by FFT-bin selection and measures
     fine OBW and center, duty cycle, bursts, PAPR, flatness, and a symbol-rate line in |x|².
@@ -169,16 +170,27 @@ serves the boundary tests.
     - The floor is flat, so it is blind to roll-off. A receiver's in-band noise reads as
       one false region whose outer edge reaches 0.373–0.475 fs (15 dB cosine roll-off,
       60–90% flat passbands, 20 seeds).
-    - The edge zone is the outer 15% of the band on each side, beyond ±0.35 fs
-      (`touches_edge_zone`); 10% would miss the 60% and 70% flat cases. A self-floor
-      primary that reaches it carries the `edge_region_unreliable` reason. A primary
-      away from it is judged like any other, and can ground.
+    - **By default nothing measured against the self floor grounds.** The analysis
+      carries `no_quiet_noise_reference`, so every always-on emitter goes to
+      `needs_review` in v1. An `auto_classified` record is trusted data, and a silently
+      inflated OBW that grounds is worse than extra review.
+    - **Opt-in: `--allow-self-floor-grounding`** (`AgentSettings.allow_self_floor_grounding`,
+      off by default).
+      - The edge zone is the outer 15% of the band on each side, beyond ±0.35 fs
+        (`touches_edge_zone`); 10% would miss the 60% and 70% flat cases.
+      - A primary reaching the zone carries `edge_region_unreliable`; an interior one is
+        judged like any other and can ground.
+      - The known gap: at 8–12 dB roll-off, 20 of 259 wrong self-floor primaries are
+        interior regions inflated to 31–360 kHz, which could ground.
+      - So the flag is for use only after recorded bladeRF captures confirm a steep
+        enough roll-off. `agent/README.md` says so.
     - An always-on emitter is still found as the primary, never "no region", so it never
       counts toward a halt.
     - The self floor lives in `dsp/segmentation.py`, because step 4 has no self-floor
       estimator.
   - **Reduced confidence.** `SnippetAnalysis.reduced_confidence` lists the reasons:
-    `edge_region_unreliable`, `non_finite_samples`, and `bandwidth_unreliable` (from
+    `no_quiet_noise_reference` (default) or `edge_region_unreliable` (opted in),
+    `non_finite_samples` (any NaN or inf sample), and `bandwidth_unreliable` (from
     `bandwidth_is_reliable`). Any reason keeps every band match ungrounded and caps
     routing at `needs_review`, even for a matching modulation label. The prompt states
     the floor source and the reasons.
@@ -292,9 +304,11 @@ serves the boundary tests.
       silent on them.
   21. **Step 4's SigMF writer records its trigger threshold** (Task 6). This is additive
       step-4 code on this branch; the spec only reads step 4's output.
-  22. **The self-floor edge zone.** Without a quiet reference, a primary reaching the
-      outer 15% of the band is capped at `needs_review`. Validating the zone on real
-      bladeRF captures is a hardware follow-up.
+  22. **Self-floor grounding is opt-in.** By default a record without a quiet reference
+      never grounds and is capped at `needs_review`, even for a confident in-band
+      answer. With `--allow-self-floor-grounding`, a primary reaching the outer 15% of
+      the band is still capped. Validating the zone on real bladeRF captures is a
+      hardware follow-up, and the flag waits for it.
 
 ## Verified facts (build-and-run spike, 2026-10-03)
 
@@ -533,8 +547,9 @@ Three caveats on the table:
    samples.** Expected:
    - the burst is the primary;
    - earlier emitters are context;
-   - the always-on emitter is classified and never halts the agent; reaching the band
-     edges without a reference, it is capped at `needs_review`;
+   - the always-on emitter is classified and never halts the agent. By default it goes
+     to `needs_review`; opted in, an interior one can be `auto_classified` and an
+     edge-zone one cannot;
    - nothing crashes, and every reliability flag is honest.
 
    Any reduced-confidence reason grounds nothing and caps routing. Tasks 2, 3, 6, 8, 9
@@ -742,8 +757,10 @@ Design decisions, each measured (see Verified facts):
   - The floor is flat, so it is blind to roll-off. A receiver's in-band noise reads as
     one false region reaching 0.373–0.475 fs from the center (15 dB roll-off, 60–90%
     flat passbands). A region reaching the outer 15% of the band (`touches_edge_zone`)
-    cannot be told from it; Task 8 flags such a primary and routing caps it. Regions
-    are otherwise judged by `bandwidth_is_reliable`, as in reference mode.
+    cannot be told from it. By default Task 8 lets nothing measured against the self
+    floor ground; with the opt-in `--allow-self-floor-grounding` (Task 10), an interior
+    primary may ground and one in the zone still may not. Regions are otherwise judged
+    by `bandwidth_is_reliable`, as in reference mode.
   - The always-on emitter is still found as the primary, never "no region".
 - **Regions.**
   - Bins 6 dB above the floor, with gaps of ≤ 2 bins bridged.
@@ -5210,16 +5227,20 @@ git commit -m "feat: add the cited US band table with grounded matching"
       The flag is True for an emitter found in the pre-trigger reference, False for one
       that is new during the burst, and None in self mode, where there is no reference to
       tell. Context is the strongest `MAX_CONTEXT_REGIONS` of both kinds;
+    - `NO_QUIET_NOISE_REFERENCE = "no_quiet_noise_reference"` and
+      `EDGE_REGION_UNRELIABLE = "edge_region_unreliable"`;
     - `SnippetAnalysis(tuned_center_hz, sample_rate, noise_reference, reduced_confidence: tuple[str, ...], analysed_seconds, truncated, coarse_resolution_hz, primary: RegionFeatures | None, signal_center_hz, context, band_matches, modulation)`,
       with `.grounded_band_ids -> frozenset[str]` and `.modulation_label -> str | None`:
       - `noise_reference` is the floor source. Segmentation gets the snippet's
         `pre_trigger` samples as its reference, and its recorded trigger threshold;
-      - `reduced_confidence` holds any of `EDGE_REGION_UNRELIABLE =
-        "edge_region_unreliable"` (a self-floor primary that `touches_edge_zone`),
-        `"non_finite_samples"` and `"bandwidth_unreliable"`. Any reason keeps every band
-        match ungrounded, and Task 9's routing caps it at `needs_review`. A self-floor
-        primary away from the band edges carries no reason and can ground;
-    - `analyse_snippet(snippet, bands, classifier) -> SnippetAnalysis`.
+      - `reduced_confidence` holds any of `NO_QUIET_NOISE_REFERENCE` (self floor, by
+        default), `EDGE_REGION_UNRELIABLE` (self floor, opted in, a primary that
+        `touches_edge_zone`), `"non_finite_samples"` and `"bandwidth_unreliable"`. Any
+        reason keeps every band match ungrounded, and Task 9's routing caps it at
+        `needs_review`;
+    - `analyse_snippet(snippet, bands, classifier, allow_self_floor_grounding: bool = False) -> SnippetAnalysis`.
+      Off, nothing measured against the self floor grounds. On, an interior self-floor
+      primary carries no reason and can ground.
   - `agent.prompt`:
     - `SYSTEM_PROMPT`;
     - `build_user_message(analysis) -> str`. It raises `ValueError` without a primary
@@ -5237,7 +5258,7 @@ import json
 import numpy as np
 import pytest
 
-from agent.analysis import EDGE_REGION_UNRELIABLE, analyse_snippet
+from agent.analysis import EDGE_REGION_UNRELIABLE, NO_QUIET_NOISE_REFERENCE, analyse_snippet
 from agent.band_table import load_band_table
 from agent.classifier import ModulationPrediction, UnavailableClassifier
 from agent.prompt import build_user_message
@@ -5287,24 +5308,34 @@ def test_analysis_places_the_primary_in_absolute_frequency_and_grounds_it():
     assert analysis.modulation is None and analysis.grounded_band_ids == {"ism_902_928"}
 
 
-def test_without_a_quiet_reference_a_central_primary_still_grounds():
+def test_without_a_quiet_reference_nothing_grounds_by_default():
+    """The self floor is blind to receiver roll-off, so by default nothing
+    measured against it grounds, however central."""
     analysis = analyse_snippet(_snippet(_two_emitters(), pre_trigger=0), BANDS, UnavailableClassifier())
-    assert (analysis.noise_reference, analysis.reduced_confidence) == ("self", ())
+    assert (analysis.noise_reference, analysis.reduced_confidence) == ("self", (NO_QUIET_NOISE_REFERENCE,))
     assert analysis.signal_center_hz == pytest.approx(915.2e6, abs=2e3)
-    assert analysis.grounded_band_ids == {"ism_902_928"}
+    assert [(m.entry.id, m.grounded) for m in analysis.band_matches] == [("ism_902_928", False)]
     assert analysis.context[0].present_before_trigger is None  # no reference to tell
+
+
+def test_opted_in_an_interior_self_floor_primary_grounds():
+    analysis = analyse_snippet(
+        _snippet(_two_emitters(), pre_trigger=0), BANDS, UnavailableClassifier(), allow_self_floor_grounding=True
+    )
+    assert (analysis.noise_reference, analysis.reduced_confidence) == ("self", ())
+    assert analysis.grounded_band_ids == {"ism_902_928"}
 
 
 def test_on_colored_noise_without_a_reference_the_edge_zone_grounds_nothing():
     """The self floor reads a 15 dB receiver roll-off as one region some
-    600 kHz wide that swallows the 20 kHz burst. It reaches the band-edge
-    zone, so it is flagged and grounds nothing; with the pre-trigger
-    reference the same capture grounds the burst itself."""
+    600 kHz wide that swallows the 20 kHz burst. Even opted in, it reaches
+    the band-edge zone, so it is flagged and grounds nothing; with the
+    pre-trigger reference the same capture grounds the burst itself."""
     rng = np.random.default_rng(24)
     burst = synthetic.band_limited(rng, N, FS, 20e3, 100e3, 1e-4)
     burst[:PRE] = 0
     iq = synthetic.colored_noise(rng, N, FS, 1e-5, 0.6, 15.0) + burst
-    blind = analyse_snippet(_snippet(iq, pre_trigger=0), BANDS, UnavailableClassifier())
+    blind = analyse_snippet(_snippet(iq, pre_trigger=0), BANDS, UnavailableClassifier(), allow_self_floor_grounding=True)
     assert blind.primary.obw_hz > 500e3
     assert (blind.noise_reference, blind.reduced_confidence) == ("self", (EDGE_REGION_UNRELIABLE,))
     assert [(m.entry.id, m.grounded) for m in blind.band_matches] == [("ism_902_928", False)]
@@ -5315,13 +5346,13 @@ def test_on_colored_noise_without_a_reference_the_edge_zone_grounds_nothing():
 
 def test_the_edge_zone_applies_only_without_a_reference():
     """A real 125 kHz burst at +420 kHz reaches the zone (beyond 0.35 fs).
-    The self floor cannot vouch for it; the pre-trigger reference can."""
+    The self floor cannot vouch for it, even opted in; the pre-trigger
+    reference can."""
     rng = np.random.default_rng(25)
     burst = synthetic.gate(synthetic.band_limited(rng, N, FS, 125e3, 420e3, 1e-3), FS, [(0.05, 0.1)])
     iq = burst + synthetic.noise(rng, N, 1e-5)
-    assert analyse_snippet(_snippet(iq, pre_trigger=0), BANDS, UnavailableClassifier()).reduced_confidence == (
-        EDGE_REGION_UNRELIABLE,
-    )
+    blind = analyse_snippet(_snippet(iq, pre_trigger=0), BANDS, UnavailableClassifier(), allow_self_floor_grounding=True)
+    assert blind.reduced_confidence == (EDGE_REGION_UNRELIABLE,)
     assert analyse_snippet(_snippet(iq), BANDS, UnavailableClassifier()).grounded_band_ids == {"ism_902_928"}
 
 
@@ -5350,13 +5381,12 @@ def test_non_finite_samples_reduce_confidence():
 
 def test_an_always_on_emitter_is_still_the_primary():
     """An always-on emitter fills its own pre-trigger: no quiet reference,
-    so the self floor finds it, never nothing. Filling 90% of the band, it
-    reaches the edge zone."""
+    so the self floor finds it, never nothing."""
     rng = np.random.default_rng(23)
     iq = synthetic.band_limited(rng, N, FS, 0.9 * FS, 0.0, 1e-3) + synthetic.noise(rng, N, 1e-5)
     analysis = analyse_snippet(_snippet(iq), BANDS, UnavailableClassifier())
     assert analysis.primary.obw_hz == pytest.approx(0.9 * FS, rel=0.03)
-    assert (analysis.noise_reference, analysis.reduced_confidence) == ("self", (EDGE_REGION_UNRELIABLE,))
+    assert (analysis.noise_reference, analysis.reduced_confidence) == ("self", (NO_QUIET_NOISE_REFERENCE,))
 
 
 def test_out_of_table_signal_is_ungrounded_unless_the_classifier_predicts():
@@ -5474,9 +5504,15 @@ the reference) and any other burst-time regions. The primary's absolute
 center and fine OBW are matched against the curated band table; the
 modulation classifier gets the capture. Anything that makes the
 measurements less trustworthy is listed in reduced_confidence, keeps every
-band match ungrounded, and caps routing at needs_review. Without a quiet
-reference, that includes a primary reaching the band-edge zone, which the
-self floor cannot tell from receiver roll-off (edge_region_unreliable).
+band match ungrounded, and caps routing at needs_review.
+
+Without a quiet reference the self floor is blind to receiver roll-off, so
+by default nothing measured against it grounds (no_quiet_noise_reference).
+allow_self_floor_grounding (opt-in, off until real bladeRF captures confirm
+a steep enough roll-off) lets an interior primary ground; one reaching the
+band-edge zone still cannot (edge_region_unreliable). Even then a milder
+8-12 dB roll-off can widen an interior primary unnoticed (measured: 20 of
+259 wrong self-floor primaries escape the zone).
 """
 
 from __future__ import annotations
@@ -5497,6 +5533,7 @@ from dsp.segmentation import (
     touches_edge_zone,
 )
 
+NO_QUIET_NOISE_REFERENCE = "no_quiet_noise_reference"
 EDGE_REGION_UNRELIABLE = "edge_region_unreliable"
 
 
@@ -5537,13 +5574,18 @@ class SnippetAnalysis:
 
 
 def analyse_snippet(
-    snippet: Snippet, bands: tuple[BandEntry, ...], classifier: ModulationClassifier
+    snippet: Snippet,
+    bands: tuple[BandEntry, ...],
+    classifier: ModulationClassifier,
+    allow_self_floor_grounding: bool = False,
 ) -> SnippetAnalysis:
     reference = snippet.iq[: snippet.pre_trigger_samples] if snippet.pre_trigger_samples else None
     segmentation = segment_spectrum(snippet.iq, snippet.sample_rate, reference, snippet.trigger_threshold_dbfs)
     primary_region = segmentation.primary
     primary = None if primary_region is None else region_features(snippet.iq, segmentation, primary_region)
-    reasons = _reduced_confidence(segmentation, snippet.non_finite_samples, primary_region, primary)
+    reasons = _reduced_confidence(
+        segmentation, snippet.non_finite_samples, primary_region, primary, allow_self_floor_grounding
+    )
     context = () if primary_region is None else _context(snippet, segmentation, primary_region)
     signal_center: float | None = None
     matches: tuple[BandMatch, ...] = ()
@@ -5576,14 +5618,14 @@ def _reduced_confidence(
     non_finite: int,
     primary_region: SpectralRegion | None,
     primary: RegionFeatures | None,
+    allow_self_floor_grounding: bool,
 ) -> tuple[str, ...]:
     reasons = []
-    if (
-        segmentation.floor_source == "self"
-        and primary_region is not None
-        and touches_edge_zone(primary_region, segmentation.sample_rate)
-    ):
-        reasons.append(EDGE_REGION_UNRELIABLE)  # may be the receiver's roll-off, not a signal
+    if segmentation.floor_source == "self":
+        if not allow_self_floor_grounding:
+            reasons.append(NO_QUIET_NOISE_REFERENCE)  # the self floor is blind to roll-off
+        elif primary_region is not None and touches_edge_zone(primary_region, segmentation.sample_rate):
+            reasons.append(EDGE_REGION_UNRELIABLE)  # may be the receiver's roll-off, not a signal
     if non_finite:
         reasons.append("non_finite_samples")
     if primary is not None and not primary.bandwidth_reliable:
@@ -5636,9 +5678,10 @@ frequency falls in. Call record_classification exactly once.
   bandwidth_reliable false means the occupied bandwidth could not be measured (the signal
   fills the capture or wraps its edge). reduced_confidence lists why the measurements are
   less trustworthy, and no tag is accepted without review while it is non-empty.
-  edge_region_unreliable means that, with no quiet noise reference (noise_reference
-  "self"), the primary emitter reaches the outer band edges, where the receiver's noise
-  roll-off can pose as a signal.
+  no_quiet_noise_reference means the noise floor was estimated from the capture itself
+  (noise_reference "self"), which is blind to the receiver's roll-off;
+  edge_region_unreliable means that, in that case, the primary emitter reaches the outer
+  band edges, where the receiver's noise roll-off can pose as a signal.
   Other emitters with present_before_trigger true were already on before the capture
   triggered; the primary emitter is the one that triggered it.
 - reasoning: the evidence, and any alternative identities you considered.
@@ -5717,10 +5760,54 @@ def build_user_message(analysis: SnippetAnalysis) -> str:
 
 <!-- check: t8_green -->
 Run: `python -m pytest tests/agent/test_analysis_prompt.py -q`
-Expected: PASS, `11 passed`.
+Expected: PASS, `12 passed`.
 
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Prove the conservative default is pinned, then revert**
+
+Temporarily default to letting the self floor ground:
+
+<!-- edit: agent/analysis.py -->
+Replace
+
+```python
+    allow_self_floor_grounding: bool = False,
+) -> SnippetAnalysis:
+```
+
+with
+
+```python
+    allow_self_floor_grounding: bool = True,
+) -> SnippetAnalysis:
+```
+<!-- check: t8_mutant -->
+Run: `python -m pytest tests/agent/test_analysis_prompt.py -q`
+Expected: FAIL, `2 failed, 10 passed`: `test_without_a_quiet_reference_nothing_grounds_by_default` and `test_an_always_on_emitter_is_still_the_primary`.
+
+
+Revert it:
+
+<!-- edit: agent/analysis.py -->
+Replace
+
+```python
+    allow_self_floor_grounding: bool = True,
+) -> SnippetAnalysis:
+```
+
+with
+
+```python
+    allow_self_floor_grounding: bool = False,
+) -> SnippetAnalysis:
+```
+<!-- check: t8_reverted -->
+Run: `python -m pytest tests/agent/test_analysis_prompt.py -q`
+Expected: PASS, `12 passed`.
+
+
+- [ ] **Step 6: Commit**
 
 <!-- run -->
 ```bash
@@ -6314,14 +6401,16 @@ git commit -m "feat: add the forced record_classification LLM call and confidenc
   - `load_band_table`.
 - Produces, in `agent.service`:
   - `SystemicFault(RuntimeError)`;
-  - `AgentSettings(snippet_root, model, max_tokens, batch_size=20, max_consecutive_snippet_failures=5, max_consecutive_bad_outputs=5, daily_token_budget=2_000_000, backoff_seconds=2.0, max_backoff_seconds=300.0)`;
+  - `AgentSettings(snippet_root, model, max_tokens, batch_size=20, max_consecutive_snippet_failures=5, max_consecutive_bad_outputs=5, daily_token_budget=2_000_000, backoff_seconds=2.0, max_backoff_seconds=300.0, allow_self_floor_grounding=False)`;
   - `ClassificationAgent(gateway, client, settings, bands, classifier=None, sleep=time.sleep, now=utc_now, start_after_id=0)`,
     with:
     - `.check_snippet_root()`, the startup probe;
     - `.run_batch() -> int`;
     - `.take_retry_delay() -> float | None`;
   - `run(agent, poll_seconds, stopping, sleep, max_failed_batches=5)`;
-  - `main(argv)`, exposed as `sdr-agent --snippet-store-dir DIR [--agent-role] [--model] [--max-tokens] [--daily-token-budget] [--poll-seconds] [--band-table] [--start-after-id]`.
+  - `main(argv)`, exposed as `sdr-agent --snippet-store-dir DIR [--agent-role] [--model] [--max-tokens] [--daily-token-budget] [--poll-seconds] [--band-table] [--start-after-id] [--allow-self-floor-grounding]`.
+    The last is opt-in and documented in `agent/README.md`: enable it only after
+    recorded bladeRF captures confirm a steep enough roll-off.
 
 Failure handling, as tested:
 
@@ -6330,7 +6419,7 @@ Failure handling, as tested:
 | Startup: relative root, or none of the 5 newest pending snippets reads | `SystemicFault` ("mount the store read-only at the identical resolved path") |
 | No snippet (`iq_snippet_path` NULL) | `needs_review` at once: NULL tag, the flag named, no LLM call, never counted toward a halt |
 | Snippet outside the store | Held pending. Goes to `needs_review` once a later snippet is analysed |
-| Always-on emitter (no quiet pre-trigger frame) | Classified from the self floor; it is the primary, never "no region", and never counts toward a halt. Reaching the band-edge zone, it is capped at `needs_review` (`edge_region_unreliable`); away from it, it can be `auto_classified` |
+| Always-on emitter (no quiet pre-trigger frame) | Classified from the self floor; it is the primary, never "no region", and never counts toward a halt. By default it is capped at `needs_review` (`no_quiet_noise_reference`). With `--allow-self-floor-grounding`, an interior one can be `auto_classified` and one reaching the band-edge zone is still capped (`edge_region_unreliable`) |
 | Some samples NaN or inf | Zeroed and counted; classified with `reduced_confidence` |
 | Snippet unreadable (every sample non-finite included), no occupied region, or feature extraction failed | Stays pending |
 | 5 snippet failures of any kind in a row | `SystemicFault` naming the ids and `--start-after-id`, with nothing marked |
@@ -6362,7 +6451,7 @@ from anthropic.types import Message
 
 from agent.band_table import load_band_table
 from agent.db_gateway import PendingRecord, RecordNotPending, SubmitRejected, SubmitTimedOut
-from agent.service import AgentSettings, ClassificationAgent, SystemicFault, main, run
+from agent.service import AgentSettings, ClassificationAgent, SystemicFault, _parse_args, main, run
 from capture.unknown.snippet_writer import write_sigmf_snippet
 from dsp import synthetic
 from schema.records import ClassificationStatus
@@ -6602,21 +6691,39 @@ def test_a_snippet_with_no_occupied_region_stays_pending_and_counts(store):
     assert gateway.submitted == [] and client.requests == []
 
 
-@pytest.mark.parametrize("width, status", [(0.9, REVIEW), (0.1, AUTO)])
-def test_an_always_on_emitter_is_classified_and_never_trips_a_halt(store, width, status):
+@pytest.mark.parametrize(
+    "width, opt_in, status, why",
+    [
+        (0.1, None, REVIEW, "reduced confidence (no_quiet_noise_reference)"),  # the default
+        (0.9, None, REVIEW, "reduced confidence (no_quiet_noise_reference)"),
+        (0.1, True, AUTO, None),
+        (0.9, True, REVIEW, "reduced confidence (edge_region_unreliable)"),
+    ],
+)
+def test_an_always_on_emitter_is_classified_and_never_trips_a_halt(store, width, opt_in, status, why):
     """An always-on emitter (an LTE downlink) retriggers after every
     cooldown and fills its own pre-trigger, so there is no quiet reference.
     It is still found as the primary region every time -- never 'no
-    region' -- and never halts the agent. Filling 90% of the band it reaches
-    the self floor's edge zone and is capped at needs_review; a central
-    100 kHz one is grounded and auto-classified."""
+    region' -- and never halts the agent. By default the self floor grounds
+    nothing, so it goes to review even with a confident, in-band answer.
+    With --allow-self-floor-grounding a central 100 kHz one is
+    auto-classified, while one filling 90% of the band reaches the edge
+    zone and still goes to review."""
     gateway = FakeGateway([_snippet_record(store, i, always_on=width) for i in range(1, 8)])
     client = ScriptedClient([{**GOOD, "tag": "ism_902_928:lte", "confidence": 0.95}] * 7)
-    assert _agent(gateway, client, store).run_batch() == 7
+    settings = {} if opt_in is None else {"allow_self_floor_grounding": opt_in}
+    assert _agent(gateway, client, store, **settings).run_batch() == 7
     assert len(client.requests) == 7
     assert [(s[0], s[1]) for s in gateway.submitted] == [(i, status) for i in range(1, 8)]
-    if status is REVIEW:
-        assert all("reduced confidence (edge_region_unreliable)" in s[4] for s in gateway.submitted)
+    if why is not None:
+        assert all(why in s[4] for s in gateway.submitted)
+
+
+def test_self_floor_grounding_is_off_unless_the_flag_is_given(tmp_path):
+    assert AgentSettings(snippet_root=tmp_path).allow_self_floor_grounding is False
+    args = ["--snippet-store-dir", str(tmp_path)]
+    assert _parse_args(args).allow_self_floor_grounding is False
+    assert _parse_args([*args, "--allow-self-floor-grounding"]).allow_self_floor_grounding is True
 
 
 def test_an_analysed_snippet_resets_the_streak(store):
@@ -6822,6 +6929,9 @@ Outcomes per record:
   is analysed (the store root is then known to be right);
 - snippet unreadable, no occupied region, or feature extraction failed: left
   pending (step 4 triggered on energy, so finding none is our failure);
+- no quiet pre-trigger reference (an always-on emitter fills its own): the
+  self-floor analysis goes to the LLM, but routing caps it at needs_review
+  unless allow_self_floor_grounding is set (see agent.analysis);
 - max_consecutive_snippet_failures of the above in a row: halt;
 - transient API error: the cursor is rewound to the record and the loop backs
   off exponentially (capped) and retries it indefinitely; never marked;
@@ -6903,6 +7013,9 @@ class AgentSettings:
     daily_token_budget: int = 2_000_000
     backoff_seconds: float = 2.0
     max_backoff_seconds: float = 300.0
+    # Opt-in: interior regions measured against the self floor may ground
+    # (agent.analysis). Off until real bladeRF captures confirm the roll-off.
+    allow_self_floor_grounding: bool = False
 
 
 def _utc_now() -> datetime:
@@ -7041,7 +7154,9 @@ class ClassificationAgent:
         except SnippetUnreadable as exc:
             return self._snippet_failed(record.id, str(exc), None)
         try:
-            analysis = analyse_snippet(snippet, self._bands, self._classifier)
+            analysis = analyse_snippet(
+                snippet, self._bands, self._classifier, self._settings.allow_self_floor_grounding
+            )
         except Exception as exc:
             logger.exception("Feature extraction failed for record %d", record.id)
             return self._snippet_failed(record.id, f"feature extraction failed: {exc!r}", None)
@@ -7191,6 +7306,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Only consider records with a higher id. A halt names the records involved; "
         "use this to skip them once their cause is understood.",
     )
+    parser.add_argument(
+        "--allow-self-floor-grounding",
+        action="store_true",
+        help="Let a snippet without a quiet pre-trigger reference (an always-on emitter) be "
+        "auto-classified when its primary region is outside the outer 15%% of the band. Off "
+        "by default: the self floor is blind to receiver roll-off, and a milder 8-12 dB "
+        "roll-off can inflate an interior region's bandwidth unnoticed. Enable only once "
+        "recorded bladeRF captures confirm a steep enough roll-off (agent/README.md).",
+    )
     return parser.parse_args(argv)
 
 
@@ -7214,6 +7338,7 @@ def main(argv: list[str] | None = None) -> None:
         model=args.model,
         max_tokens=args.max_tokens,
         daily_token_budget=args.daily_token_budget,
+        allow_self_floor_grounding=args.allow_self_floor_grounding,
     )
     client = anthropic.Anthropic(api_key=api_key, max_retries=_SDK_MAX_RETRIES, timeout=_SDK_TIMEOUT_SECONDS)
     agent = ClassificationAgent(
@@ -7264,10 +7389,10 @@ sdr-agent-boundary
 
 <!-- check: t10_green -->
 Run: `python -m pytest tests/agent/test_service.py -q`
-Expected: PASS, `43 passed` in about 5 s.
+Expected: PASS, `46 passed` in about 6 s.
 
 
-- [ ] **Step 5: Prove that the LLM is never asked twice, then revert**
+- [ ] **Step 5: Prove that the LLM is never asked twice and the default is pinned, then revert**
 
 Temporarily drop the kept decision, so a record whose write failed is asked again:
 
@@ -7285,7 +7410,7 @@ with
 ```
 <!-- check: t10_mutant -->
 Run: `python -m pytest tests/agent/test_service.py -q`
-Expected: FAIL, `1 failed, 42 passed`: `test_the_llm_is_never_asked_twice_for_a_record`.
+Expected: FAIL, `1 failed, 45 passed`: `test_the_llm_is_never_asked_twice_for_a_record`.
 
 
 Revert it:
@@ -7304,7 +7429,49 @@ with
 ```
 <!-- check: t10_reverted -->
 Run: `python -m pytest tests/agent/test_service.py -q`
-Expected: PASS, `43 passed`.
+Expected: PASS, `46 passed`.
+
+
+Then prove the conservative default is pinned: temporarily default to letting the self floor ground:
+
+<!-- edit: agent/service.py -->
+Replace
+
+```python
+    allow_self_floor_grounding: bool = False
+
+```
+
+with
+
+```python
+    allow_self_floor_grounding: bool = True
+
+```
+<!-- check: t10_default_mutant -->
+Run: `python -m pytest tests/agent/test_service.py -q`
+Expected: FAIL, `3 failed, 43 passed`: both default always-on cases and `test_self_floor_grounding_is_off_unless_the_flag_is_given`.
+
+
+Revert it:
+
+<!-- edit: agent/service.py -->
+Replace
+
+```python
+    allow_self_floor_grounding: bool = True
+
+```
+
+with
+
+```python
+    allow_self_floor_grounding: bool = False
+
+```
+<!-- check: t10_default_reverted -->
+Run: `python -m pytest tests/agent/test_service.py -q`
+Expected: PASS, `46 passed`.
 
 
 - [ ] **Step 6: Commit**
@@ -7727,12 +7894,23 @@ forced `record_classification` tool call. Routing writes `auto_classified` only 
 confidence is >= 0.85 and the tag's band prefix (`ism_902_928` in `ism_902_928:lora`) is
 a band-table entry the signal is grounded in; everything else goes to `needs_review`.
 The noise reference is the snippet's pre-trigger, below the trigger threshold step 4
-records in the SigMF. Any `reduced_confidence` reason (NaN or inf samples, an unreliable
-bandwidth, or `edge_region_unreliable`: with no quiet reference, a primary reaching the
-outer 15% of the band on either side, where receiver roll-off can pose as a signal) keeps
-every band match ungrounded and caps routing at `needs_review`. The 15% edge zone is
-justified only by synthetic roll-offs; validating it on recorded bladeRF captures is a
-hardware follow-up.
+records in the SigMF. Any `reduced_confidence` reason keeps every band match ungrounded
+and caps routing at `needs_review`: NaN or inf samples, an unreliable bandwidth, or no
+quiet pre-trigger reference at all (`no_quiet_noise_reference`). The last covers every
+always-on emitter, such as an LTE downlink, which fills its own pre-trigger: by default
+those records always go to review.
+
+### `--allow-self-floor-grounding` (off by default)
+
+Without a quiet reference the agent estimates a flat noise floor from the capture itself,
+which is blind to the receiver's filter roll-off. With this flag, a primary region
+measured that way may ground and be auto-classified unless it reaches the outer 15% of
+the band on either side (`edge_region_unreliable`, still `needs_review`). On synthetic
+noise rolling off 15-20 dB, the false region the roll-off creates always reaches that
+zone. At a milder 8-12 dB roll-off it need not: 20 of 259 wrong self-floor primaries were
+interior regions inflated to 31-360 kHz, which could ground with a wrong bandwidth. Enable
+the flag only after recorded bladeRF captures, at the sample rates and analog bandwidths
+in use, confirm the receiver's roll-off is steep enough.
 The tag, confidence and reasoning go back into the record's own metadata, and nothing
 else does. A record whose snippet ingest rejected or capture dropped (`iq_snippet_path`
 NULL, `quality_flags.snippet_rejected` / `snippet_dropped` set) is closed out as
@@ -8218,8 +8396,8 @@ distrobox-host-exec podman stop sdr-part4-pg
     reaching the zone (20 of 259 wrong primaries), and could ground with an inflated
     OBW.
   - The AD9361's real roll-off, per sample rate and analog bandwidth, needs recorded
-    bladeRF captures. They will show whether the zone width holds, or whether self-floor
-    records should never ground.
+    bladeRF captures. Until they show the zone width holds, `--allow-self-floor-grounding`
+    stays off, and self-floor records never ground.
 - **More than one agent worker.** The atomic pending check makes a duplicate submit fail
   safely (`RecordNotPending`), but there is no work-claiming protocol.
 - **Rescanning held-back records.** The cursor only moves forward. A record left
