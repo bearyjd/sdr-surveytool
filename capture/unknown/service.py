@@ -149,7 +149,14 @@ def process_snippet(
     is the rate read back from the SDR, not necessarily the requested one.
     The duration is what was actually captured, which is shorter than
     pre + post when the trigger came within pre_trigger_seconds of the
-    stream starting."""
+    stream starting. Every measurement and the normalization run before
+    anything is written, and the writer removes its own files on failure, so
+    a failure here never leaves a staged file behind."""
+    measured = _snippet_record(snippet, settings, None, survey_id, operator_id)
+    return _with_snippet_path(measured, _write_snippet(snippet, settings))
+
+
+def _write_snippet(snippet: CapturedSnippet, settings: CaptureSettings) -> str:
     data_path = write_sigmf_snippet(
         snippet.iq,
         settings.staging_dir,
@@ -157,7 +164,12 @@ def process_snippet(
         settings.center_freq_hz,
         snippet.start_time,
     )
-    return _snippet_record(snippet, settings, str(data_path), survey_id, operator_id)
+    return str(data_path)
+
+
+def _with_snippet_path(record: UnifiedRecord, snippet_path: str) -> UnifiedRecord:
+    metadata = record.metadata.model_copy(update={"iq_snippet_path": snippet_path})
+    return record.model_copy(update={"metadata": metadata})
 
 
 def _snippet_record(
@@ -243,10 +255,47 @@ def _stage_and_emit(
     operator_id: str,
     drops: Counter[str],
 ) -> None:
-    """A full disk or a dead ingest socket loses this one snippet, not the
-    radio session. Below the free-disk floor the IQ is not written but the
-    detection is still emitted, flagged. A snippet whose record could not be
-    emitted has its staged pair deleted: nothing would ever adopt it."""
+    """A full disk, a failed write or a dead ingest socket loses this one
+    snippet, not the radio session. The snippet is measured first; whenever
+    the IQ then can't be kept (low disk, staging unavailable, write failure)
+    the measured detection is still emitted, flagged. A snippet whose record
+    could not be emitted has its staged pair deleted: nothing would adopt it."""
+    sample_index = snippet.trigger.sample_index
+    try:
+        measured = _snippet_record(snippet, settings, None, survey_id, operator_id)
+    except Exception:
+        drops["processing_error"] += 1
+        logger.exception("Failed to measure snippet triggered at sample %d; dropping it", sample_index)
+        return
+    reason = _reason_not_to_write(snippet, settings, drops)
+    if reason is not None:
+        _emit_without_snippet(measured, emitter, reason, sample_index)
+        return
+    try:
+        record = _with_snippet_path(measured, _write_snippet(snippet, settings))
+    except Exception:
+        drops["processing_error"] += 1
+        logger.exception(
+            "Failed to write snippet triggered at sample %d; keeping its detection", sample_index
+        )
+        _emit_without_snippet(measured, emitter, "processing_error", sample_index)
+        return
+    try:
+        emitter.emit(record)
+    except Exception:
+        drops["emit_failed"] += 1
+        _discard_staged(record.metadata.iq_snippet_path)
+        logger.exception(
+            "Failed to emit snippet triggered at sample %d; dropping it and "
+            "deleting its staged files",
+            sample_index,
+        )
+
+
+def _reason_not_to_write(
+    snippet: CapturedSnippet, settings: CaptureSettings, drops: Counter[str]
+) -> str | None:
+    """Why the IQ must not be written right now, if anything (logged and counted)."""
     try:
         free = shutil.disk_usage(settings.staging_dir).free
     except OSError:
@@ -257,10 +306,7 @@ def _stage_and_emit(
             settings.staging_dir,
             snippet.trigger.sample_index,
         )
-        _emit_without_snippet(
-            snippet, settings, emitter, survey_id, operator_id, "staging_unavailable"
-        )
-        return
+        return "staging_unavailable"
     if free - snippet.iq.nbytes < settings.min_free_bytes:
         drops["low_disk"] += 1
         logger.warning(
@@ -272,50 +318,23 @@ def _stage_and_emit(
             snippet.trigger.sample_index,
             drops["low_disk"],
         )
-        _emit_without_snippet(snippet, settings, emitter, survey_id, operator_id, "low_disk")
-        return
-    try:
-        record = process_snippet(snippet, settings, survey_id, operator_id)
-    except Exception:
-        drops["stage_failed"] += 1
-        logger.exception(
-            "Failed to stage snippet triggered at sample %d; dropping it",
-            snippet.trigger.sample_index,
-        )
-        return
-    try:
-        emitter.emit(record)
-    except Exception:
-        drops["emit_failed"] += 1
-        _discard_staged(record.metadata.iq_snippet_path)
-        logger.exception(
-            "Failed to emit snippet triggered at sample %d; dropping it and "
-            "deleting its staged files",
-            snippet.trigger.sample_index,
-        )
+        return "low_disk"
+    return None
 
 
 def _emit_without_snippet(
-    snippet: CapturedSnippet,
-    settings: CaptureSettings,
-    emitter: RecordEmitter,
-    survey_id: str,
-    operator_id: str,
-    reason: str,
+    measured: UnifiedRecord, emitter: RecordEmitter, reason: str, sample_index: int
 ) -> None:
     """The detection and its measurements survive when the IQ can't be kept:
     emit the record with no snippet path, flagged, like ingest does for a
     rejected snippet."""
-    record = _snippet_record(snippet, settings, None, survey_id, operator_id)
-    metadata = record.metadata.model_copy(
-        update={"quality_flags": {**record.metadata.quality_flags, "snippet_dropped": reason}}
-    )
+    flags = {**measured.metadata.quality_flags, "snippet_dropped": reason}
+    metadata = measured.metadata.model_copy(update={"quality_flags": flags})
     try:
-        emitter.emit(record.model_copy(update={"metadata": metadata}))
+        emitter.emit(measured.model_copy(update={"metadata": metadata}))
     except Exception:
         logger.exception(
-            "Failed to emit the snippet-less record triggered at sample %d",
-            snippet.trigger.sample_index,
+            "Failed to emit the snippet-less record triggered at sample %d", sample_index
         )
 
 

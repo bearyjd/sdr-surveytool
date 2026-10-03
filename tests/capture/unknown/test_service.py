@@ -194,6 +194,47 @@ def test_drain_reraises_a_tap_failure():
     assert isinstance(excinfo.value.__cause__, ValueError)
 
 
+def test_a_measurement_failure_writes_nothing(tmp_path, monkeypatch, caplog):
+    """All DSP and normalization runs before anything is written, so a
+    failure there can't leave a staged pair behind for nobody to adopt."""
+    staging = tmp_path / "staging"
+    staging.mkdir(mode=0o700)
+
+    def broken_bandwidth(*args):
+        raise FloatingPointError("injected DSP failure")
+
+    monkeypatch.setattr(service, "occupied_bandwidth_hz", broken_bandwidth)
+    emitter = _FakeEmitter("/unused.sock")
+    drops: Counter = Counter()
+    with caplog.at_level(logging.ERROR):
+        service._stage_and_emit(_snippet(), _settings(staging, min_free_bytes=0), emitter, "s1", "op1", drops)
+
+    assert list(staging.iterdir()) == []
+    assert emitter.records == []
+    assert drops == Counter({"processing_error": 1})
+    assert "injected DSP failure" in caplog.text
+
+
+def test_a_write_failure_still_emits_the_measured_detection(tmp_path, monkeypatch):
+    staging = tmp_path / "staging"
+    staging.mkdir(mode=0o700)
+
+    def broken_write(*args):
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(service, "write_sigmf_snippet", broken_write)
+    emitter = _FakeEmitter("/unused.sock")
+    drops: Counter = Counter()
+    service._stage_and_emit(_snippet(), _settings(staging, min_free_bytes=0), emitter, "s1", "op1", drops)
+
+    (record,) = emitter.records
+    assert record.metadata.iq_snippet_path is None
+    assert record.metadata.quality_flags["snippet_dropped"] == "processing_error"
+    assert record.signal.peak_power == pytest.approx(-20.0, abs=0.01)
+    assert list(staging.iterdir()) == []
+    assert drops == Counter({"processing_error": 1})
+
+
 def test_missing_staging_dir_drops_only_the_snippet_not_the_session(tmp_path, caplog):
     """If staging vanishes mid-survey, an exception escaping here would end
     (and rebuild) the radio session on every snippet. Log it, keep the
