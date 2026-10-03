@@ -17,15 +17,21 @@ class RecordEmitter:
     ensuring that records are never interleaved on the wire.
 
     Ingest need not be up first: entering the context tolerates a failed
-    connect (logged), and emit() connects lazily."""
+    connect (logged), and emit() connects lazily. Connects and sends time out
+    after `timeout_seconds`, failing like any other emit error."""
 
-    def __init__(self, socket_path: str) -> None:
+    def __init__(self, socket_path: str, timeout_seconds: float = 5.0) -> None:
         self._socket_path = socket_path
+        self._timeout_seconds = timeout_seconds
         self._sock: socket.socket | None = None
         self._lock = threading.Lock()
 
     def connect(self) -> None:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        # Bounds connect() and every sendall(): a wedged ingest that accepts
+        # but never reads raises TimeoutError (an OSError) instead of
+        # blocking the capture process forever.
+        sock.settimeout(self._timeout_seconds)
         try:
             sock.connect(self._socket_path)
         except OSError:
