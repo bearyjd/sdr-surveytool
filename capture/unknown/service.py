@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import logging
 import queue
+import shutil
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
@@ -51,6 +52,9 @@ class CaptureSettings:
     gain_db: float = 30.0
     device: str = "driver=bladerf"
     device_args: str = ""
+    # Staging, the snippet store and the database share one disk; below this
+    # much free space snippets are dropped instead of written.
+    min_free_bytes: int = 2 * 1024**3
 
     def __post_init__(self) -> None:
         if self.sample_rate <= 0 or self.center_freq_hz <= 0:
@@ -67,6 +71,8 @@ class CaptureSettings:
                 "cooldown_seconds must be > 0: the trigger is level-triggered, so a "
                 "zero cooldown re-captures a continuous emitter back to back"
             )
+        if self.min_free_bytes < 0:
+            raise ValueError("min_free_bytes must be >= 0")
         if self.samples(self.averaging_seconds) < 1 or self.samples(self.post_trigger_seconds) < 1:
             raise ValueError(
                 "averaging_seconds and post_trigger_seconds must each span at least one sample"
@@ -133,7 +139,7 @@ def run(
                     backoff = _INITIAL_BACKOFF_SECONDS  # the radio opened
                     for snippet in snippets:
                         last_trigger_at = record_trigger(last_trigger_at, snippet.trigger)
-                        _stage_and_emit(snippet, settings, emitter, survey_id, operator_id)
+                        _stage_and_emit(snippet, settings, emitter, survey_id, operator_id, drops)
             except Exception:
                 logger.exception(
                     "Unknown-signal capture session failed; retrying in %.1fs", backoff
@@ -148,10 +154,24 @@ def _stage_and_emit(
     emitter: RecordEmitter,
     survey_id: str,
     operator_id: str,
+    drops: Counter[str],
 ) -> None:
     """A full disk or a dead ingest socket loses this one snippet, not the
     radio session. (If staging succeeded but emit failed, the staged pair is
     left behind in the staging directory.)"""
+    free = shutil.disk_usage(settings.staging_dir).free
+    if free - snippet.iq.nbytes < settings.min_free_bytes:
+        drops["low_disk"] += 1
+        logger.warning(
+            "Only %d bytes free in %s (floor %d); dropping snippet triggered at "
+            "sample %d (%d dropped for low disk so far)",
+            free,
+            settings.staging_dir,
+            settings.min_free_bytes,
+            snippet.trigger.sample_index,
+            drops["low_disk"],
+        )
+        return
     try:
         emitter.emit(process_snippet(snippet, settings, survey_id, operator_id))
     except Exception:
@@ -310,6 +330,13 @@ def _parse_args(argv: list[str] | None = None) -> tuple[CaptureSettings, argpars
     parser.add_argument("--device", default="driver=bladerf")
     parser.add_argument("--device-args", default="")
     parser.add_argument(
+        "--min-free-bytes",
+        type=int,
+        default=2 * 1024**3,
+        help="Drop snippets instead of writing them when the staging disk would "
+        "fall below this many free bytes (staging, store and database share it).",
+    )
+    parser.add_argument(
         "--staging-dir",
         default="data/snippet-staging",
         help="Must match ingest's --snippet-staging-dir.",
@@ -329,6 +356,7 @@ def _parse_args(argv: list[str] | None = None) -> tuple[CaptureSettings, argpars
             gain_db=args.gain_db,
             device=args.device,
             device_args=args.device_args,
+            min_free_bytes=args.min_free_bytes,
         )
     except ValueError as exc:
         parser.error(str(exc))

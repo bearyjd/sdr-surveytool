@@ -5,6 +5,7 @@ from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -183,7 +184,7 @@ def test_run_survives_radio_failures_and_keeps_cooldown_across_rebuilds(tmp_path
     )
 
     with pytest.raises(KeyboardInterrupt):
-        service.run(_settings(tmp_path), "/unused.sock", "s1", "op1")
+        service.run(_settings(tmp_path, min_free_bytes=0), "/unused.sock", "s1", "op1")
 
     assert sleeps == [1.0, 2.0, 1.0]
     assert sessions[3] == {915e6: snippet.trigger.time}
@@ -196,8 +197,28 @@ def test_a_failed_emit_drops_only_that_snippet(tmp_path, caplog):
             raise OSError("ingest socket gone")
 
     with caplog.at_level(logging.ERROR):
-        service._stage_and_emit(_snippet(), _settings(tmp_path), BrokenEmitter(), "s1", "op1")
+        service._stage_and_emit(
+            _snippet(), _settings(tmp_path, min_free_bytes=0), BrokenEmitter(), "s1", "op1", Counter()
+        )
     assert "dropping it" in caplog.text
+
+
+def test_snippet_is_dropped_before_writing_when_disk_is_nearly_full(tmp_path, monkeypatch, caplog):
+    """Staging, the snippet store and the database share one disk, and a
+    continuous emitter writes ~19 GB/h at the default cooldown: below the
+    free-space floor the snippet is dropped, never written."""
+    monkeypatch.setattr(service.shutil, "disk_usage", lambda path: SimpleNamespace(free=3 * 1024**3))
+    emitter = _FakeEmitter("/unused.sock")
+    drops: Counter = Counter()
+    settings = _settings(tmp_path / "staging", min_free_bytes=3 * 1024**3)
+
+    with caplog.at_level(logging.WARNING):
+        service._stage_and_emit(_snippet(), settings, emitter, "s1", "op1", drops)
+
+    assert emitter.records == []
+    assert not (tmp_path / "staging").exists()
+    assert drops == Counter({"low_disk": 1})
+    assert "free" in caplog.text
 
 
 def test_cli_requires_noise_floor_and_builds_settings():
@@ -216,6 +237,7 @@ def test_cli_requires_noise_floor_and_builds_settings():
     assert settings.sample_rate == 20e6
     assert settings.threshold_dbfs == -50.0
     assert settings.staging_dir == Path("data/snippet-staging")
+    assert settings.min_free_bytes == 2 * 1024**3
     assert args.socket_path == "/tmp/sdr-ingest.sock"
 
 
