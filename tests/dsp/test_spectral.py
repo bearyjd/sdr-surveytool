@@ -2,6 +2,7 @@
 import math
 import subprocess
 import sys
+import tracemalloc
 from pathlib import Path
 
 import numpy as np
@@ -78,6 +79,20 @@ def test_occupied_bandwidth_of_a_tone_is_a_few_bins():
 def test_occupied_bandwidth_of_silence_is_finite():
     estimate = occupied_bandwidth_hz(np.zeros(4096, dtype=np.complex64), FS, THRESHOLD_DBFS)
     assert math.isfinite(estimate) and estimate > 0
+
+
+def test_occupied_bandwidth_working_memory_does_not_scale_with_snippet_length():
+    """A 1 s snippet is 160 MB of complex64 at 20 MS/s (448 MB at 56 MS/s).
+    The estimate used to peak at ~4x its input (float64 window promoting the
+    frames to complex128); it must work in fixed-size batches instead."""
+    iq = np.full(8_000_000, 0.1 + 0.05j, dtype=np.complex64)  # 61 MiB, all frames in-burst
+    tracemalloc.start()
+    try:
+        occupied_bandwidth_hz(iq, FS, THRESHOLD_DBFS)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < iq.nbytes / 4
 
 
 def test_dsp_imports_nothing_from_capture_or_gnuradio():
