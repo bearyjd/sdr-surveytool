@@ -46,3 +46,10 @@ def test_offline_decode_detects_known_cell():
     assert cell["freq_mhz"] == pytest.approx(expected["freq_mhz"], abs=0.01)
     assert cell["rx_power_db"] == pytest.approx(expected["rx_power_db"], abs=0.01)
     assert cell["freq_offset_hz"] == pytest.approx(expected["freq_offset_hz"], abs=1.0)
+    # MIB fields, from CellSearch's CRC-checked decode via its summary table.
+    assert cell["n_ports"] == expected["n_ports"]
+    assert cell["cp_type"] == expected["cp_type"]
+    assert cell["n_rb_dl"] == expected["n_rb_dl"]
+    assert cell["bandwidth_mhz"] == expected["bandwidth_mhz"]
+    assert cell["phich_duration"] == expected["phich_duration"]
+    assert cell["phich_resource"] == expected["phich_resource"]

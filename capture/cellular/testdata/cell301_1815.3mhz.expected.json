@@ -4,5 +4,11 @@
   "cell_id": 301,
   "pss_id": 1,
   "rx_power_db": -9.44976,
-  "freq_offset_hz": 14302.6
+  "freq_offset_hz": 14302.6,
+  "n_ports": 2,
+  "cp_type": "normal",
+  "n_rb_dl": 100,
+  "bandwidth_mhz": 20.0,
+  "phich_duration": "normal",
+  "phich_resource": "one"
 }
