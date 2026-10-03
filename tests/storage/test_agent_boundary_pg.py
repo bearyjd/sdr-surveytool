@@ -588,6 +588,84 @@ def test_the_installer_refuses_an_existing_role_that_could_widen_the_boundary(bo
         admin.dispose()
 
 
+PLANT = (
+    "CREATE FUNCTION public.agent_is_pending_unknown(p_modality varchar, p_metadata json)"
+    " RETURNS boolean LANGUAGE sql IMMUTABLE RETURN true"
+)
+
+
+def test_a_planted_predicate_overload_cannot_widen_the_view(boundary):
+    """The reviewer's plant: modality is varchar, so a (varchar, json)
+    overload -- created by anyone with CREATE on public, as on pre-15
+    clusters -- was the exact match. The view bound to it, showed every row,
+    and the agent overwrote a manually_tagged one. The install now drops
+    every overload by name, and the calls cast to the exact signature."""
+    watermark = _watermark(boundary)
+    tagged = _insert(boundary, Modality.UNKNOWN, ClassificationStatus.MANUALLY_TAGGED)
+    pending = _insert(boundary, Modality.UNKNOWN, None)
+    admin = _engine(boundary.admin_url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(PLANT)
+        install_agent_boundary(admin, boundary.agent_role, boundary.owner_role)
+        with admin.connect() as conn:
+            overloads = conn.execute(
+                text("SELECT count(*) FROM pg_catalog.pg_proc WHERE proname = 'agent_is_pending_unknown'")
+            ).scalar_one()
+        assert overloads == 1
+        gateway = connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+        try:
+            assert [r.id for r in gateway.fetch_pending(watermark, 100)] == [pending]
+            with pytest.raises(RecordNotPending):
+                gateway.submit_classification(tagged, ClassificationStatus.NEEDS_REVIEW, None, 0.0, "x")
+        finally:
+            gateway.close()
+        assert _metadata(boundary, tagged)["classification_status"] == "manually_tagged"
+    finally:
+        with admin.connect() as conn:
+            conn.exec_driver_sql("DROP FUNCTION IF EXISTS public.agent_is_pending_unknown(varchar, json)")
+        admin.dispose()
+
+
+def test_self_check_refuses_an_overload_planted_after_the_install(boundary):
+    admin = _engine(boundary.admin_url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(PLANT)
+        with pytest.raises(BoundaryViolation, match=r"unexpected overload agent_is_pending_unknown\(character varying,json\)"):
+            connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    finally:
+        with admin.connect() as conn:
+            conn.exec_driver_sql("DROP FUNCTION IF EXISTS public.agent_is_pending_unknown(varchar, json)")
+        admin.dispose()
+
+
+def test_self_check_refuses_a_view_bound_to_another_function(boundary):
+    """The view must depend on exactly the installed predicate."""
+    admin = _engine(boundary.admin_url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(
+                "CREATE FUNCTION public.sdr_always_true(p text) RETURNS boolean LANGUAGE sql IMMUTABLE RETURN true"
+            )
+            conn.exec_driver_sql(
+                "CREATE OR REPLACE VIEW public.agent_pending_unknown WITH (security_barrier = true) AS "
+                "SELECT r.id, r.metadata ->> 'iq_snippet_path' AS iq_snippet_path, "
+                "r.metadata ->> 'sample_rate' AS sample_rate, r.identifier ->> 'center_freq' AS center_freq, "
+                "r.signal ->> 'peak_power' AS peak_power, r.metadata ->> 'snippet_duration_ms' AS snippet_duration_ms, "
+                "r.metadata -> 'quality_flags' ->> 'snippet_rejected' AS snippet_rejected, "
+                "r.metadata -> 'quality_flags' ->> 'snippet_dropped' AS snippet_dropped "
+                "FROM public.survey_records AS r WHERE public.sdr_always_true(r.modality::text)"
+            )
+        with pytest.raises(BoundaryViolation, match="agent_pending_unknown depends on sdr_always_true"):
+            connect_gateway(_url(boundary.agent_url), boundary.agent_role)
+    finally:
+        install_agent_boundary(admin, boundary.agent_role, boundary.owner_role)
+        with admin.connect() as conn:
+            conn.exec_driver_sql("DROP FUNCTION IF EXISTS public.sdr_always_true(text)")
+        admin.dispose()
+
+
 def test_self_check_rejects_a_superuser_url(boundary):
     with pytest.raises(BoundaryViolation, match="not confined.*has SUPERUSER"):
         connect_gateway(_url(boundary.admin_url), boundary.agent_role)

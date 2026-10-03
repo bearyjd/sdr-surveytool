@@ -30,6 +30,7 @@ _TIMED_OUT = {"57014", "55P03"}  # query_canceled (statement_timeout), lock_not_
 # Held for the agent's lifetime on its own session: one agent per database.
 _SINGLETON_LOCK = 0x5344_5241_4745_4E54 & 0x7FFF_FFFF_FFFF_FFFF  # "SDRAGENT", a positive bigint
 _CLASSIFY = "public.classify_unknown(integer, text, text, double precision, text)"
+_PREDICATE = "public.agent_is_pending_unknown(text, json)"
 
 # The view returns its numbers as text (agent_boundary.sql); these bounds
 # say what a plausible value is. Anything else makes the record malformed.
@@ -114,6 +115,33 @@ _PROBLEMS = text(
                    (pg_catalog.to_regprocedure('pg_catalog.lo_open(oid, integer)')),
                    (pg_catalog.to_regprocedure('pg_catalog.lo_put(oid, bigint, bytea)'))) AS w (fn)
      WHERE pg_catalog.has_function_privilege(session_user, w.fn, 'EXECUTE')
+    UNION ALL
+    SELECT 1, 'unexpected overload ' || p.oid::pg_catalog.regprocedure::text
+      FROM pg_catalog.pg_proc AS p
+      JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'public'
+       AND p.proname IN ('agent_is_pending_unknown', 'classify_unknown')
+       AND p.oid IS DISTINCT FROM pg_catalog.to_regprocedure(:predicate)
+       AND p.oid IS DISTINCT FROM pg_catalog.to_regprocedure(:classify)
+    UNION ALL
+    SELECT 1, 'agent_pending_unknown depends on ' || d.refobjid::pg_catalog.regprocedure::text
+              || ', not only on ' || :predicate
+      FROM pg_catalog.pg_rewrite AS rw
+      JOIN pg_catalog.pg_depend AS d
+        ON d.classid = 'pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid = rw.oid
+     WHERE rw.ev_class = pg_catalog.to_regclass('public.agent_pending_unknown')
+       AND d.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+       AND d.refobjid IS DISTINCT FROM pg_catalog.to_regprocedure(:predicate)
+    UNION ALL
+    SELECT 1, 'agent_pending_unknown does not filter through ' || :predicate
+     WHERE pg_catalog.to_regclass('public.agent_pending_unknown') IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1
+             FROM pg_catalog.pg_rewrite AS rw
+             JOIN pg_catalog.pg_depend AS d
+               ON d.classid = 'pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid = rw.oid
+            WHERE rw.ev_class = pg_catalog.to_regclass('public.agent_pending_unknown')
+              AND d.refobjid = pg_catalog.to_regprocedure(:predicate))
     UNION ALL
     SELECT 4, 'can execute SECURITY DEFINER function ' || p.oid::pg_catalog.regprocedure::text
       FROM pg_catalog.pg_proc AS p
@@ -331,7 +359,7 @@ class AgentGateway:
 
 def verify_boundary(engine: Engine, agent_role: str) -> None:
     """Raise BoundaryViolation unless the connected role is confined."""
-    params = {"agent_role": agent_role, "classify": _CLASSIFY}
+    params = {"agent_role": agent_role, "classify": _CLASSIFY, "predicate": _PREDICATE}
     with engine.connect() as conn:
         problems = [problem for _, problem in sorted(conn.execute(_PROBLEMS, params).tuples().all())]
         access = conn.execute(_BOUNDARY_ACCESS, params).first()

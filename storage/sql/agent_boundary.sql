@@ -98,8 +98,22 @@ GRANT SELECT, UPDATE (metadata) ON TABLE public.survey_records TO {{owner_role}}
 -- ACLs, and a view's column types cannot change in place. No CASCADE: an
 -- object someone built on top of them makes the install fail loudly.
 DROP VIEW IF EXISTS public.agent_pending_unknown;
-DROP FUNCTION IF EXISTS public.classify_unknown(integer, text, text, double precision, text);
-DROP FUNCTION IF EXISTS public.agent_is_pending_unknown(text, json);
+-- Every overload, by name: a planted public.agent_is_pending_unknown(varchar,
+-- json) would otherwise be the exact match for the varchar modality column.
+DO $overloads$
+DECLARE
+    v_fn pg_catalog.regprocedure;
+BEGIN
+    FOR v_fn IN
+        SELECT p.oid::pg_catalog.regprocedure
+          FROM pg_catalog.pg_proc AS p
+          JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'public' AND p.proname IN ('agent_is_pending_unknown', 'classify_unknown')
+    LOOP
+        EXECUTE pg_catalog.format('DROP FUNCTION %s', v_fn);
+    END LOOP;
+END
+$overloads$;
 
 -- The pending predicate, defined once and used by both the view and
 -- classify_unknown. A SQL-standard body is parsed now, so its operators are
@@ -136,7 +150,7 @@ SELECT r.id,
        r.metadata -> 'quality_flags' ->> 'snippet_rejected' AS snippet_rejected,
        r.metadata -> 'quality_flags' ->> 'snippet_dropped' AS snippet_dropped
   FROM public.survey_records AS r
- WHERE public.agent_is_pending_unknown(r.modality, r.metadata);
+ WHERE public.agent_is_pending_unknown(r.modality::text, r.metadata::json);
 ALTER VIEW public.agent_pending_unknown OWNER TO {{owner_role}};
 REVOKE ALL ON TABLE public.agent_pending_unknown FROM PUBLIC;
 GRANT SELECT ON TABLE public.agent_pending_unknown TO {{agent_role}};
@@ -194,7 +208,7 @@ BEGIN
                'confidence', p_confidence,
                'reasoning', p_reasoning))::json
      WHERE r.id = p_record_id
-       AND public.agent_is_pending_unknown(r.modality, r.metadata)
+       AND public.agent_is_pending_unknown(r.modality::text, r.metadata::json)
     RETURNING r.id INTO v_id;
     IF v_id IS NULL THEN
         RAISE EXCEPTION 'classify_unknown: record % is not a pending unknown record', p_record_id
