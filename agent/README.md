@@ -157,9 +157,13 @@ psql "$SURVEYTOOL_ADMIN_DATABASE_URL" -c '\password surveytool_agent_login'
 
 # A database that is not local (unix socket, localhost, 127.0.0.1, ::1) must be reached
 # over TLS: the agent refuses sslmode disable, allow and prefer (prefer silently falls
-# back to clear text). verify-full is recommended: require and verify-ca encrypt, but only
-# verify-full checks the server's name, so a host that can redirect the connection
-# cannot impersonate the database.
+# back to clear text). It judges what libpq will connect with: every entry of the host
+# and hostaddr lists (a query host= overrides the URL's host), and PGHOST, PGHOSTADDR and
+# PGSSLMODE for whatever the URL leaves out. A connection service (service= or PGSERVICE)
+# is refused, since its pg_service.conf entry could set any of them; put them in the URL.
+# verify-full is recommended: require and verify-ca encrypt, but only verify-full checks
+# the server's name, so a host that can redirect the connection cannot impersonate the
+# database.
 export SURVEYTOOL_AGENT_DATABASE_URL=postgresql://surveytool_agent_login:...@localhost:5432/surveytool
 # remote: postgresql://surveytool_agent_login:...@db.example.net/surveytool?sslmode=verify-full
 export ANTHROPIC_API_KEY=...
@@ -199,8 +203,10 @@ crash, a lost database at startup) may restart, slowly.
 
 ### A hardened systemd unit
 
-The container described under "The boundary" is the reference deployment. On a host
-without one, this unit gives the agent the same profile; each line says what it enforces:
+The container described under "The boundary" remains the recommended boundary: its PID
+namespace does not depend on the host's systemd version, and its network policy limits
+egress by host. This unit is narrower than the container, not equivalent to it (see the
+notes after it). Each line says what it enforces:
 
 ```ini
 [Unit]
@@ -229,6 +235,23 @@ PrivateDevices=yes
 # TCP/IP only. No AF_UNIX: the ingest socket (and any other local socket) is
 # unreachable, so the database must be reached over TCP (127.0.0.1 locally).
 RestrictAddressFamilies=AF_INET AF_INET6
+# Its own PID namespace (systemd 257 or later): /proc shows only the agent's own
+# processes, so ingest's /proc entries (command line, environment, open files, memory)
+# are out of reach. The agent is PID 1 there and handles SIGTERM itself once started.
+PrivatePIDs=yes
+# Other users' processes are hidden from /proc. Ingest shares this uid, so this alone
+# does not hide ingest: PrivatePIDs= does.
+ProtectProc=invisible
+# /proc holds only process directories: no /proc/sys, /proc/net or /proc/cpuinfo.
+ProcSubset=pid
+# A seccomp allow-list: the system calls a typical service needs, minus the debugging
+# ones (ptrace, perf_event_open, pidfd_getfd). Any other call kills the agent
+# (status=31/SYS in the journal).
+SystemCallFilter=@system-service
+SystemCallFilter=~@debug
+# Every unit's systemd credentials (LoadCredential=), ingest's database URL included.
+# The "-" lets the unit start on a host where the directory does not exist.
+InaccessiblePaths=-/run/credentials
 # The worst case peaks at 584 MB (above); past 1 GiB the kernel kills it.
 MemoryMax=1G
 # Crashes restart, slowly; a halt (status 3) never does.
@@ -240,9 +263,26 @@ RestartPreventExitStatus=3
 WantedBy=multi-user.target
 ```
 
-The unit cannot limit egress by host name: restrict it to the database and
-`api.anthropic.com` with a firewall or an egress proxy, as the container's network policy
-does. (`IPAddressAllow=` takes addresses, and the API's change.)
+What the unit does not cover:
+
+- **PID isolation needs systemd 257.** An older systemd logs `Unknown key name
+  'PrivatePIDs'` and starts the agent without it. Nothing in the unit then separates the
+  agent from ingest, since they share a uid: through `/proc/<ingest pid>` the agent can
+  read ingest's command line and environment, its credentials (via `root/`), and its
+  memory where `kernel.yama.ptrace_scope` is 0. Check with `systemctl show -p PrivatePIDs
+  sdr-agent.service` (expect `PrivatePIDs=yes`); on an older host, run the agent in the
+  container.
+- **Ingest's database password.** It must never go on ingest's command line, which every
+  local user can read (ingest warns when `--database-url` carries one). Give it to ingest
+  as a credential: `LoadCredential=database_url:/etc/surveytool/ingest-database-url` in
+  ingest's unit, the file root-owned and `0600` (systemd reads it, the shared uid cannot),
+  or `SURVEYTOOL_DATABASE_URL` from a root-owned `0600` `EnvironmentFile=`. With
+  `PrivatePIDs=` and `InaccessiblePaths=-/run/credentials` above, neither reaches the
+  agent. Leave `InaccessiblePaths=` out of ingest's unit: it would hide ingest's own
+  credentials.
+- **Egress by host name.** Restrict it to the database and `api.anthropic.com` with a
+  firewall or an egress proxy, as the container's network policy does.
+  (`IPAddressAllow=` takes addresses, and the API's change.)
 
 One agent runs per database: it holds a session advisory lock for its lifetime, and a
 second instance refuses to start, naming the lock and the query that finds its holder

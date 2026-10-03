@@ -171,6 +171,9 @@ sdr-capture-unknown --survey-id s1 --operator-id op1 \
     --center-freq 915e6 --noise-floor-dbfs -60
 ```
 
+Ingest's database URL comes from `SURVEYTOOL_DATABASE_URL` or a systemd credential, never
+from a password on its command line (see the root README).
+
 `--noise-floor-dbfs` is required: measure it at your gain and frequency first. All
 numeric settings must be finite; `--sample-rate` is capped at 61.44e6 (the AD9361
 maximum), and the averaging, pre- and post-trigger windows at 5 s each.
