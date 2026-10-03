@@ -10,6 +10,7 @@ from ingest.service import IngestService
 from schema.records import Identifier, Metadata, Modality, Signal, UnifiedRecord
 from storage.db import init_db, make_engine, make_session_factory
 from storage.models import SurveyRecord
+from storage.repository import add_record as real_add_record
 from storage.repository import save_record as real_save_record
 from storage.snippet_store import LocalSnippetStore
 
@@ -257,13 +258,13 @@ def test_process_one_reverts_grid_count_on_persist_failure(tmp_path, monkeypatch
 
         call_count = {"n": 0}
 
-        def _flaky_save_record(session, record):
+        def _flaky_add_record(session, record):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise RuntimeError("simulated DB failure")
-            return real_save_record(session, record)
+            return real_add_record(session, record)
 
-        monkeypatch.setattr("ingest.service.save_record", _flaky_save_record)
+        monkeypatch.setattr("ingest.service.add_record", _flaky_add_record)
 
         with pytest.raises(RuntimeError, match="simulated DB failure"):
             service.process_one(timeout=2)
@@ -502,53 +503,82 @@ def test_database_down_keeps_the_adopted_snippet_it_cannot_check(tmp_path, caplo
     assert repr(str(stored)) in caplog.text
 
 
-def _adopt_with_failing_save(tmp_path, monkeypatch, failing_save):
-    """Process a snippet record whose save fails, then (saving normally) a
-    plain record in the same grid cell; returns the stored snippet path, the
+class _FailsAtStage:
+    """A session factory whose next session fails at `stage` ("flush",
+    "commit" or "refresh") once armed: the database going away at a known
+    point of persisting a record. Later sessions (the post-failure check)
+    work normally."""
+
+    def __init__(self, real, stage: str) -> None:
+        self._real = real
+        self._stage = stage
+        self.armed = False
+
+    def __call__(self):
+        session = self._real()
+        if self.armed:
+            self.armed = False
+
+            def fail(*args, **kwargs):
+                raise RuntimeError(f"connection lost during {self._stage}")
+
+            setattr(session, self._stage, fail)
+        return session
+
+
+def _persist_failing_at(tmp_path, stage):
+    """Process a snippet record whose persist fails at `stage`, then a plain
+    record in the same grid cell; returns the stored snippet path, the
     session factory and the second record's grid count."""
     staging, store_root = tmp_path / "staging", tmp_path / "snippets"
     staged = _stage_snippet(staging)
-    socket_path, server, session_factory, service = _snippet_pipeline(
-        tmp_path, LocalSnippetStore(staging, store_root)
+    socket_path = str(tmp_path / "ingest.sock")
+    server = QueueServer(socket_path)
+    server.start()
+    engine = make_engine("sqlite:///:memory:")
+    init_db(engine)
+    session_factory = _FailsAtStage(make_session_factory(engine), stage)
+    service = IngestService(
+        server,
+        session_factory,
+        StaticGpsFixProvider(GpsFix(lat=47.6062, lon=-122.3321, altitude=15.0, fix_quality=4)),
+        snippet_store=LocalSnippetStore(staging, store_root),
     )
-    monkeypatch.setattr("ingest.service.save_record", failing_save)
+    session_factory.armed = True
     try:
         with RecordEmitter(socket_path) as emitter:
             emitter.emit(_snippet_record(staged))
             emitter.emit(_record(lat=10.0, lon=20.0, gps_fix_quality=1))
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match=f"during {stage}"):
             service.process_one(timeout=2)
-        monkeypatch.setattr("ingest.service.save_record", real_save_record)
         next_count = service.process_one(timeout=2).metadata.sample_count_in_grid_cell
     finally:
         server.stop()
     return store_root.resolve() / Path(staged).name, session_factory, next_count
 
 
-def test_a_failure_after_commit_keeps_the_snippet_its_row_references(tmp_path, monkeypatch):
-    """save_record() commits and then refreshes: an error after COMMIT (a
-    refresh failure, a connection lost during COMMIT) must not delete the
-    IQ of a row that was in fact persisted."""
+def test_a_failure_while_flushing_discards_the_snippet_and_reverts_the_count(tmp_path):
+    """Before COMMIT is issued, a failure means nothing was persisted (and
+    the check confirms no row references the snippet): roll everything back."""
+    stored, session_factory, next_count = _persist_failing_at(tmp_path, "flush")
+    assert not stored.exists() and not stored.with_suffix(".sigmf-meta").exists()
+    assert next_count == 1
 
-    def commit_then_fail(session, record):
-        real_save_record(session, record)
-        raise RuntimeError("connection lost after COMMIT")
 
-    stored, session_factory, next_count = _adopt_with_failing_save(tmp_path, monkeypatch, commit_then_fail)
+def test_a_failure_during_commit_keeps_the_snippet_and_the_count(tmp_path):
+    """An in-doubt COMMIT (e.g. the connection drops while Postgres is still
+    completing it) may commit a moment later, after any check could run:
+    never discard then. An orphan, or a count one too high, is acceptable."""
+    stored, session_factory, next_count = _persist_failing_at(tmp_path, "commit")
+    assert stored.is_file() and stored.with_suffix(".sigmf-meta").is_file()
+    assert next_count == 2
+
+
+def test_a_failure_after_commit_keeps_the_snippet_its_row_references(tmp_path):
+    """The row is committed; the refresh that follows fails."""
+    stored, session_factory, next_count = _persist_failing_at(tmp_path, "refresh")
     assert stored.is_file() and stored.with_suffix(".sigmf-meta").is_file()
     with session_factory() as session:
         rows = session.query(SurveyRecord).order_by(SurveyRecord.id).all()
         assert rows[0].metadata_["iq_snippet_path"] == str(stored)
-    # The row exists, so its density count must not have been reverted.
     assert next_count == 2
-
-
-def test_a_failure_before_commit_discards_the_unreferenced_snippet(tmp_path, monkeypatch):
-    def fail_before_commit(session, record):
-        raise RuntimeError("constraint violation")
-
-    stored, session_factory, next_count = _adopt_with_failing_save(tmp_path, monkeypatch, fail_before_commit)
-    assert not stored.exists() and not stored.with_suffix(".sigmf-meta").exists()
-    with session_factory() as session:
-        assert session.query(SurveyRecord).count() == 1  # only the follow-up record
-    assert next_count == 1

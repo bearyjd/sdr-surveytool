@@ -12,7 +12,7 @@ from ingest.grid import grid_cell_key
 from ingest.queue_server import QueueServer
 from schema.records import UnifiedRecord
 from storage.models import SurveyRecord
-from storage.repository import save_record
+from storage.repository import add_record
 from storage.snippet_store import SnippetRejected, SnippetStore
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ class IngestService:
     """Consumes validated records from a QueueServer, adopts any staged IQ
     snippet into the snippet store, attaches the nearest GPS fix when the
     record didn't already carry a usable one, tracks per-grid-cell sample
-    density, and persists via storage.repository.save_record.
+    density, and persists via storage.repository.add_record + COMMIT.
 
     Thread-safety: process_one() itself may be called from any single
     thread, but internal grid-density bookkeeping (_grid_counts) is
@@ -104,36 +104,43 @@ class IngestService:
         record = self._queue_server.get(timeout=timeout)
         # Adopt before the grid-density bump: an I/O error raises here with
         # nothing to roll back (a rejected snippet doesn't raise; the record is
-        # kept without it). If save_record later fails, the adopted pair is
-        # discarded again only once no persisted row is confirmed to reference
-        # it (see _discard_if_unreferenced).
+        # kept without it). If persisting later fails, the adopted pair is
+        # discarded again only when the row is known absent (see below).
         staged = record.metadata.iq_snippet_path
         record = self._adopt_snippet_if_present(record)
         adopted = record.metadata.iq_snippet_path if staged is not None else None
         record = self._attach_gps_if_missing(record)
         record, grid_key = self._attach_grid_density(record)
+        commit_issued = False
         try:
             with self._session_factory() as session:
-                save_record(session, record)
+                row = add_record(session, record)
+                # From here a failure is in doubt: COMMIT may complete on the
+                # server (e.g. Postgres) after the client has lost the
+                # connection, even after a fresh check found no row.
+                commit_issued = True
+                session.commit()
+                session.refresh(row)
         except Exception:
-            # The error may have come after COMMIT. A snippet record can be
-            # checked by its unique path; the optimistic grid-count bump and
-            # the adopted files are only rolled back once the row is confirmed
-            # absent (a record without a snippet can't be checked, so its
-            # failure is taken at face value, as before). Log loudly instead
-            # of dropping the record silently.
-            persisted = False if adopted is None else self._is_referenced(adopted)
-            if persisted is False:
+            # Roll back the optimistic grid-count bump and the adopted files
+            # only when the row is known absent: the failure came before
+            # COMMIT was issued and (for a snippet record) a fresh query finds
+            # no row referencing it. In doubt keep both: an orphan, or a count
+            # one too high, is recoverable; a dangling reference is not.
+            known_absent = not commit_issued and (
+                adopted is None or self._is_referenced(adopted) is False
+            )
+            if known_absent:
                 with self._grid_lock:
                     self._grid_counts[grid_key] -= 1
                 if adopted is not None:
                     self._discard_adopted(adopted)
             else:
                 logger.warning(
-                    "Record referencing snippet %r may have been persisted (%s); keeping "
-                    "its grid count and files",
+                    "Record (snippet %r) may have been persisted (%s); keeping its grid "
+                    "count and files",
                     adopted,
-                    "row found" if persisted else "check failed",
+                    "COMMIT in doubt" if commit_issued else "row found or check failed",
                 )
             logger.error(
                 "Failed to persist record for grid cell %s", grid_key, exc_info=True
@@ -161,10 +168,9 @@ class IngestService:
 
     def _is_referenced(self, stored_path: str) -> bool | None:
         """Whether a persisted row references `stored_path`, checked with a
-        fresh session; None if that can't be determined. Prefer an orphan to
-        a dangling reference: save_record() commits and then refreshes, so
-        its error may come after COMMIT, and only a confirmed "no" lets the
-        caller discard the adopted pair."""
+        fresh session; None if that can't be determined. Only a confirmed
+        "no" (and a failure known to predate COMMIT) lets the caller discard
+        the adopted pair."""
         factory = self._session_factory
         if factory is None:  # no database to check against
             return None

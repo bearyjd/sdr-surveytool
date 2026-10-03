@@ -18,6 +18,21 @@ def save_record(session: Session, record: UnifiedRecord) -> SurveyRecord:
 
     Rolls back the session on any error to prevent poisoning for subsequent calls.
     """
+    row = add_record(session, record)
+    try:
+        session.commit()
+        session.refresh(row)
+        return row
+    except Exception:
+        session.rollback()
+        raise
+
+
+def add_record(session: Session, record: UnifiedRecord) -> SurveyRecord:
+    """Stage `record` and flush its INSERT without committing: the first half
+    of save_record(). A failure here happens before COMMIT is issued, so
+    nothing was persisted; callers that must tell that apart from an
+    in-doubt COMMIT (ingest) run commit() themselves. Rolls back on error."""
     try:
         # Normalize timestamp to UTC-naive for consistent storage.
         # Naive inputs are treated as already UTC (just strip the marker).
@@ -44,8 +59,7 @@ def save_record(session: Session, record: UnifiedRecord) -> SurveyRecord:
             metadata_=record.metadata.model_dump(),
         )
         session.add(row)
-        session.commit()
-        session.refresh(row)
+        session.flush()
         return row
     except Exception:
         session.rollback()
