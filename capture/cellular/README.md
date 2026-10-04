@@ -1,17 +1,21 @@
 # capture/cellular
 
-Passive LTE cell broadcast decode: currently PSS/SSS cell search only (Cell ID, PSS ID,
-RX power, residual frequency offset). Vendors LTE-Cell-Scanner
-(https://github.com/JiaoXianjun/LTE-Cell-Scanner), built unmodified via CMake.
+Passive LTE cell broadcast decode via `CellSearch`: PSS/SSS cell search (Cell ID, PSS ID,
+RX power, residual frequency offset) plus the fields of its CRC-checked MIB decode
+(antenna ports, CP type, n_RB / bandwidth, PHICH duration and resource; no SFN, no
+PLMN). Vendors LTE-Cell-Scanner (https://github.com/JiaoXianjun/LTE-Cell-Scanner), built
+unmodified via CMake.
 
 **Hard scope boundary**: broadcast-channel decode only. No paging-channel decoding, no
 RRC connection setup, nothing that identifies or tracks individual subscribers.
 LTE-Cell-Scanner has no RRC/paging code at all.
 
 **Status**: hardware-free DSP spike complete — `CellSearch` correctly detects a known
-cell (Cell ID 301) from a recorded IQ file, see `testdata/`. MIB/SIB1-3 decode
-(`LTE-Tracker`, a separate tool) and real xA9 hardware validation are deferred to later
-plans; see `docs/superpowers/specs/2026-08-11-cellular-dsp-spike-design.md`.
+cell (Cell ID 301) and its MIB fields (2 antenna ports, normal CP, 100 RB / 20 MHz,
+PHICH normal/one) from a recorded IQ file, see `testdata/`. SIB decode (and so PLMN)
+does not exist in the vendored code, and real xA9 hardware validation is deferred; see
+`docs/superpowers/specs/2026-08-11-cellular-dsp-spike-design.md` and the amendment in
+`docs/superpowers/specs/2026-08-11-lte-mib-decode-spike-design.md`.
 
 ## Building
 
