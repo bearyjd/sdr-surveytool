@@ -165,11 +165,15 @@ class _StoppingService:
 )
 def test_ingest_startup_never_logs_the_database_password(monkeypatch, caplog, url):
     monkeypatch.setenv("SURVEYTOOL_DATABASE_URL", url)
-    monkeypatch.setattr(ingest_main, "make_engine", lambda _url: create_engine("sqlite://"))
+    engine = create_engine("sqlite://")
+    monkeypatch.setattr(ingest_main, "make_engine", lambda _url: engine)
     monkeypatch.setattr(ingest_main, "QueueServer", _StubServer)
     monkeypatch.setattr(ingest_main, "IngestService", _StoppingService)
-    with caplog.at_level(logging.DEBUG):
-        ingest_main.main(["--gps-fix-quality", "0"])
+    try:
+        with caplog.at_level(logging.DEBUG):
+            ingest_main.main(["--gps-fix-quality", "0"])
+    finally:
+        engine.dispose()
     assert "Ingest listening on /tmp/sdr-ingest.sock -> postgresql://ingest" in caplog.text
     assert "db.example/surveytool" in caplog.text
     assert "s3cret" not in caplog.text
