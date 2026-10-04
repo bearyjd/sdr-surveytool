@@ -8,7 +8,7 @@ for the full architecture design.
 
 ## Layout
 
-- `capture/cellular/` — vendored LTE-Cell-Scanner submodule (PSS/SSS cell search only, unmodified) + normalizer; gain-control/live-radio work deferred
+- `capture/cellular/` — vendored LTE-Cell-Scanner submodule (PSS/SSS cell search + MIB fields, unmodified) + normalizer; gain-control/live-radio work deferred
 - `capture/wifi/` — Kismet integration + normalizer
 - `capture/bluetooth/` — bleak-based BLE scanner + normalizer
 - `capture/unknown/` — custom GNU Radio flowgraph (gr-soapy) + trigger/IQ capture + normalizer

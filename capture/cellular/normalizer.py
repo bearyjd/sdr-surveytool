@@ -12,9 +12,11 @@ def normalize_cellsearch_result(
     capture.cellular.offline_scanner.parse_cellsearch_output) into a
     UnifiedRecord. lat/lon are left at 0.0 with gps_fix_quality=None —
     ingest.service attaches the real fix, matching capture.wifi/bluetooth.
-    No RSRP/RSRQ/SINR or MIB/SIB fields: CellSearch (PSS/SSS search only)
-    doesn't report them; that requires the separate, deferred LTE-Tracker
-    tool. No PLMN either — CellSearch reports Cell ID only."""
+    No RSRP/RSRQ/SINR: CellSearch doesn't report them. The parsed dict may
+    carry CRC-verified MIB fields (n_rb_dl, PHICH config, ...), but they aren't
+    mapped into the record yet; n_rb_dl/bandwidth are the natural first fields
+    to wire. No PLMN or SIB fields: those come from SIB1, which this
+    codebase can't decode."""
     return UnifiedRecord(
         timestamp=datetime.now(timezone.utc),
         lat=0.0,
