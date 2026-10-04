@@ -146,3 +146,28 @@ def test_trigger_position_is_annotated_for_downstream_noise_reference(tmp_path):
 def test_no_trigger_offset_writes_no_annotations(tmp_path):
     data_path = write_sigmf_snippet(IQ, tmp_path, 2e6, 915e6, START)
     assert sigmffile.fromfile(str(data_path)).get_annotations() == []
+
+
+def test_the_trigger_threshold_is_recorded_on_the_pre_trigger_annotation(tmp_path):
+    """Part 4 selects its quiet noise-reference frames with the exact
+    threshold capture used. The field lives in a declared, optional SigMF
+    extension, so the meta still validates without a warning."""
+    data_path = write_sigmf_snippet(IQ, tmp_path, 2e6, 915e6, START, trigger_offset=100, threshold_dbfs=-37.5)
+    recording = sigmffile.fromfile(str(data_path))
+    pre_trigger, burst = recording.get_annotations()
+    assert pre_trigger[snippet_writer.THRESHOLD_KEY] == -37.5
+    assert snippet_writer.THRESHOLD_KEY not in burst
+    assert recording.get_global_field(sigmf.EXTENSIONS_KEY) == [
+        {"name": "sdr_surveytool", "version": "1.0.0", "optional": True}
+    ]
+    recording.validate()
+
+
+@pytest.mark.parametrize("trigger_offset, threshold", [(100, None), (0, -37.5), (None, -37.5)])
+def test_no_threshold_without_a_pre_trigger_annotation_to_carry_it(tmp_path, trigger_offset, threshold):
+    data_path = write_sigmf_snippet(
+        IQ, tmp_path, 2e6, 915e6, START, trigger_offset=trigger_offset, threshold_dbfs=threshold
+    )
+    recording = sigmffile.fromfile(str(data_path))
+    assert all(snippet_writer.THRESHOLD_KEY not in a for a in recording.get_annotations())
+    assert recording.get_global_field(sigmf.EXTENSIONS_KEY) is None

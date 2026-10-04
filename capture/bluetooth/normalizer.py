@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from schema.records import Identifier, Modality, Signal, UnifiedRecord
+from schema.records import Identifier, Modality, Signal, UnifiedRecord, without_nul
 
 
 def normalize_ble_advertisement(
@@ -22,6 +22,6 @@ def normalize_ble_advertisement(
         survey_id=survey_id,
         operator_id=operator_id,
         modality=Modality.BLUETOOTH,
-        identifier=Identifier(bt_mac=address, device_name=device_name),
+        identifier=Identifier(bt_mac=address, device_name=without_nul(device_name)),
         signal=Signal(rssi=rssi),
     )

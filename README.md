@@ -13,10 +13,10 @@ for the full architecture design.
 - `capture/bluetooth/` — bleak-based BLE scanner + normalizer
 - `capture/unknown/` — custom GNU Radio flowgraph (gr-soapy) + trigger/IQ capture + normalizer
 - `gps/` — u-blox M8N reader, shared GPS fix service
-- `dsp/` — shared numpy-only signal math (power, occupied bandwidth), no I/O; reused by `agent/`
+- `dsp/` — shared numpy-only signal math (power, bandwidth, spectral segmentation, region features), no I/O; reused by `agent/`
 - `schema/` — unified record schema (versioned) + validators
 - `ingest/` — normalizer/geotagger — the only writer to storage
-- `agent/` — Part 4 agentic signal-characterization (tools, feature extraction, routing)
+- `agent/` — Part 4 classification agent (features, curated band table, one forced LLM tool call, routing); writes back only through its DB boundary
 - `storage/` — Postgres/PostGIS models + migrations, object-storage client
 - `viz/` — local field-verification dashboard (map + heatmap)
 - `fpga/` — future-phase bladeRF HDL work, deferred until profiling justifies it
@@ -31,6 +31,12 @@ for the full architecture design.
   `/var/lib/sdr-surveytool/`), owned by that uid with mode `0700`, and on **one
   filesystem and mount**. Snippets are hard-linked from staging into the store,
   and both services check this at startup.
+- Ingest reads its database URL from `SURVEYTOOL_DATABASE_URL`, else the systemd
+  credential `database_url` (`LoadCredential=database_url:<root-owned 0600 file>`),
+  else uses `sqlite:///survey.db`. Never put a password on the command line: every local
+  user can read it. `--database-url` still works and wins, but ingest warns when it
+  carries a password. Ingest logs the URL with the password masked. See
+  [agent/README.md](agent/README.md) for keeping it from the agent, which shares the uid.
 - Capture services (WiFi, Bluetooth, unknown) never block on ingest. The shared
   emitter connects lazily, so they can start first. Each connect or send times out
   after 5 s and is retried once, so a stalled ingest costs the record being sent

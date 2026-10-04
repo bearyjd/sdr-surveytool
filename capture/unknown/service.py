@@ -214,6 +214,7 @@ def _write_snippet(snippet: CapturedSnippet, settings: CaptureSettings) -> str:
         snippet.trigger.center_freq_hz,
         snippet.start_time,
         trigger_offset=snippet.trigger.sample_index - snippet.start_index,
+        threshold_dbfs=settings.threshold_dbfs,
     )
     return str(data_path)
 

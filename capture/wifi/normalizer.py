@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from schema.records import Identifier, Modality, Signal, UnifiedRecord
+from schema.records import Identifier, Modality, Signal, UnifiedRecord, without_nul
 
 _LEADING_INT = re.compile(r"\d+")
 
@@ -40,8 +40,9 @@ def normalize_kismet_device(
     ssid = None
     encryption = None
     for entry in ssid_map.values():
-        ssid = entry.get("dot11.advertisedssid.ssid")
-        encryption = entry.get("dot11.advertisedssid.crypt_string")
+        # Raw from the air: a NUL would make the record invalid.
+        ssid = without_nul(entry.get("dot11.advertisedssid.ssid"))
+        encryption = without_nul(entry.get("dot11.advertisedssid.crypt_string"))
         break
 
     last_seen = device.get("kismet.device.base.last_time")

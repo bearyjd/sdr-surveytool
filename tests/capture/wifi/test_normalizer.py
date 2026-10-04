@@ -65,3 +65,18 @@ def test_normalize_kismet_device_channel_missing_stays_none():
 def test_normalize_kismet_device_returns_none_without_signal():
     device_without_signal = {"kismet.device.base.macaddr": "AA:BB:CC:DD:EE:FF"}
     assert normalize_kismet_device(device_without_signal, "s1", "op1") is None
+
+
+def test_nul_characters_from_the_air_are_stripped():
+    """Kismet reports raw SSID bytes; a NUL would make the record invalid."""
+    device = {
+        **SAMPLE_DEVICE,
+        "dot11.device": {
+            "dot11.device.advertised_ssid_map": {
+                "0": {"dot11.advertisedssid.ssid": "Test\x00Net\x00", "dot11.advertisedssid.crypt_string": "WPA2\x00"}
+            }
+        },
+    }
+    record = normalize_kismet_device(device, survey_id="s1", operator_id="op1")
+    assert record.identifier.ssid == "TestNet"
+    assert record.metadata.encryption_type_if_broadcast_visible == "WPA2"

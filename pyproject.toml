@@ -12,6 +12,8 @@ dependencies = [
     "uvicorn>=0.29",
     "numpy>=1.26",  # capture/unknown DSP; also capture/cellular/testdata/generate_fixture.py
     "sigmf>=1.13",  # capture/unknown snippet files (LGPL-3.0-or-later)
+    "anthropic>=0.107",  # agent/ (Part 4) LLM call
+    "psycopg[binary]>=3.2",  # agent/ and storage/agent_boundary.py: PostgreSQL only
 ]
 
 [project.scripts]
@@ -19,6 +21,8 @@ sdr-ingest = "ingest.main:main"
 sdr-capture-wifi = "capture.wifi.service:main"
 sdr-capture-bluetooth = "capture.bluetooth.service:main"
 sdr-capture-unknown = "capture.unknown.service:main"
+sdr-agent = "agent.service:main"
+sdr-agent-boundary = "storage.agent_boundary:main"
 
 [project.optional-dependencies]
 dev = [
@@ -35,11 +39,16 @@ packages = [
     "capture.bluetooth",
     "capture.cellular",
     "capture.unknown",
+    "agent",
     "dsp",
     "ingest",
     "storage",
     "viz",
 ]
+
+[tool.setuptools.package-data]
+agent = ["data/*.json"]
+storage = ["sql/*.sql"]
 
 [tool.pytest.ini_options]
 # importlib mode avoids sys.path/module-name collisions between the

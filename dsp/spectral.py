@@ -124,12 +124,16 @@ def occupied_bandwidth(
     high = int(np.searchsorted(cumulative, 1.0 - tail))
     hz = (high - low + 1) * sample_rate / nfft
     wraps_band_edges = low == 0 and high >= nfft - 1
-    reliable = (
-        has_reference
-        and hz <= _RELIABLE_FRACTION_OF_BAND * sample_rate
-        and not wraps_band_edges
-    )
+    reliable = has_reference and bandwidth_is_reliable(hz, sample_rate, wraps_band_edges)
     return OccupiedBandwidth(hz=hz, reliable=reliable)
+
+
+def bandwidth_is_reliable(hz: float, sample_rate: float, wraps_band_edges: bool) -> bool:
+    """Whether a measured occupied bandwidth can be trusted: not when it
+    fills more than 90% of the capture band or when the signal touches both
+    band edges (it wraps around them, so its edge-to-edge span is not its
+    bandwidth). Shared by occupied_bandwidth and dsp.segmentation."""
+    return hz <= _RELIABLE_FRACTION_OF_BAND * sample_rate and not wraps_band_edges
 
 
 def noise_floor_psd(reference_iq: np.ndarray, nfft: int = _NFFT) -> np.ndarray:
