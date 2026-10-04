@@ -12,7 +12,8 @@ from ingest.grid import grid_cell_key
 from ingest.queue_server import QueueServer
 from schema.records import UnifiedRecord
 from storage.models import SurveyRecord
-from storage.repository import save_record
+from storage.repository import add_record
+from storage.snippet_store import SnippetRejected, SnippetStore
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +28,10 @@ _PLACEHOLDER_LON = 0.0
 
 
 class IngestService:
-    """Consumes validated records from a QueueServer, attaches the nearest
-    GPS fix when the record didn't already carry a usable one, tracks
-    per-grid-cell sample density, and persists via
-    storage.repository.save_record.
+    """Consumes validated records from a QueueServer, adopts any staged IQ
+    snippet into the snippet store, attaches the nearest GPS fix when the
+    record didn't already carry a usable one, tracks per-grid-cell sample
+    density, and persists via storage.repository.add_record + COMMIT.
 
     Thread-safety: process_one() itself may be called from any single
     thread, but internal grid-density bookkeeping (_grid_counts) is
@@ -45,10 +46,12 @@ class IngestService:
         queue_server: QueueServer,
         session_factory: sessionmaker | None,
         gps_provider: GpsFixProvider,
+        snippet_store: SnippetStore | None = None,
     ) -> None:
         self._queue_server = queue_server
         self._session_factory = session_factory
         self._gps_provider = gps_provider
+        self._snippet_store = snippet_store
         # Seeded from the DB so sample_count_in_grid_cell stays monotonic across
         # ingest restarts mid-survey; without this every cell restarts at 1 and
         # the persisted density values are useless for coverage-gap analysis.
@@ -99,26 +102,121 @@ class IngestService:
         to wake up periodically to observe a shutdown signal.
         """
         record = self._queue_server.get(timeout=timeout)
+        # Adopt before the grid-density bump: an I/O error raises here with
+        # nothing to roll back (a rejected snippet doesn't raise; the record is
+        # kept without it). If persisting later fails, the adopted pair is
+        # discarded again only when the row is known absent (see below).
+        staged = record.metadata.iq_snippet_path
+        record = self._adopt_snippet_if_present(record)
+        adopted = record.metadata.iq_snippet_path if staged is not None else None
         record = self._attach_gps_if_missing(record)
         record, grid_key = self._attach_grid_density(record)
+        commit_issued = False
         try:
             with self._session_factory() as session:
-                save_record(session, record)
+                row = add_record(session, record)
+                # From here a failure is in doubt: COMMIT may complete on the
+                # server (e.g. Postgres) after the client has lost the
+                # connection, even after a fresh check found no row.
+                commit_issued = True
+                session.commit()
+                session.refresh(row)
         except Exception:
-            # Persistence failed: the record was never stored, so the grid
-            # count we optimistically bumped must be rolled back to stay
-            # consistent with what's actually in the DB. Log loudly instead
-            # of dropping the record silently.
-            with self._grid_lock:
-                self._grid_counts[grid_key] -= 1
+            # Roll back the optimistic grid-count bump and the adopted files
+            # only when the row is known absent: the failure came before
+            # COMMIT was issued and (for a snippet record) a fresh query finds
+            # no row referencing it. In doubt keep both: an orphan, or a count
+            # one too high, is recoverable; a dangling reference is not.
+            known_absent = not commit_issued and (
+                adopted is None or self._is_referenced(adopted) is False
+            )
+            if known_absent:
+                with self._grid_lock:
+                    self._grid_counts[grid_key] -= 1
+                if adopted is not None:
+                    self._discard_adopted(adopted)
+            else:
+                logger.warning(
+                    "Record (snippet %r) may have been persisted (%s); keeping its grid "
+                    "count and files",
+                    adopted,
+                    "COMMIT in doubt" if commit_issued else "row found or check failed",
+                )
             logger.error(
-                "Failed to persist record for grid cell %s; record dropped "
-                "and grid count reverted",
-                grid_key,
-                exc_info=True,
+                "Failed to persist record for grid cell %s", grid_key, exc_info=True
             )
             raise
         return record
+
+    def _adopt_snippet_if_present(self, record: UnifiedRecord) -> UnifiedRecord:
+        """Move a capture-staged SigMF pair into the snippet store and point
+        the record at its final location. Capture never writes to storage
+        itself (design doc section 6); this is where snippets cross over."""
+        staged = record.metadata.iq_snippet_path
+        if staged is None:
+            return record
+        if self._snippet_store is None:
+            return self._without_snippet(
+                record, "no_snippet_store", "ingest has no snippet store configured"
+            )
+        try:
+            final = self._snippet_store.adopt(staged)
+        except SnippetRejected as rejection:
+            return self._without_snippet(record, rejection.reason, str(rejection))
+        updated_metadata = record.metadata.model_copy(update={"iq_snippet_path": final})
+        return record.model_copy(update={"metadata": updated_metadata})
+
+    def _is_referenced(self, stored_path: str) -> bool | None:
+        """Whether a persisted row references `stored_path`, checked with a
+        fresh session; None if that can't be determined. Only a confirmed
+        "no" (and a failure known to predate COMMIT) lets the caller discard
+        the adopted pair."""
+        factory = self._session_factory
+        if factory is None:  # no database to check against
+            return None
+        try:
+            with factory() as session:
+                return (
+                    session.execute(
+                        select(SurveyRecord.id)
+                        .where(SurveyRecord.metadata_["iq_snippet_path"].as_string() == stored_path)
+                        .limit(1)
+                    ).first()
+                    is not None
+                )
+        except Exception:
+            logger.error(
+                "Could not check whether snippet %r is referenced", stored_path, exc_info=True
+            )
+            return None
+
+    def _discard_adopted(self, stored_path: str) -> None:
+        """The record referencing this pair was never persisted: remove the
+        pair instead of leaving it orphaned in the store."""
+        assert self._snippet_store is not None  # only adopted when a store exists
+        try:
+            self._snippet_store.discard(stored_path)
+        except Exception:
+            logger.error("Could not discard orphaned snippet %r", stored_path, exc_info=True)
+        else:
+            logger.warning("Discarded snippet %r: its record could not be persisted", stored_path)
+
+    def _without_snippet(self, record: UnifiedRecord, reason: str, detail: str) -> UnifiedRecord:
+        """A rejected snippet loses only the snippet: the detection is still
+        persisted, with iq_snippet_path cleared and the reason flagged."""
+        logger.warning(
+            "Rejected snippet %r (%s): %s; persisting the record without it",
+            record.metadata.iq_snippet_path,
+            reason,
+            detail,
+        )
+        updated_metadata = record.metadata.model_copy(
+            update={
+                "iq_snippet_path": None,
+                "quality_flags": {**record.metadata.quality_flags, "snippet_rejected": reason},
+            }
+        )
+        return record.model_copy(update={"metadata": updated_metadata})
 
     def _has_usable_fix(self, record: UnifiedRecord) -> bool:
         """True if the record already reports a real GPS fix.

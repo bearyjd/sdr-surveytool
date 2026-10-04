@@ -1,10 +1,13 @@
 import json
+import logging
 import os
 import socket
 import struct
 import threading
 
 from datetime import datetime, timezone
+
+import pytest
 
 from capture.common.emitter import RecordEmitter
 from schema.records import Identifier, Modality, Signal, UnifiedRecord
@@ -129,3 +132,88 @@ def test_emit_sends_record_as_ndjson_line(tmp_path):
     assert received["line"].endswith("\n")
     parsed = json.loads(received["line"])
     assert parsed["identifier"]["bssid"] == "AA:BB:CC:DD:EE:FF"
+
+
+def _serve_one_line(server: socket.socket, sink: dict) -> None:
+    conn, _ = server.accept()
+    data = b""
+    while not data.endswith(b"\n"):
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    sink["line"] = data.decode("utf-8")
+    conn.close()
+
+
+def test_entering_while_ingest_is_down_logs_instead_of_raising(tmp_path, caplog):
+    """Capture processes may start before ingest: a missing socket at
+    startup is logged, not fatal (it used to kill the whole service)."""
+    socket_path = str(tmp_path / "ingest.sock")
+    with caplog.at_level(logging.WARNING):
+        with RecordEmitter(socket_path):
+            pass
+    assert socket_path in caplog.text
+
+
+def test_emit_connects_lazily_once_ingest_comes_up(tmp_path):
+    socket_path = str(tmp_path / "ingest.sock")
+    received: dict = {}
+    with RecordEmitter(socket_path) as emitter:
+        # Still down: emit raises, so the caller's per-cycle handling
+        # (log, drop, delete the staged snippet) takes over as before.
+        with pytest.raises(OSError):
+            emitter.emit(_record())
+
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(socket_path)
+        server.listen(1)
+        thread = threading.Thread(target=_serve_one_line, args=(server, received), daemon=True)
+        thread.start()
+        emitter.emit(_record())
+        thread.join(timeout=2)
+        server.close()
+
+    assert json.loads(received["line"])["identifier"]["bssid"] == "AA:BB:CC:DD:EE:FF"
+
+
+def test_a_wedged_ingest_times_out_instead_of_blocking_capture_forever(tmp_path):
+    """An ingest that accepts but never reads would block sendall() forever
+    once the socket buffer fills; a send timeout turns that into the same
+    OSError as any other emit failure."""
+    socket_path = str(tmp_path / "ingest.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(socket_path)
+    server.listen(4)
+    held = []
+
+    def accept_but_never_read():
+        while len(held) < 2:  # the original connection and the one retry
+            conn, _ = server.accept()
+            held.append(conn)
+
+    threading.Thread(target=accept_but_never_read, daemon=True).start()
+    record = _record()
+    padding = record.metadata.model_copy(update={"quality_flags": {"pad": "x" * 8_000_000}})
+    big = record.model_copy(update={"metadata": padding})  # far more than a socket buffer
+    emitter = RecordEmitter(socket_path, timeout_seconds=0.2)
+    emitter.connect()
+    outcome = {}
+
+    def emit():
+        try:
+            emitter.emit(big)
+        except OSError as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=emit, daemon=True)
+    worker.start()
+    worker.join(5)
+    try:
+        assert not worker.is_alive(), "emit() blocked on a wedged ingest"
+        assert isinstance(outcome.get("error"), TimeoutError)
+    finally:
+        emitter.close()
+        for conn in held:
+            conn.close()
+        server.close()

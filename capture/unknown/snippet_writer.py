@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+import os
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import IO
+
+import numpy as np
+import sigmf
+from sigmf import SigMFFile
+from sigmf.utils import SIGMF_DATETIME_ISO8601_FMT
+
+_RECORDER = "sdr-surveytool capture.unknown"
+
+
+def write_sigmf_snippet(
+    iq: np.ndarray,
+    staging_dir: Path,
+    sample_rate: float,
+    center_freq_hz: float,
+    capture_start: datetime,
+    trigger_offset: int | None = None,
+) -> Path:
+    """Write `iq` as a SigMF pair (`.sigmf-data` raw cf32_le + `.sigmf-meta`
+    JSON) directly in `staging_dir` and return the absolute `.sigmf-data`
+    path. Staging is capture-owned scratch space: ingest's snippet store
+    later moves the pair into storage (only ingest writes to storage).
+
+    Atomic: each file is written under a hidden temporary name and renamed
+    into place, data first and meta last, so a `.sigmf-meta` is never
+    visible without its complete `.sigmf-data` (the meta is the completeness
+    marker the snippet store requires). Each file is fsynced before its
+    rename and the directory after both, so a crash can't leave a visible
+    pair whose contents never reached the disk. On failure, the temporaries
+    and any already-renamed data file are removed. Files are created 0o600,
+    and a staging directory created here is 0o700.
+
+    `capture_start` is the sample-derived UTC time of iq[0] and becomes the
+    SigMF capture's core:datetime. `trigger_offset` (the index of the trigger
+    sample in `iq`) is written as two standard annotations: "pre_trigger"
+    over [0, trigger_offset), the below-threshold noise reference that
+    dsp.spectral.noise_floor_psd expects, and "burst" from the trigger on. The basename carries a random suffix, so
+    concurrent capture processes can never collide.
+    """
+    if capture_start.tzinfo is None:
+        raise ValueError("capture_start must be timezone-aware (UTC)")
+    start_utc = capture_start.astimezone(timezone.utc)
+    staging_dir = Path(staging_dir).resolve()
+    staging_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    stem = f"{start_utc:%Y%m%dT%H%M%S%fZ}_{center_freq_hz:.0f}Hz_{uuid.uuid4().hex[:8]}"
+    data_path = staging_dir / f"{stem}.sigmf-data"
+    meta_path = staging_dir / f"{stem}.sigmf-meta"
+    tmp_data = staging_dir / f".{stem}.sigmf-data.tmp"
+    tmp_meta = staging_dir / f".{stem}.sigmf-meta.tmp"
+    leftovers = [tmp_data, tmp_meta]
+    try:
+        with _create_private(tmp_data, "wb") as data_file:
+            # '<c8' = little-endian complex64, exactly SigMF's cf32_le.
+            np.asarray(iq, dtype="<c8").tofile(data_file)
+            _flush_to_disk(data_file)
+        os.replace(tmp_data, data_path)
+        leftovers.append(data_path)
+
+        # Built from the final data path: sigmf records a non-conforming data
+        # filename (such as the temporary one) as core:dataset in the meta.
+        meta = SigMFFile(
+            data_file=str(data_path),
+            global_info={
+                sigmf.DATATYPE_KEY: "cf32_le",
+                sigmf.SAMPLE_RATE_KEY: float(sample_rate),
+                sigmf.RECORDER_KEY: _RECORDER,
+                sigmf.DESCRIPTION_KEY: "Energy-triggered unknown-signal snippet",
+            },
+        )
+        meta.add_capture(
+            0,
+            metadata={
+                sigmf.FREQUENCY_KEY: float(center_freq_hz),
+                sigmf.DATETIME_KEY: start_utc.strftime(SIGMF_DATETIME_ISO8601_FMT),
+            },
+        )
+        if trigger_offset is not None:
+            _annotate_trigger(meta, trigger_offset, len(iq))
+        meta.validate()
+        with _create_private(tmp_meta, "w") as meta_file:
+            meta.dump(meta_file, pretty=True)
+            _flush_to_disk(meta_file)
+        os.replace(tmp_meta, meta_path)
+        leftovers.append(meta_path)
+        # Persist the two renames themselves.
+        _fsync_dir(staging_dir)
+    except BaseException:
+        for leftover in leftovers:
+            leftover.unlink(missing_ok=True)
+        raise
+    return data_path
+
+
+def _annotate_trigger(meta: SigMFFile, trigger_offset: int, length: int) -> None:
+    if trigger_offset > 0:
+        meta.add_annotation(
+            0,
+            length=trigger_offset,
+            metadata={
+                sigmf.LABEL_KEY: "pre_trigger",
+                sigmf.COMMENT_KEY: "Below the trigger threshold: per-bin noise reference",
+            },
+        )
+    meta.add_annotation(
+        trigger_offset,
+        length=length - trigger_offset,
+        metadata={sigmf.LABEL_KEY: "burst", sigmf.COMMENT_KEY: "From the energy-trigger sample on"},
+    )
+
+
+def _create_private(path: Path, mode: str) -> IO:
+    """Create `path` exclusively, readable and writable by the owner only."""
+    return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), mode)
+
+
+def _flush_to_disk(file: IO) -> None:
+    file.flush()
+    os.fsync(file.fileno())
+
+
+def _fsync_dir(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)

@@ -10,18 +10,20 @@ dependencies = [
     "bleak>=0.22",
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    "numpy>=1.26",  # capture/unknown DSP; also capture/cellular/testdata/generate_fixture.py
+    "sigmf>=1.13",  # capture/unknown snippet files (LGPL-3.0-or-later)
 ]
 
 [project.scripts]
 sdr-ingest = "ingest.main:main"
 sdr-capture-wifi = "capture.wifi.service:main"
 sdr-capture-bluetooth = "capture.bluetooth.service:main"
+sdr-capture-unknown = "capture.unknown.service:main"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "httpx>=0.27",
-    "numpy>=1.26",  # capture/cellular/testdata/generate_fixture.py only
 ]
 
 [tool.setuptools]
@@ -32,6 +34,8 @@ packages = [
     "capture.wifi",
     "capture.bluetooth",
     "capture.cellular",
+    "capture.unknown",
+    "dsp",
     "ingest",
     "storage",
     "viz",

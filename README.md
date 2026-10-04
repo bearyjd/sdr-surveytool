@@ -13,12 +13,31 @@ for the full architecture design.
 - `capture/bluetooth/` — bleak-based BLE scanner + normalizer
 - `capture/unknown/` — custom GNU Radio flowgraph (gr-soapy) + trigger/IQ capture + normalizer
 - `gps/` — u-blox M8N reader, shared GPS fix service
+- `dsp/` — shared numpy-only signal math (power, occupied bandwidth), no I/O; reused by `agent/`
 - `schema/` — unified record schema (versioned) + validators
 - `ingest/` — normalizer/geotagger — the only writer to storage
 - `agent/` — Part 4 agentic signal-characterization (tools, feature extraction, routing)
 - `storage/` — Postgres/PostGIS models + migrations, object-storage client
 - `viz/` — local field-verification dashboard (map + heatmap)
 - `fpga/` — future-phase bladeRF HDL work, deferred until profiling justifies it
+
+## Deployment notes
+
+- Storing unknown-signal IQ snippets is **opt-in** for ingest: pass both
+  `--snippet-staging-dir` and `--snippet-store-dir`. Without them, ingest starts as
+  for WiFi/BT-only deployments and keeps unknown-signal records without IQ. When
+  enabled, `ingest` and `capture/unknown` must run as **one dedicated uid**. Both
+  snippet directories must be **absolute** paths (e.g. under
+  `/var/lib/sdr-surveytool/`), owned by that uid with mode `0700`, and on **one
+  filesystem and mount**. Snippets are hard-linked from staging into the store,
+  and both services check this at startup.
+- Capture services (WiFi, Bluetooth, unknown) never block on ingest. The shared
+  emitter connects lazily, so they can start first. Each connect or send times out
+  after 5 s and is retried once, so a stalled ingest costs the record being sent
+  after about 2 x 5 s. That record is dropped and logged, and capture carries on.
+- Unknown-signal capture flags such as `--min-free-bytes` (disk floor, default
+  2 GiB) and `--max-clock-drift-s` (re-anchor threshold, default 2 s) are documented
+  in [capture/unknown/README.md](capture/unknown/README.md).
 
 ## Hardware
 

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -6,10 +7,12 @@ from capture.common.emitter import RecordEmitter
 from ingest.gps_fix import GpsFix, StaticGpsFixProvider
 from ingest.queue_server import QueueServer
 from ingest.service import IngestService
-from schema.records import Identifier, Modality, Signal, UnifiedRecord
+from schema.records import Identifier, Metadata, Modality, Signal, UnifiedRecord
 from storage.db import init_db, make_engine, make_session_factory
 from storage.models import SurveyRecord
+from storage.repository import add_record as real_add_record
 from storage.repository import save_record as real_save_record
+from storage.snippet_store import LocalSnippetStore
 
 
 def _record(
@@ -255,13 +258,13 @@ def test_process_one_reverts_grid_count_on_persist_failure(tmp_path, monkeypatch
 
         call_count = {"n": 0}
 
-        def _flaky_save_record(session, record):
+        def _flaky_add_record(session, record):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise RuntimeError("simulated DB failure")
-            return real_save_record(session, record)
+            return real_add_record(session, record)
 
-        monkeypatch.setattr("ingest.service.save_record", _flaky_save_record)
+        monkeypatch.setattr("ingest.service.add_record", _flaky_add_record)
 
         with pytest.raises(RuntimeError, match="simulated DB failure"):
             service.process_one(timeout=2)
@@ -338,3 +341,244 @@ def test_attach_grid_density_keys_counts_per_cell():
     assert result_a.metadata.sample_count_in_grid_cell == 1
     assert result_b.metadata.sample_count_in_grid_cell == 1
     assert result_a_again.metadata.sample_count_in_grid_cell == 2
+
+
+def _stage_snippet(staging_dir, stem: str = "20261003T120000123456Z_915000000Hz_0123abcd") -> str:
+    staging_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (staging_dir / f"{stem}.sigmf-data").write_bytes(b"\x00" * 16)
+    (staging_dir / f"{stem}.sigmf-meta").write_text("{}")
+    return str((staging_dir / f"{stem}.sigmf-data").resolve())
+
+
+def _snippet_record(snippet_path: str) -> UnifiedRecord:
+    return UnifiedRecord(
+        timestamp=datetime.now(timezone.utc),
+        lat=10.0,
+        lon=20.0,
+        gps_fix_quality=1,
+        survey_id="s",
+        operator_id="o",
+        modality=Modality.UNKNOWN,
+        identifier=Identifier(center_freq=915e6, bandwidth_estimate=20_000.0),
+        signal=Signal(rssi=-20.0, peak_power=-17.0),
+        metadata=Metadata(iq_snippet_path=snippet_path),
+    )
+
+
+def _snippet_pipeline(tmp_path, snippet_store):
+    socket_path = str(tmp_path / "ingest.sock")
+    server = QueueServer(socket_path)
+    server.start()
+    engine = make_engine("sqlite:///:memory:")
+    init_db(engine)
+    session_factory = make_session_factory(engine)
+    gps_provider = StaticGpsFixProvider(
+        GpsFix(lat=47.6062, lon=-122.3321, altitude=15.0, fix_quality=4)
+    )
+    service = IngestService(server, session_factory, gps_provider, snippet_store=snippet_store)
+    return socket_path, server, session_factory, service
+
+
+def test_process_one_adopts_staged_snippet_and_persists_final_path(tmp_path):
+    staging, store_root = tmp_path / "staging", tmp_path / "snippets"
+    staged = _stage_snippet(staging)
+    socket_path, server, session_factory, service = _snippet_pipeline(
+        tmp_path, LocalSnippetStore(staging, store_root)
+    )
+    try:
+        original = _snippet_record(staged)
+        with RecordEmitter(socket_path) as emitter:
+            emitter.emit(original)
+
+        processed = service.process_one(timeout=2)
+
+        final = str((store_root / "20261003T120000123456Z_915000000Hz_0123abcd.sigmf-data").resolve())
+        assert processed.metadata.iq_snippet_path == final
+        assert (store_root / "20261003T120000123456Z_915000000Hz_0123abcd.sigmf-meta").is_file()
+        assert list(staging.iterdir()) == []
+        # The emitted record object is never mutated; ingest works on copies.
+        assert original.metadata.iq_snippet_path == staged
+        with session_factory() as session:
+            rows = session.query(SurveyRecord).all()
+            assert len(rows) == 1
+            assert rows[0].metadata_["iq_snippet_path"] == final
+    finally:
+        server.stop()
+
+
+def test_process_one_persists_record_without_a_rejected_snippet(tmp_path, caplog):
+    """A rejected snippet loses only the snippet: the detection itself is
+    still persisted, flagged, and process_one returns normally (so the ingest
+    loop doesn't back off as it would on a real failure)."""
+    staging = tmp_path / "staging"
+    staging.mkdir(mode=0o700)
+    outside = _stage_snippet(tmp_path / "elsewhere")
+    socket_path, server, session_factory, service = _snippet_pipeline(
+        tmp_path, LocalSnippetStore(staging, tmp_path / "snippets")
+    )
+    try:
+        original = _snippet_record(outside)
+        with RecordEmitter(socket_path) as emitter:
+            emitter.emit(original)
+            emitter.emit(_record(lat=10.0, lon=20.0, gps_fix_quality=1))
+
+        with caplog.at_level("WARNING"):
+            rejected = service.process_one(timeout=2)
+        second = service.process_one(timeout=2)
+
+        assert rejected.metadata.iq_snippet_path is None
+        assert rejected.metadata.quality_flags["snippet_rejected"] == "outside_staging"
+        assert repr(outside) in caplog.text
+        assert original.metadata.iq_snippet_path == outside
+        assert Path(outside).exists()
+        assert second.metadata.sample_count_in_grid_cell == 2
+        with session_factory() as session:
+            rows = session.query(SurveyRecord).order_by(SurveyRecord.id).all()
+            assert len(rows) == 2
+            assert rows[0].metadata_["iq_snippet_path"] is None
+            assert rows[0].metadata_["quality_flags"]["snippet_rejected"] == "outside_staging"
+    finally:
+        server.stop()
+
+
+def test_process_one_flags_snippet_record_when_no_store_configured(tmp_path):
+    staged = _stage_snippet(tmp_path / "staging")
+    socket_path, server, session_factory, service = _snippet_pipeline(tmp_path, None)
+    try:
+        with RecordEmitter(socket_path) as emitter:
+            emitter.emit(_snippet_record(staged))
+
+        processed = service.process_one(timeout=2)
+
+        assert processed.metadata.iq_snippet_path is None
+        assert processed.metadata.quality_flags["snippet_rejected"] == "no_snippet_store"
+        with session_factory() as session:
+            assert session.query(SurveyRecord).count() == 1
+    finally:
+        server.stop()
+
+
+class _FailingAfterStartup:
+    """A session factory whose database goes down after IngestService has
+    seeded its grid counts."""
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self.failing = False
+
+    def __call__(self):
+        if self.failing:
+            raise RuntimeError("database down")
+        return self._real()
+
+
+def test_database_down_keeps_the_adopted_snippet_it_cannot_check(tmp_path, caplog):
+    """With the database down, ingest can't confirm whether a row references
+    the adopted pair (the failure may have come after COMMIT), so it keeps the
+    files: an orphan is recoverable, a dangling reference is not."""
+    staging, store_root = tmp_path / "staging", tmp_path / "snippets"
+    staged = _stage_snippet(staging)
+    socket_path = str(tmp_path / "ingest.sock")
+    server = QueueServer(socket_path)
+    server.start()
+    engine = make_engine("sqlite:///:memory:")
+    init_db(engine)
+    session_factory = _FailingAfterStartup(make_session_factory(engine))
+    service = IngestService(
+        server,
+        session_factory,
+        StaticGpsFixProvider(GpsFix(lat=47.6062, lon=-122.3321, altitude=15.0, fix_quality=4)),
+        snippet_store=LocalSnippetStore(staging, store_root),
+    )
+    session_factory.failing = True
+    try:
+        with RecordEmitter(socket_path) as emitter:
+            emitter.emit(_snippet_record(staged))
+        with caplog.at_level("WARNING"), pytest.raises(RuntimeError, match="database down"):
+            service.process_one(timeout=2)
+    finally:
+        server.stop()
+    stored = store_root.resolve() / Path(staged).name
+    assert stored.is_file() and stored.with_suffix(".sigmf-meta").is_file()
+    assert repr(str(stored)) in caplog.text
+
+
+class _FailsAtStage:
+    """A session factory whose next session fails at `stage` ("flush",
+    "commit" or "refresh") once armed: the database going away at a known
+    point of persisting a record. Later sessions (the post-failure check)
+    work normally."""
+
+    def __init__(self, real, stage: str) -> None:
+        self._real = real
+        self._stage = stage
+        self.armed = False
+
+    def __call__(self):
+        session = self._real()
+        if self.armed:
+            self.armed = False
+
+            def fail(*args, **kwargs):
+                raise RuntimeError(f"connection lost during {self._stage}")
+
+            setattr(session, self._stage, fail)
+        return session
+
+
+def _persist_failing_at(tmp_path, stage):
+    """Process a snippet record whose persist fails at `stage`, then a plain
+    record in the same grid cell; returns the stored snippet path, the
+    session factory and the second record's grid count."""
+    staging, store_root = tmp_path / "staging", tmp_path / "snippets"
+    staged = _stage_snippet(staging)
+    socket_path = str(tmp_path / "ingest.sock")
+    server = QueueServer(socket_path)
+    server.start()
+    engine = make_engine("sqlite:///:memory:")
+    init_db(engine)
+    session_factory = _FailsAtStage(make_session_factory(engine), stage)
+    service = IngestService(
+        server,
+        session_factory,
+        StaticGpsFixProvider(GpsFix(lat=47.6062, lon=-122.3321, altitude=15.0, fix_quality=4)),
+        snippet_store=LocalSnippetStore(staging, store_root),
+    )
+    session_factory.armed = True
+    try:
+        with RecordEmitter(socket_path) as emitter:
+            emitter.emit(_snippet_record(staged))
+            emitter.emit(_record(lat=10.0, lon=20.0, gps_fix_quality=1))
+        with pytest.raises(RuntimeError, match=f"during {stage}"):
+            service.process_one(timeout=2)
+        next_count = service.process_one(timeout=2).metadata.sample_count_in_grid_cell
+    finally:
+        server.stop()
+    return store_root.resolve() / Path(staged).name, session_factory, next_count
+
+
+def test_a_failure_while_flushing_discards_the_snippet_and_reverts_the_count(tmp_path):
+    """Before COMMIT is issued, a failure means nothing was persisted (and
+    the check confirms no row references the snippet): roll everything back."""
+    stored, session_factory, next_count = _persist_failing_at(tmp_path, "flush")
+    assert not stored.exists() and not stored.with_suffix(".sigmf-meta").exists()
+    assert next_count == 1
+
+
+def test_a_failure_during_commit_keeps_the_snippet_and_the_count(tmp_path):
+    """An in-doubt COMMIT (e.g. the connection drops while Postgres is still
+    completing it) may commit a moment later, after any check could run:
+    never discard then. An orphan, or a count one too high, is acceptable."""
+    stored, session_factory, next_count = _persist_failing_at(tmp_path, "commit")
+    assert stored.is_file() and stored.with_suffix(".sigmf-meta").is_file()
+    assert next_count == 2
+
+
+def test_a_failure_after_commit_keeps_the_snippet_its_row_references(tmp_path):
+    """The row is committed; the refresh that follows fails."""
+    stored, session_factory, next_count = _persist_failing_at(tmp_path, "refresh")
+    assert stored.is_file() and stored.with_suffix(".sigmf-meta").is_file()
+    with session_factory() as session:
+        rows = session.query(SurveyRecord).order_by(SurveyRecord.id).all()
+        assert rows[0].metadata_["iq_snippet_path"] == str(stored)
+    assert next_count == 2
