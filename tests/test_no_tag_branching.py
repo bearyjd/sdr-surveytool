@@ -45,12 +45,30 @@ def references(source: str) -> Counter:
     return found
 
 
+def watched_files() -> list[Path]:
+    """Every .py file under capture/ and ingest/, except vendored third-party
+    trees (any path with a `vendor` directory component)."""
+    return [
+        path
+        for package in ("capture", "ingest")
+        for path in sorted((REPO / package).rglob("*.py"))
+        if "vendor" not in path.relative_to(REPO).parts
+    ]
+
+
+def test_vendored_third_party_code_is_not_scanned():
+    # capture/cellular/vendor/ holds the AGPL LTE-Cell-Scanner submodule,
+    # including Python 2 helpers ast can't parse. It runs as a subprocess
+    # and is not this project's code, so the rule doesn't apply to it.
+    vendored = REPO / "capture" / "cellular" / "vendor" / "lte-cell-scanner" / "pyitpp.py"
+    assert vendored not in set(watched_files())
+
+
 def test_capture_and_ingest_never_branch_on_classification():
     found: Counter = Counter()
-    for package in ("capture", "ingest"):
-        for path in sorted((REPO / package).rglob("*.py")):
-            for (kind, name), count in references(path.read_text()).items():
-                found[str(path.relative_to(REPO)), kind, name] += count
+    for path in watched_files():
+        for (kind, name), count in references(path.read_text()).items():
+            found[str(path.relative_to(REPO)), kind, name] += count
     assert found == ALLOWED
 
 
