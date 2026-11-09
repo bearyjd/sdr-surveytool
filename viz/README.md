@@ -18,5 +18,11 @@ server refuses to start without a token.
   so put TLS in front before binding anything else.
 - `SURVEYTOOL_DATABASE_URL` selects the database (default `sqlite:///survey.db`).
 - `/api/records` takes `limit` (default 100, max 1000) and `offset`.
-- The built-in map page cannot attach the header from a plain browser navigation; use
-  a header-injecting client or reverse proxy until the page gains a token prompt.
+- `/` serves the map shell without authentication: it is a static page with no survey
+  data. It asks for the token in a password field, keeps it in `sessionStorage` only
+  (cleared when the tab closes, never in the URL or `localStorage`), and sends it as
+  `Authorization: Bearer` on every fetch. A 401 re-prompts. Every other route stays closed.
+- Tokens need 32+ characters with 16+ distinct ones; `offset` is capped at 2**31-1.
+- The first `Authorization` header wins: behind a reverse proxy, make sure it sets
+  exactly one. The token is a single shared secret sent over plain HTTP, so use TLS
+  whenever the server is reachable beyond loopback.

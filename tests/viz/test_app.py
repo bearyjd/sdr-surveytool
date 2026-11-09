@@ -8,9 +8,8 @@ from schema.records import Identifier, Modality, Signal, UnifiedRecord
 from storage.db import init_db, make_session_factory
 from storage.repository import save_record
 from viz.app import create_app
-from viz.auth import MIN_TOKEN_LENGTH
 
-TOKEN = "t" * MIN_TOKEN_LENGTH
+TOKEN = "0123456789abcdef" * 2
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
