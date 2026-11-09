@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # anthropic 1.x+/2.x switched to httpx2; tests/agent/test_llm.py injects an
+      # httpx.Client, so stay on the 0.x SDK the tests were written against.
+      - name: Install
+        run: python -m pip install -e ".[dev]" "anthropic>=0.107,<1" ruff
+      # Classic ruff defaults; the repo has no ruff config and newer ruff
+      # releases enable many more rules by default.
+      - name: Lint
+        run: ruff check --select E4,E7,E9,F .
+      - name: Test
+        run: pytest -q
