@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgis/postgis:16-3.4
+    image: postgis/postgis:17-3.4
     environment:
       POSTGRES_USER: surveytool
       POSTGRES_PASSWORD: surveytool
