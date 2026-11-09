@@ -9,6 +9,9 @@ from storage.db import init_db, make_session_factory
 from storage.repository import save_record
 from viz.app import create_app
 
+TOKEN = "0123456789abcdef" * 2
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
+
 
 def _make_memory_engine():
     # FastAPI's TestClient runs request handlers via a portal in a worker
@@ -45,10 +48,10 @@ def test_list_records_returns_seeded_record():
     with session_factory() as session:
         save_record(session, record)
 
-    app = create_app(session_factory)
+    app = create_app(session_factory, api_token=TOKEN)
     client = TestClient(app)
 
-    response = client.get("/api/records")
+    response = client.get("/api/records", headers=AUTH)
     assert response.status_code == 200
     body = response.json()
     assert len(body) == 1
@@ -57,17 +60,17 @@ def test_list_records_returns_seeded_record():
 
 def test_list_records_rejects_out_of_range_limit():
     """An unbounded limit let a caller materialize the whole table, and a
-    negative one became `LIMIT -1` (unbounded) on SQLite. Query(ge=1, le=5000)
+    negative one became `LIMIT -1` (unbounded) on SQLite. Query(ge=1, le=1000)
     makes FastAPI reject both with 422 before the query is built."""
     engine = _make_memory_engine()
     init_db(engine)
     session_factory = make_session_factory(engine)
-    client = TestClient(create_app(session_factory))
+    client = TestClient(create_app(session_factory, api_token=TOKEN))
 
-    assert client.get("/api/records", params={"limit": 999999999}).status_code == 422
-    assert client.get("/api/records", params={"limit": -1}).status_code == 422
-    assert client.get("/api/records", params={"limit": 0}).status_code == 422
-    assert client.get("/api/records", params={"limit": 5000}).status_code == 200
+    assert client.get("/api/records", params={"limit": 999999999}, headers=AUTH).status_code == 422
+    assert client.get("/api/records", params={"limit": -1}, headers=AUTH).status_code == 422
+    assert client.get("/api/records", params={"limit": 0}, headers=AUTH).status_code == 422
+    assert client.get("/api/records", params={"limit": 1000}, headers=AUTH).status_code == 200
 
 
 def test_list_records_filters_by_modality():
@@ -99,10 +102,10 @@ def test_list_records_filters_by_modality():
         save_record(session, wifi_record)
         save_record(session, bt_record)
 
-    app = create_app(session_factory)
+    app = create_app(session_factory, api_token=TOKEN)
     client = TestClient(app)
 
-    response = client.get("/api/records", params={"modality": "bluetooth"})
+    response = client.get("/api/records", params={"modality": "bluetooth"}, headers=AUTH)
     body = response.json()
     assert len(body) == 1
     assert body[0]["modality"] == "bluetooth"
