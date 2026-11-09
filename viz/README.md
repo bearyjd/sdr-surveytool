@@ -26,3 +26,14 @@ server refuses to start without a token.
 - The first `Authorization` header wins: behind a reverse proxy, make sure it sets
   exactly one. The token is a single shared secret sent over plain HTTP, so use TLS
   whenever the server is reachable beyond loopback.
+
+## Page security
+
+- Leaflet 1.9.4 (BSD-2-Clause, (c) Vladimir Agafonkin) is vendored in `viz/static/`
+  and served by the app; the page loads no third-party script. Tests pin its sha256.
+- `viz/static/map.js` renders record fields (SSIDs, BLE names, ...) as DOM text only;
+  never `innerHTML`/string popups. A test scans for this and a node-based test renders
+  hostile records.
+- Every response carries a CSP (no `unsafe-inline` for scripts), `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer`, `nosniff` and `Cache-Control: no-store`.
+- Public paths are exactly `/` and `/static/{map.js,leaflet.js,leaflet.css}`.

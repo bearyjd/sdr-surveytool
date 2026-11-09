@@ -4,10 +4,12 @@ import argparse
 import logging
 import os
 import sys
+from pathlib import Path
 from collections.abc import Sequence
 
 import uvicorn
 from fastapi import Depends, FastAPI, Query
+from fastapi import Request, Response
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
@@ -19,20 +21,22 @@ from viz.auth import ApiTokenError, bearer_dependency, load_api_token, validate_
 
 logger = logging.getLogger(__name__)
 
-# The map shell is a static string with no survey data; its script fetches
-# /api/records with the operator-entered token. Every other route stays closed.
-_PUBLIC_PATHS = frozenset({"/"})
+# The map shell and its three static assets carry no survey data; the script
+# fetches /api/records with the operator-entered token. Exact paths only;
+# every other route stays closed.
+_PUBLIC_PATHS = frozenset({"/", "/static/map.js", "/static/leaflet.js", "/static/leaflet.css"})
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8000
 _DEFAULT_DATABASE_URL = "sqlite:///survey.db"
+
+_STATIC_DIR = Path(__file__).parent / "static"
 
 _MAP_HTML = """<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>Survey Map</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="/static/leaflet.css">
   <style>#map { height: 100vh; }</style>
 </head>
 <body>
@@ -42,43 +46,29 @@ _MAP_HTML = """<!doctype html>
     <div id="msg" role="alert"></div>
   </form>
   <div id="map"></div>
-  <script>
-    const map = L.map('map').setView([0, 0], 2);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-    const KEY = 'surveytoken';
-    const msg = document.getElementById('msg');
-    function load(token) {
-      fetch('/api/records', {headers: {'Authorization': 'Bearer ' + token}}).then(r => {
-        if (r.status === 401) {
-          sessionStorage.removeItem(KEY);
-          msg.textContent = 'Invalid or missing token. Enter the API token.';
-          document.getElementById('login').style.display = 'block';
-          return [];
-        }
-        if (!r.ok) { msg.textContent = 'Request failed (' + r.status + ').'; return []; }
-        document.getElementById('login').style.display = 'none';
-        msg.textContent = '';
-        return r.json();
-      }).then(records => {
-        records.forEach(r => {
-          L.circleMarker([r.lat, r.lon], {radius: 4})
-            .bindPopup(JSON.stringify(r.identifier))
-            .addTo(map);
-        });
-      });
-    }
-    document.getElementById('login').addEventListener('submit', e => {
-      e.preventDefault();
-      const input = document.getElementById('token');
-      sessionStorage.setItem(KEY, input.value);
-      input.value = '';
-      load(sessionStorage.getItem(KEY));
-    });
-    const saved = sessionStorage.getItem(KEY);
-    if (saved) { load(saved); } else { document.getElementById('login').style.display = 'block'; }
-  </script>
+  <script src="/static/leaflet.js"></script>
+  <script src="/static/map.js"></script>
 </body>
 </html>"""
+
+# Leaflet 1.9.4 is vendored (hashes pinned in tests) so the page, which holds
+# the token, loads no third-party script. map.js renders record fields as text only.
+_STATIC_FILES = {
+    "/static/map.js": ("map.js", "text/javascript"),
+    "/static/leaflet.js": ("leaflet.js", "text/javascript"),
+    "/static/leaflet.css": ("leaflet.css", "text/css"),
+}
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' https://*.tile.openstreetmap.org data:; connect-src 'self'; "
+        "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-store",
+}
 
 
 def create_app(session_factory: sessionmaker, api_token: str | None = None) -> FastAPI:
@@ -124,6 +114,25 @@ def create_app(session_factory: sessionmaker, api_token: str | None = None) -> F
                 }
                 for row in rows
             ]
+
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next) -> Response:
+        response = await call_next(request)
+        for name, value in _SECURITY_HEADERS.items():
+            response.headers[name] = value
+        return response
+
+    def _static_route(filename: str, media_type: str) -> None:
+        body = (_STATIC_DIR / filename).read_bytes()
+        app.add_api_route(
+            f"/static/{filename}",
+            lambda: Response(body, media_type=media_type),
+            methods=["GET"],
+            include_in_schema=False,
+        )
+
+    for path, (filename, media_type) in _STATIC_FILES.items():
+        _static_route(filename, media_type)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:

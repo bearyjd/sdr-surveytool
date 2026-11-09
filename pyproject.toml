@@ -50,6 +50,7 @@ packages = [
 [tool.setuptools.package-data]
 agent = ["data/*.json"]
 storage = ["sql/*.sql"]
+viz = ["static/*"]
 
 [tool.pytest.ini_options]
 # importlib mode avoids sys.path/module-name collisions between the
