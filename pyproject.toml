@@ -42,6 +42,7 @@ packages = [
     "capture.unknown",
     "agent",
     "dsp",
+    "gps",
     "ingest",
     "storage",
     "viz",

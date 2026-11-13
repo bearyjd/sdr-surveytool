@@ -14,6 +14,11 @@ def test_gps_fix_quality_is_required():
         _parse_args(["--gps-lat", "47.6", "--gps-lon", "-122.3"])
 
 
+def test_gps_device_makes_fix_quality_optional():
+    args = _parse_args(["--gps-device", "/dev/ttyACM0"])
+    assert args.gps_device == "/dev/ttyACM0" and args.gps_fix_quality is None
+
+
 def test_gps_fix_quality_zero_is_accepted_explicitly():
     args = _parse_args(["--gps-fix-quality", "0"])
     assert args.gps_fix_quality == 0
