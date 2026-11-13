@@ -12,7 +12,7 @@ dependencies = [
     "uvicorn>=0.29",
     "numpy>=1.26",  # capture/unknown DSP; also capture/cellular/testdata/generate_fixture.py
     "sigmf>=1.13",  # capture/unknown snippet files (LGPL-3.0-or-later)
-    "anthropic>=0.107,<1",  # agent/ (Part 4) LLM call; <1: tests inject httpx.Client (1.x+ uses httpx2)
+    "anthropic>=2.8,<3",  # agent/ (Part 4) LLM call; <1: tests inject httpx.Client (1.x+ uses httpx2)
     "psycopg[binary]>=3.2",  # agent/ and storage/agent_boundary.py: PostgreSQL only
 ]
 
