@@ -12,7 +12,8 @@ from pathlib import Path
 
 from sqlalchemy.engine import make_url
 
-from ingest.gps_fix import GpsFix, StaticGpsFixProvider
+from gps.service import DEFAULT_MAX_AGE_S, NmeaGpsFixProvider, open_nmea_lines
+from ingest.gps_fix import GpsFix, GpsFixProvider, StaticGpsFixProvider
 from ingest.queue_server import QueueServer
 from ingest.service import IngestService
 from storage.db import init_db, make_engine, make_session_factory, redacted_url
@@ -68,9 +69,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Reject staged snippets larger than this (default: the largest "
         "snippet any capture configuration can write).",
     )
-    # STAND-IN: the real u-blox GPS reader service (gps/) does not exist yet per
-    # the plan, so ingest is wired to a fixed fix supplied on the command line.
-    # Swap StaticGpsFixProvider for the real provider once gps/ lands.
+    parser.add_argument(
+        "--gps-device",
+        default=None,
+        help="u-blox M8N NMEA serial device (e.g. /dev/ttyACM0). Records are stamped "
+        "with the latest valid GGA fix; with no fix inside --gps-max-age they are left "
+        "un-geotagged. Without it, the fixed --gps-lat/--gps-lon stand-in is used.",
+    )
+    parser.add_argument("--gps-baud", type=int, default=9600)
+    parser.add_argument(
+        "--gps-max-age",
+        type=float,
+        default=DEFAULT_MAX_AGE_S,
+        help="Seconds after which the last GPS fix is considered stale.",
+    )
+    # Fixed-fix stand-in for bench use without a receiver (no --gps-device).
     parser.add_argument("--gps-lat", type=float, default=0.0)
     parser.add_argument("--gps-lon", type=float, default=0.0)
     parser.add_argument("--gps-altitude", type=float, default=None)
@@ -78,8 +91,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--gps-fix-quality",
         type=int,
         default=None,
-        help="NMEA fix quality to stamp on every record. Required -- no real "
-        "GPS provider exists yet, so there is no safe default. A default of "
+        help="NMEA fix quality to stamp on every record. Required without "
+        "--gps-device, as there is no safe default. A default of "
         "1 (a valid fix) would silently mark every record as having a real "
         "GPS fix at whatever --gps-lat/--gps-lon happen to be, which is "
         "indistinguishable from genuine data once persisted. Pass 0 "
@@ -98,9 +111,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 require_absolute(directory)
             except ValueError as exc:
                 parser.error(str(exc))
-    if args.gps_fix_quality is None:
+    if args.gps_device is None and args.gps_fix_quality is None:
         parser.error(
-            "--gps-fix-quality is required until a real GPS provider exists "
+            "--gps-fix-quality is required without --gps-device "
             "(pass 0 to explicitly mark records as fix-less, not a real fix)"
         )
     return args
@@ -136,6 +149,25 @@ def database_url(args: argparse.Namespace) -> str:
     return _DEFAULT_DATABASE_URL
 
 
+def _make_gps_provider(args: argparse.Namespace) -> GpsFixProvider:
+    if args.gps_device is not None:
+        provider = NmeaGpsFixProvider(
+            lambda: open_nmea_lines(args.gps_device, args.gps_baud),
+            max_age_s=args.gps_max_age,
+        )
+        provider.start()
+        logger.info("Reading GPS from %s at %d baud", args.gps_device, args.gps_baud)
+        return provider
+    return StaticGpsFixProvider(
+        GpsFix(
+            lat=args.gps_lat,
+            lon=args.gps_lon,
+            altitude=args.gps_altitude,
+            fix_quality=args.gps_fix_quality,
+        )
+    )
+
+
 def _open_snippet_store(args: argparse.Namespace) -> LocalSnippetStore | None:
     """The snippet store if the operator opted in (both snippet dirs given),
     else None: ingest then runs exactly as without unknown-signal capture,
@@ -165,14 +197,7 @@ def main(argv: list[str] | None = None) -> None:
     init_db(engine)
     session_factory = make_session_factory(engine)
 
-    gps_provider = StaticGpsFixProvider(
-        GpsFix(
-            lat=args.gps_lat,
-            lon=args.gps_lon,
-            altitude=args.gps_altitude,
-            fix_quality=args.gps_fix_quality,
-        )
-    )
+    gps_provider = _make_gps_provider(args)
 
     snippet_store = _open_snippet_store(args)
     server = QueueServer(args.socket_path)

@@ -7,4 +7,4 @@ flag, computes `sample_count_in_grid_cell`, and writes to `storage/`.
 This is the only service that writes to storage — capture plugins never touch it
 directly.
 
-**Status**: not yet implemented.
+**Status**: implemented; see the packages above and tests/ingest.
