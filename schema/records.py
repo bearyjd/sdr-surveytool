@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def without_nul(value: str | None) -> str | None:
@@ -49,6 +50,8 @@ class ClassificationStatus(str, Enum):
 
 
 class Identifier(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
     cell_id: Optional[str] = None
     plmn: Optional[str] = None
     band: Optional[str] = None
@@ -62,6 +65,8 @@ class Identifier(BaseModel):
 
 
 class Signal(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
     rssi: float
     rsrp: Optional[float] = None
     rsrq: Optional[float] = None
@@ -70,6 +75,8 @@ class Signal(BaseModel):
 
 
 class Metadata(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
     encryption_type_if_broadcast_visible: Optional[str] = None
     quality_flags: dict = Field(default_factory=dict)
     sample_count_in_grid_cell: int = 0
@@ -81,11 +88,29 @@ class Metadata(BaseModel):
     confidence: Optional[float] = None
     reasoning: Optional[str] = None
 
+    @field_validator("quality_flags")
+    @classmethod
+    def _quality_flags_finite(cls, v: dict) -> dict:
+        def check(x: Any) -> None:
+            if isinstance(x, float) and not math.isfinite(x):
+                raise ValueError("quality_flags must not contain NaN or infinite floats")
+            if isinstance(x, dict):
+                for item in x.values():
+                    check(item)
+            elif isinstance(x, (list, tuple)):
+                for item in x:
+                    check(item)
+
+        check(v)
+        return v
+
 
 class UnifiedRecord(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
     timestamp: datetime
-    lat: float
-    lon: float
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
     altitude: Optional[float] = None
     gps_fix_quality: Optional[int] = None
     survey_id: str
