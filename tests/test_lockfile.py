@@ -1,7 +1,14 @@
 """requirements-lock.txt must pin every dependency with hashes."""
 import re
-import tomllib
+import sys
 from pathlib import Path
+
+import pytest
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # requires-python is >=3.10; tomllib is 3.11+
+    tomllib = pytest.importorskip("tomli")
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = ROOT / "requirements-lock.txt"
