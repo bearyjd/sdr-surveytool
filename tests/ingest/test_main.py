@@ -5,8 +5,8 @@ import pytest
 from sqlalchemy import create_engine
 
 from ingest import main as ingest_main
-from capture.common.socket_path import default_socket_path
 from ingest.main import _open_snippet_store, _parse_args, database_url
+from schema.socket_path import default_socket_path
 from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES
 
 

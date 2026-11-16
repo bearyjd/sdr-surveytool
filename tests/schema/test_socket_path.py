@@ -3,7 +3,7 @@ import stat
 
 import pytest
 
-from capture.common.socket_path import default_socket_path, ensure_private_socket_dir
+from schema.socket_path import default_socket_path, ensure_private_socket_dir
 
 
 def test_default_uses_xdg_runtime_dir(monkeypatch, tmp_path):

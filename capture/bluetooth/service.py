@@ -8,7 +8,7 @@ from bleak import BleakScanner
 
 from capture.bluetooth.normalizer import normalize_ble_advertisement
 from capture.common.emitter import RecordEmitter
-from capture.common.socket_path import default_socket_path
+from schema.socket_path import default_socket_path
 
 logger = logging.getLogger(__name__)
 

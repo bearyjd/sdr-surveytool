@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Protocol
 import numpy as np
 
 from capture.common.emitter import RecordEmitter
-from capture.common.socket_path import default_socket_path
 from capture.unknown.energy_trigger import TriggerConfig, TriggerEvent, record_trigger
 from capture.unknown.normalizer import SnippetCaptureEvent, normalize_snippet_event
 from capture.unknown.sample_clock import SampleClock
@@ -32,6 +31,7 @@ from dsp.spectral import (
     peak_power_dbfs,
 )
 from schema.records import UnifiedRecord
+from schema.socket_path import default_socket_path
 from storage.snippet_store import ensure_private_dir, require_absolute
 
 if TYPE_CHECKING:

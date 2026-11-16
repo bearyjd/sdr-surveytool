@@ -4,9 +4,9 @@ import logging
 import time
 
 from capture.common.emitter import RecordEmitter
-from capture.common.socket_path import default_socket_path
 from capture.wifi.kismet_client import KismetClient
 from capture.wifi.normalizer import normalize_kismet_device
+from schema.socket_path import default_socket_path
 
 logger = logging.getLogger(__name__)
 
