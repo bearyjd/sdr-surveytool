@@ -23,6 +23,10 @@ for the full architecture design.
 
 ## Deployment notes
 
+- The default ingest socket lives under each process's own `XDG_RUNTIME_DIR`. Under
+  `sudo` or as a system service that differs from the capture user's, so capture
+  would silently target a different socket. In those setups pass the same
+  `--socket-path` explicitly to ingest and every capture process.
 - Storing unknown-signal IQ snippets is **opt-in** for ingest: pass both
   `--snippet-staging-dir` and `--snippet-store-dir`. Without them, ingest starts as
   for WiFi/BT-only deployments and keeps unknown-signal records without IQ. When

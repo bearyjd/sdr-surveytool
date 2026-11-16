@@ -32,7 +32,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--socket-path",
         default=default_socket_path(),
-        help="Unix domain socket that capture processes connect to.",
+        help="Unix domain socket for ingest. Default is under this process's XDG_RUNTIME_DIR, so under sudo or a system service set --socket-path explicitly (same value for ingest and capture).",
     )
     parser.add_argument(
         "--database-url",

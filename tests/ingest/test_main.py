@@ -183,3 +183,10 @@ def test_ingest_startup_never_logs_the_database_password(monkeypatch, caplog, ur
 def test_socket_path_default_is_not_bare_tmp():
     args = _parse_args(["--gps-fix-quality", "0"])
     assert args.socket_path != "/tmp/sdr-ingest.sock"
+
+
+def test_socket_path_help_warns_about_explicit_path(capsys):
+    with pytest.raises(SystemExit):
+        _parse_args(["--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "set --socket-path explicitly" in out
