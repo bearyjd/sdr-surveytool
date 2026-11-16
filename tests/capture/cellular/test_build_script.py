@@ -11,3 +11,8 @@ def test_itpp_clone_is_pinned_to_commit_sha():
     assert re.search(r"git -C \"\$ITPP_SRC\" checkout --detach [0-9a-f]{40}\b", text), (
         "build.sh must check out a pinned 40-hex IT++ commit after cloning"
     )
+
+
+def test_build_script_aborts_on_error():
+    # Without errexit a failed pinned checkout would silently build upstream HEAD.
+    assert re.search(r"^set -[a-z]*e[a-z]*\b", BUILD_SH.read_text(), re.MULTILINE)
