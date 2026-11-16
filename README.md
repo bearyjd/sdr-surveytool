@@ -23,6 +23,9 @@ for the full architecture design.
 
 ## Deployment notes
 
+- `docker compose up` requires `POSTGRES_PASSWORD` (no default). Copy `.env.example` to
+  `.env` (gitignored) and set it. Existing dev volumes keep the old password: set it to
+  `surveytool` or recreate the volume.
 - Storing unknown-signal IQ snippets is **opt-in** for ingest: pass both
   `--snippet-staging-dir` and `--snippet-store-dir`. Without them, ingest starts as
   for WiFi/BT-only deployments and keeps unknown-signal records without IQ. When
