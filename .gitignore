@@ -31,3 +31,6 @@ data/
 
 # Subagent-driven-development scratch workspace (ledgers, briefs, review packages)
 .superpowers/
+
+# Local secrets (compose reads POSTGRES_PASSWORD from .env)
+.env

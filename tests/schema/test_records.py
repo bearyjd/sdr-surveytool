@@ -76,3 +76,51 @@ def test_a_nul_character_anywhere_is_rejected(overrides, where):
     would fail every read of the agent's view and every jsonb cast."""
     with pytest.raises(ValidationError, match=rf"{re.escape(where)} holds a NUL character"):
         _make_record(**overrides)
+
+
+_BASE_JSON = (
+    '{"timestamp": "2026-01-01T00:00:00Z", "lat": %s, "lon": %s, "survey_id": "s",'
+    ' "operator_id": "o", "modality": "wifi", "identifier": {}, "signal": {"rssi": %s}}'
+)
+
+
+@pytest.mark.parametrize(
+    "lat,lon,rssi",
+    [
+        ("NaN", "0", "-50"),
+        ("0", "Infinity", "-50"),
+        ("0", "0", "NaN"),
+        ("0", "0", "-Infinity"),
+        ("91", "0", "-50"),
+        ("0", "-181", "-50"),
+        ("1e999", "0", "-50"),
+    ],
+)
+def test_record_rejects_non_finite_and_out_of_range_json(lat, lon, rssi):
+    with pytest.raises(ValidationError):
+        UnifiedRecord.model_validate_json(_BASE_JSON % (lat, lon, rssi))
+
+
+def test_record_rejects_non_finite_optional_float():
+    with pytest.raises(ValidationError):
+        _make_record(identifier=Identifier(center_freq=float("inf")))
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_metadata_rejects_non_finite_in_quality_flags(bad):
+    with pytest.raises(ValidationError):
+        Metadata(quality_flags={"a": bad})
+    with pytest.raises(ValidationError):
+        Metadata(quality_flags={"a": {"b": [1.0, bad]}})
+
+
+def test_metadata_rejects_non_finite_quality_flags_json():
+    with pytest.raises(ValidationError):
+        Metadata.model_validate_json('{"quality_flags": {"a": 1e999}}')
+    with pytest.raises(ValidationError):
+        Metadata.model_validate_json('{"quality_flags": {"a": NaN}}')
+
+
+def test_metadata_accepts_finite_quality_flags():
+    m = Metadata(quality_flags={"a": 1.5, "b": [1, {"c": 2.0}], "d": "x"})
+    assert m.quality_flags["a"] == 1.5
