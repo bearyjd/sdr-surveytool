@@ -11,10 +11,10 @@ class KismetClient:
         self._api_key = api_key
 
     def get_wifi_devices(self) -> list[dict]:
-        params = {"KISMET": self._api_key} if self._api_key else {}
+        headers = {"Cookie": f"KISMET={self._api_key}"} if self._api_key else {}
         response = requests.get(
             f"{self._base_url}/phy/phy80211/devices/all_devices.json",
-            params=params,
+            headers=headers,
             timeout=5,
         )
         response.raise_for_status()
