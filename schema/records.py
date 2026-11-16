@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def without_nul(value: str | None) -> str | None:
@@ -86,6 +87,22 @@ class Metadata(BaseModel):
     tag: Optional[str] = None
     confidence: Optional[float] = None
     reasoning: Optional[str] = None
+
+    @field_validator("quality_flags")
+    @classmethod
+    def _quality_flags_finite(cls, v: dict) -> dict:
+        def check(x: Any) -> None:
+            if isinstance(x, float) and not math.isfinite(x):
+                raise ValueError("quality_flags must not contain NaN or infinite floats")
+            if isinstance(x, dict):
+                for item in x.values():
+                    check(item)
+            elif isinstance(x, (list, tuple)):
+                for item in x:
+                    check(item)
+
+        check(v)
+        return v
 
 
 class UnifiedRecord(BaseModel):

@@ -104,3 +104,23 @@ def test_record_rejects_non_finite_and_out_of_range_json(lat, lon, rssi):
 def test_record_rejects_non_finite_optional_float():
     with pytest.raises(ValidationError):
         _make_record(identifier=Identifier(center_freq=float("inf")))
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_metadata_rejects_non_finite_in_quality_flags(bad):
+    with pytest.raises(ValidationError):
+        Metadata(quality_flags={"a": bad})
+    with pytest.raises(ValidationError):
+        Metadata(quality_flags={"a": {"b": [1.0, bad]}})
+
+
+def test_metadata_rejects_non_finite_quality_flags_json():
+    with pytest.raises(ValidationError):
+        Metadata.model_validate_json('{"quality_flags": {"a": 1e999}}')
+    with pytest.raises(ValidationError):
+        Metadata.model_validate_json('{"quality_flags": {"a": NaN}}')
+
+
+def test_metadata_accepts_finite_quality_flags():
+    m = Metadata(quality_flags={"a": 1.5, "b": [1, {"c": 2.0}], "d": "x"})
+    assert m.quality_flags["a"] == 1.5
