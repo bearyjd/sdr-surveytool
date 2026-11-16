@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import create_engine
 
 from ingest import main as ingest_main
+from capture.common.socket_path import default_socket_path
 from ingest.main import _open_snippet_store, _parse_args, database_url
 from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES
 
@@ -174,6 +175,11 @@ def test_ingest_startup_never_logs_the_database_password(monkeypatch, caplog, ur
             ingest_main.main(["--gps-fix-quality", "0"])
     finally:
         engine.dispose()
-    assert "Ingest listening on /tmp/sdr-ingest.sock -> postgresql://ingest" in caplog.text
+    assert f"Ingest listening on {default_socket_path()} -> postgresql://ingest" in caplog.text
     assert "db.example/surveytool" in caplog.text
     assert "s3cret" not in caplog.text
+
+
+def test_socket_path_default_is_not_bare_tmp():
+    args = _parse_args(["--gps-fix-quality", "0"])
+    assert args.socket_path != "/tmp/sdr-ingest.sock"

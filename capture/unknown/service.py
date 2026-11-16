@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Protocol
 import numpy as np
 
 from capture.common.emitter import RecordEmitter
+from capture.common.socket_path import default_socket_path
 from capture.unknown.energy_trigger import TriggerConfig, TriggerEvent, record_trigger
 from capture.unknown.normalizer import SnippetCaptureEvent, normalize_snippet_event
 from capture.unknown.sample_clock import SampleClock
@@ -734,7 +735,7 @@ def _parse_args(argv: list[str] | None = None) -> tuple[CaptureSettings, argpars
     parser = argparse.ArgumentParser(
         description="Unknown-signal energy-triggered IQ capture -> ingest queue"
     )
-    parser.add_argument("--socket-path", default="/tmp/sdr-ingest.sock")
+    parser.add_argument("--socket-path", default=default_socket_path())
     parser.add_argument("--survey-id", required=True)
     parser.add_argument("--operator-id", required=True)
     _add_radio_args(parser)

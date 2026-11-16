@@ -15,6 +15,7 @@ from sqlalchemy.engine import make_url
 from ingest.gps_fix import GpsFix, StaticGpsFixProvider
 from ingest.queue_server import QueueServer
 from ingest.service import IngestService
+from capture.common.socket_path import default_socket_path, ensure_private_socket_dir
 from storage.db import init_db, make_engine, make_session_factory, redacted_url
 from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES, LocalSnippetStore, require_absolute
 
@@ -30,7 +31,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SDR survey ingest service")
     parser.add_argument(
         "--socket-path",
-        default="/tmp/sdr-ingest.sock",
+        default=default_socket_path(),
         help="Unix domain socket that capture processes connect to.",
     )
     parser.add_argument(
@@ -175,6 +176,8 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     snippet_store = _open_snippet_store(args)
+    if args.socket_path == default_socket_path():
+        ensure_private_socket_dir(args.socket_path)
     server = QueueServer(args.socket_path)
     server.start()
     service = IngestService(server, session_factory, gps_provider, snippet_store=snippet_store)

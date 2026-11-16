@@ -1,4 +1,5 @@
 # tests/capture/unknown/test_service.py
+from capture.common.socket_path import default_socket_path
 import gc
 import logging
 import math
@@ -758,7 +759,7 @@ def test_cli_requires_noise_floor_and_builds_settings():
     assert settings.min_free_bytes == 2 * 1024**3
     assert settings.max_clock_drift_seconds == 2.0
     assert settings.max_snippet_memory_bytes == 2 * 1024**3
-    assert args.socket_path == "/tmp/sdr-ingest.sock"
+    assert args.socket_path == default_socket_path()
 
 
 def test_cli_rejects_a_relative_staging_dir_with_usage_error():

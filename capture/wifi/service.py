@@ -4,6 +4,7 @@ import logging
 import time
 
 from capture.common.emitter import RecordEmitter
+from capture.common.socket_path import default_socket_path
 from capture.wifi.kismet_client import KismetClient
 from capture.wifi.normalizer import normalize_kismet_device
 
@@ -62,7 +63,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Kismet WiFi capture -> ingest queue")
     parser.add_argument("--kismet-url", default="http://localhost:2501")
-    parser.add_argument("--socket-path", default="/tmp/sdr-ingest.sock")
+    parser.add_argument("--socket-path", default=default_socket_path())
     parser.add_argument("--survey-id", required=True)
     parser.add_argument("--operator-id", required=True)
     parser.add_argument("--poll-interval", type=float, default=2.0)
