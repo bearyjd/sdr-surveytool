@@ -25,7 +25,7 @@ from capture.unknown.service import CaptureSettings, process_snippet
 from capture.unknown.snippet_assembler import CapturedSnippet
 from capture.unknown.snippet_writer import THRESHOLD_KEY
 from schema.records import ClassificationStatus, Modality, UnifiedRecord
-from schema.socket_path import default_socket_path
+from storage.socket_path import default_socket_path
 from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES
 
 FS = 100_000.0

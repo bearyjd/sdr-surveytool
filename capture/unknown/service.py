@@ -31,7 +31,7 @@ from dsp.spectral import (
     peak_power_dbfs,
 )
 from schema.records import UnifiedRecord
-from schema.socket_path import default_socket_path
+from storage.socket_path import default_socket_path
 from storage.snippet_store import ensure_private_dir, require_absolute
 
 if TYPE_CHECKING:

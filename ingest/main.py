@@ -15,7 +15,7 @@ from sqlalchemy.engine import make_url
 from ingest.gps_fix import GpsFix, StaticGpsFixProvider
 from ingest.queue_server import QueueServer
 from ingest.service import IngestService
-from schema.socket_path import default_socket_path, ensure_private_socket_dir
+from storage.socket_path import default_socket_path, ensure_private_socket_dir
 from storage.db import init_db, make_engine, make_session_factory, redacted_url
 from storage.snippet_store import DEFAULT_MAX_SNIPPET_BYTES, LocalSnippetStore, require_absolute
 
