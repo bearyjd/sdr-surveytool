@@ -20,3 +20,9 @@ def test_password_required_from_env_without_default():
 def test_port_bound_to_loopback_only():
     for port in _postgres()["ports"]:
         assert str(port).startswith("127.0.0.1:"), port
+
+
+def test_dotenv_is_gitignored_and_example_shipped():
+    root = COMPOSE.parent
+    assert ".env" in (root / ".gitignore").read_text().splitlines()
+    assert (root / ".env.example").read_text().startswith("POSTGRES_PASSWORD=")
