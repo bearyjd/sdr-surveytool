@@ -29,6 +29,7 @@ sdr-agent-boundary = "storage.agent_boundary:main"
 dev = [
     "pytest>=8.0",
     "httpx>=0.27",
+    "pyyaml>=6.0",
 ]
 
 [tool.setuptools]
