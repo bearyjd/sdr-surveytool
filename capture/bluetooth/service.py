@@ -8,6 +8,7 @@ from bleak import BleakScanner
 
 from capture.bluetooth.normalizer import normalize_ble_advertisement
 from capture.common.emitter import RecordEmitter
+from storage.socket_path import default_socket_path
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,11 @@ async def _scan_once(
 def main() -> None:
     """CLI entry point (`sdr-capture-bluetooth`)."""
     parser = argparse.ArgumentParser(description="BLE capture -> ingest queue")
-    parser.add_argument("--socket-path", default="/tmp/sdr-ingest.sock")
+    parser.add_argument(
+        "--socket-path",
+        default=default_socket_path(),
+        help="Unix domain socket for ingest. Default is under this process's XDG_RUNTIME_DIR, so under sudo or a system service set --socket-path explicitly (same value for ingest and capture).",
+    )
     parser.add_argument("--survey-id", required=True)
     parser.add_argument("--operator-id", required=True)
     parser.add_argument("--scan-seconds", type=float, default=5.0)

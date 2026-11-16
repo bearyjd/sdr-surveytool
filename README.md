@@ -23,6 +23,10 @@ for the full architecture design.
 
 ## Deployment notes
 
+- The default ingest socket lives under each process's own `XDG_RUNTIME_DIR`. Under
+  `sudo` or as a system service that differs from the capture user's, so capture
+  would silently target a different socket. In those setups pass the same
+  `--socket-path` explicitly to ingest and every capture process.
 - `docker compose up` requires `POSTGRES_PASSWORD` (no default). Copy `.env.example` to
   `.env` (gitignored) and set it. Existing dev volumes keep the old password: set it to
   `surveytool` or recreate the volume.

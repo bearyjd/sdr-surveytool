@@ -6,6 +6,7 @@ import time
 from capture.common.emitter import RecordEmitter
 from capture.wifi.kismet_client import KismetClient
 from capture.wifi.normalizer import normalize_kismet_device
+from storage.socket_path import default_socket_path
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,11 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Kismet WiFi capture -> ingest queue")
     parser.add_argument("--kismet-url", default="http://localhost:2501")
-    parser.add_argument("--socket-path", default="/tmp/sdr-ingest.sock")
+    parser.add_argument(
+        "--socket-path",
+        default=default_socket_path(),
+        help="Unix domain socket for ingest. Default is under this process's XDG_RUNTIME_DIR, so under sudo or a system service set --socket-path explicitly (same value for ingest and capture).",
+    )
     parser.add_argument("--survey-id", required=True)
     parser.add_argument("--operator-id", required=True)
     parser.add_argument("--poll-interval", type=float, default=2.0)

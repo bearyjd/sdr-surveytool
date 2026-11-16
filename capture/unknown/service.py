@@ -31,6 +31,7 @@ from dsp.spectral import (
     peak_power_dbfs,
 )
 from schema.records import UnifiedRecord
+from storage.socket_path import default_socket_path
 from storage.snippet_store import ensure_private_dir, require_absolute
 
 if TYPE_CHECKING:
@@ -734,7 +735,11 @@ def _parse_args(argv: list[str] | None = None) -> tuple[CaptureSettings, argpars
     parser = argparse.ArgumentParser(
         description="Unknown-signal energy-triggered IQ capture -> ingest queue"
     )
-    parser.add_argument("--socket-path", default="/tmp/sdr-ingest.sock")
+    parser.add_argument(
+        "--socket-path",
+        default=default_socket_path(),
+        help="Unix domain socket for ingest. Default is under this process's XDG_RUNTIME_DIR, so under sudo or a system service set --socket-path explicitly (same value for ingest and capture).",
+    )
     parser.add_argument("--survey-id", required=True)
     parser.add_argument("--operator-id", required=True)
     _add_radio_args(parser)
