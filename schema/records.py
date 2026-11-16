@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def without_nul(value: str | None) -> str | None:
@@ -49,6 +49,8 @@ class ClassificationStatus(str, Enum):
 
 
 class Identifier(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
     cell_id: Optional[str] = None
     plmn: Optional[str] = None
     band: Optional[str] = None
@@ -62,6 +64,8 @@ class Identifier(BaseModel):
 
 
 class Signal(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
     rssi: float
     rsrp: Optional[float] = None
     rsrq: Optional[float] = None
@@ -70,6 +74,8 @@ class Signal(BaseModel):
 
 
 class Metadata(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
     encryption_type_if_broadcast_visible: Optional[str] = None
     quality_flags: dict = Field(default_factory=dict)
     sample_count_in_grid_cell: int = 0
@@ -83,9 +89,11 @@ class Metadata(BaseModel):
 
 
 class UnifiedRecord(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
     timestamp: datetime
-    lat: float
-    lon: float
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
     altitude: Optional[float] = None
     gps_fix_quality: Optional[int] = None
     survey_id: str
