@@ -24,7 +24,10 @@ sudo dnf install -y rtl-sdr-devel boost-devel fftw-devel ncurses-devel \
 if ! ldconfig -p | grep -q libitpp; then
     echo "== Building IT++ from source (not packaged on Fedora) =="
     ITPP_SRC="$(mktemp -d)"
-    git clone --depth 1 https://git.code.sf.net/p/itpp/git "$ITPP_SRC"
+    # Pinned to the commit behind tag r4.3.0 (62db13e5...): this source is built
+    # and installed with sudo, so it must not follow upstream HEAD.
+    git clone https://git.code.sf.net/p/itpp/git "$ITPP_SRC"
+    git -C "$ITPP_SRC" checkout --detach 62db13e517f26c633d17b998ce98ab48a93d48fe
     mkdir "$ITPP_SRC/build"
     (
         cd "$ITPP_SRC/build"
