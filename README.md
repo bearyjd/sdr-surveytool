@@ -27,6 +27,10 @@ for the full architecture design.
   `sudo` or as a system service that differs from the capture user's, so capture
   would silently target a different socket. In those setups pass the same
   `--socket-path` explicitly to ingest and every capture process.
+- The Kismet API key is sent on every poll. Point `KismetClient` at an `https://`
+  Kismet URL (for example behind a TLS reverse proxy) unless Kismet runs on the same
+  host. With a key and a non-localhost `http://` URL it logs a warning, because the key
+  would cross the network in cleartext.
 - `docker compose up` requires `POSTGRES_PASSWORD` (no default). Copy `.env.example` to
   `.env` (gitignored) and set it. Existing dev volumes keep the old password: set it to
   `surveytool` or recreate the volume.
