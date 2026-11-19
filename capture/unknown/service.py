@@ -30,6 +30,7 @@ from dsp.spectral import (
     occupied_bandwidth,
     peak_power_dbfs,
 )
+from schema.keys import IQ_SNIPPET_PATH, SNIPPET_DROPPED
 from schema.records import UnifiedRecord
 from storage.socket_path import default_socket_path
 from storage.snippet_store import ensure_private_dir, require_absolute
@@ -221,7 +222,7 @@ def _write_snippet(snippet: CapturedSnippet, settings: CaptureSettings) -> str:
 
 
 def _with_snippet_path(record: UnifiedRecord, snippet_path: str) -> UnifiedRecord:
-    metadata = record.metadata.model_copy(update={"iq_snippet_path": snippet_path})
+    metadata = record.metadata.model_copy(update={IQ_SNIPPET_PATH: snippet_path})
     return record.model_copy(update={"metadata": metadata})
 
 
@@ -426,7 +427,7 @@ def _emit_without_snippet(
     """The detection and its measurements survive when the IQ can't be kept:
     emit the record with no snippet path, flagged, like ingest does for a
     rejected snippet."""
-    flags = {**measured.metadata.quality_flags, "snippet_dropped": reason}
+    flags = {**measured.metadata.quality_flags, SNIPPET_DROPPED: reason}
     metadata = measured.metadata.model_copy(update={"quality_flags": flags})
     try:
         emitter.emit(measured.model_copy(update={"metadata": metadata}))
