@@ -1,5 +1,7 @@
 import ast
 import inspect
+import os
+import stat
 import threading
 import time
 from datetime import datetime, timezone
@@ -456,3 +458,32 @@ def test_start_publishes_new_queue_before_incrementing_generation():
         "start() increments self._generation before installing the new queue; "
         "swap the order so the queue is published first."
     )
+
+
+def test_start_creates_socket_0600_under_permissive_umask(tmp_path):
+    socket_path = str(tmp_path / "ingest.sock")
+    old = os.umask(0)
+    try:
+        server = QueueServer(socket_path)
+        server.start()
+        try:
+            assert stat.S_IMODE(os.stat(socket_path).st_mode) == 0o600
+            assert os.umask(0) == 0
+        finally:
+            server.stop()
+    finally:
+        os.umask(old)
+
+
+def test_umask_restored_when_bind_fails(tmp_path):
+    too_long = str(tmp_path / ("x" * 200))
+    occupied = tmp_path / "file.sock"
+    occupied.write_text("not a socket")
+    old = os.umask(0o022)
+    try:
+        for path in (too_long, str(occupied)):
+            with pytest.raises((OSError, RuntimeError)):
+                QueueServer(path).start()
+            assert os.umask(0o022) == 0o022
+    finally:
+        os.umask(old)

@@ -96,10 +96,17 @@ class QueueServer:
                 raise
 
             self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self._server_sock.bind(self._socket_path)
+            # Create the socket file 0600 from the start so there is no window
+            # between bind() and chmod(). umask is process-global; acceptable
+            # because start() runs at boot, and it is restored in finally.
+            old_umask = os.umask(0o177)
+            try:
+                self._server_sock.bind(self._socket_path)
+            finally:
+                os.umask(old_umask)
             # From here on the socket file is ours, so cleanup may remove it.
             self._owns_socket_file = True
-            # Restrict permissions to owner only (0o600)
+            # Defense in depth: enforce owner-only (0o600) even if umask handling changes
             os.chmod(self._socket_path, 0o600)
             self._server_sock.listen(8)
             self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
