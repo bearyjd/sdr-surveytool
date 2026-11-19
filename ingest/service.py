@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from ingest.gps_fix import GpsFixProvider
 from ingest.grid import grid_cell_key
 from ingest.queue_server import QueueServer
+from schema.keys import IQ_SNIPPET_PATH, SNIPPET_REJECTED
 from schema.records import UnifiedRecord
 from storage.models import SurveyRecord
 from storage.repository import add_record
@@ -163,7 +164,7 @@ class IngestService:
             final = self._snippet_store.adopt(staged)
         except SnippetRejected as rejection:
             return self._without_snippet(record, rejection.reason, str(rejection))
-        updated_metadata = record.metadata.model_copy(update={"iq_snippet_path": final})
+        updated_metadata = record.metadata.model_copy(update={IQ_SNIPPET_PATH: final})
         return record.model_copy(update={"metadata": updated_metadata})
 
     def _is_referenced(self, stored_path: str) -> bool | None:
@@ -179,7 +180,7 @@ class IngestService:
                 return (
                     session.execute(
                         select(SurveyRecord.id)
-                        .where(SurveyRecord.metadata_["iq_snippet_path"].as_string() == stored_path)
+                        .where(SurveyRecord.metadata_[IQ_SNIPPET_PATH].as_string() == stored_path)
                         .limit(1)
                     ).first()
                     is not None
@@ -212,8 +213,8 @@ class IngestService:
         )
         updated_metadata = record.metadata.model_copy(
             update={
-                "iq_snippet_path": None,
-                "quality_flags": {**record.metadata.quality_flags, "snippet_rejected": reason},
+                IQ_SNIPPET_PATH: None,
+                "quality_flags": {**record.metadata.quality_flags, SNIPPET_REJECTED: reason},
             }
         )
         return record.model_copy(update={"metadata": updated_metadata})
