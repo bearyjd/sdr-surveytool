@@ -190,3 +190,36 @@ def test_socket_path_help_warns_about_explicit_path(capsys):
         _parse_args(["--help"])
     out = " ".join(capsys.readouterr().out.split())
     assert "set --socket-path explicitly" in out
+
+
+def test_gps_device_does_not_require_fix_quality():
+    args = _parse_args(["--gps-device", "/dev/ttyACM0", "--gps-baud", "9600"])
+    assert (args.gps_device, args.gps_baud) == ("/dev/ttyACM0", 9600)
+
+
+def test_gps_baud_defaults_to_9600():
+    assert _parse_args(["--gps-device", "/dev/ttyACM0"]).gps_baud == 9600
+
+
+def test_build_gps_provider_static_fallback():
+    from ingest.gps_fix import StaticGpsFixProvider
+
+    args = _parse_args(["--gps-fix-quality", "0"])
+    assert isinstance(ingest_main._build_gps_provider(args), StaticGpsFixProvider)
+
+
+def test_build_gps_provider_real_device(monkeypatch):
+    seen = {}
+
+    class FakeProvider:
+        def start(self):
+            seen["started"] = True
+
+    def fake_open(device, baud):
+        seen["open"] = (device, baud)
+        return FakeProvider()
+
+    monkeypatch.setattr("ingest.main.open_ublox_provider", fake_open)
+    args = _parse_args(["--gps-device", "/dev/ttyACM0", "--gps-baud", "38400"])
+    ingest_main._build_gps_provider(args)
+    assert seen == {"open": ("/dev/ttyACM0", 38400), "started": True}

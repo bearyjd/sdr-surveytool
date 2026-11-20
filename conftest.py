@@ -13,6 +13,7 @@ if str(project_root) not in sys.path:
 # finder can supply them -- in a git worktree, the user-site editable install
 # pointing at the main checkout. See tests/ingest/test_import_resolution.py.
 import capture  # noqa: E402,F401
+import gps  # noqa: E402,F401
 import ingest  # noqa: E402,F401
 import schema  # noqa: E402,F401
 import storage  # noqa: E402,F401
