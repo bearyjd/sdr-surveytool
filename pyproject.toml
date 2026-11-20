@@ -14,6 +14,7 @@ dependencies = [
     "sigmf>=1.13",  # capture/unknown snippet files (LGPL-3.0-or-later)
     "anthropic>=0.107,<1",  # agent/ (Part 4) LLM call; <1: tests inject httpx.Client (1.x+ uses httpx2)
     "psycopg[binary]>=3.2",  # agent/ and storage/agent_boundary.py: PostgreSQL only
+    "pyserial>=3.5",  # gps/ u-blox NMEA serial reader
 ]
 
 [project.scripts]
@@ -43,6 +44,7 @@ packages = [
     "capture.unknown",
     "agent",
     "dsp",
+    "gps",
     "ingest",
     "storage",
     "viz",
