@@ -8,9 +8,9 @@ annotated-types==0.8.0 \
     --hash=sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7 \
     --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
     # via pydantic
-anthropic==0.125.0 \
-    --hash=sha256:3486013602eca76d8b12540764e53654f02cf4951110bca86cf06e67428a9f21 \
-    --hash=sha256:e0cdd336580cb7411c1cdab69f80973e9bf4bff7f8e08141811d46307d45c682
+anthropic==2.14.0 \
+    --hash=sha256:5cf986851f61c0858ac88c6f7c28490369a68ff4a89c309849605b764da0664d \
+    --hash=sha256:afb02f4df8efba429ff769bbfd71340d8b244b41ba42c073a45cc307702549fe
     # via sdr-surveytool (pyproject.toml)
 anyio==4.16.0 \
     --hash=sha256:59bb03251907983d1603d27c3087ddb1e93299ea2163adcdba37899a4fb12ffb \
